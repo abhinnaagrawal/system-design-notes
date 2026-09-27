@@ -35,11 +35,31 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Chapter 26 - Payment System](./26.%20Payment%20System/)
  * [Chapter 27 - Digital Wallet](./27.%20%20Digital%20Wallet/)
  * [Chapter 28 - Stock Exchange](./28.%20Stock%20Exchange/)
+ * [Chapter 29 - Design a Tagging Service](./29.%20Tagging%20Service/)
+ * [Chapter 30 - Distributed Rate Limiter (5+ Approaches)](./30.%20Distributed%20Rate%20Limiter/)
+ * [Chapter 31 - Distributed Job Scheduler (6+ Approaches)](./31.%20Distributed%20Job%20Scheduler/)
 
+## Study Guides
+ * [Core Building Blocks & Technologies](./Building_Blocks.md)
+
+## Core Concepts
+ * [WebSockets Crash Course](./Core%20Concepts/WebSockets/)
+ * [Encryption & TLS (1.2 vs 1.3)](./Core%20Concepts/Encryption%20and%20TLS/)
+ * [Authentication & Authorization (JWT, OAuth, RBAC, ABAC)](./Core%20Concepts/Authentication%20and%20Authorization/)
+ * [Networking Foundations (OSI, NAT, Proxies, L4/L7 Load Balancing)](./Core%20Concepts/Networking%20Foundations/)
+ * [DNS and CDNs](./Core%20Concepts/DNS%20and%20CDN/)
+ * [gRPC (Google RPC)](./Core%20Concepts/gRPC/)
+ * [Geospatial Indexes (QuadTrees, Geohashing, Hilbert Curves)](./Core%20Concepts/Geospatial%20Indexes/)
+ * [Advanced Data Structures (Merkle, Segment, Fenwick, Sqrt Decomp)](./Core%20Concepts/Advanced%20Data%20Structures/)
+ * [Consistent Hashing](./Core%20Concepts/Consistent%20Hashing/)
+ * [Message Brokers & Strong Consistency](./Core%20Concepts/Message%20Brokers%20and%20Consistency/)
+ * [Partial Failures & Idempotency](./Core%20Concepts/Partial%20Failures/)
+ * [Database Indexes & The RUM Conjecture](./Core%20Concepts/Database%20Indexes/)
 
 # Additonal Resources
 
 ### Rate Limiting
+- [Rate Limiter (5+ Approaches) - System Design Fight Club](https://www.youtube.com/watch?v=NvQXO7tleDI)
 - [Circuit Breaker Algorithm](https://martinfowler.com/bliki/CircuitBreaker.html)
 - [Uber Rate Limiter](https://github.com/uber-go/ratelimit/blob/master/ratelimit.go)
 
@@ -95,3 +115,14 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 - [Differential Synchronization](https://neil.fraser.name/writing/sync/)
 - [Differential Synchronization Video](https://www.youtube.com/watch?v=S2Hp_1jqpY8)
 - [How We’ve Scaled Dropbox](https://www.youtube.com/watch?v=PE4gwstWhmc&feature=youtu.be)
+
+
+### Tagging Service
+- [System Design: Tagging Service (System Design Fight Club)](https://www.youtube.com/watch?v=WNIR7eiv0Hk)
+- [Design a Tagging System (LeetCode Discussion)](https://leetcode.com/discuss/interview-question/system-design/838025/Design-a-tagging-system-like-tags-used-in-stack-overflow)
+
+
+### Job Scheduler
+- [Job Scheduler (6+ Approaches) - System Design Fight Club](https://www.youtube.com/watch?v=ur3ioZhwG8w)
+
+
