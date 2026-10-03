@@ -24,11 +24,14 @@ This skill automates extracting, analyzing, and documenting technology deep-dive
    ```
 2. The script extracts title, channel name, duration, and the full transcript with timestamps. It also extracts the video description (`shortDescription`).
 3. **CRITICAL:** Ensure you read the *entire* transcript. If the JSON is too large for a single command output, read it in paginated chunks (e.g., 200 snippets at a time) so you do not miss the second half of the video.
-4. **CRITICAL:** Check the extracted `shortDescription` metadata. If the video description contains links to diagrams (like Excalidraw, Lucidchart) or external text notes, you must extract and use those links as well. If they are visual diagrams, translate the core structural concepts into Mermaid diagrams in your final notes.
+4. **CRITICAL:** Check the extracted `shortDescription` metadata. If the video description contains links to diagrams (like Excalidraw, Lucidchart) or external text notes, you must extract and use those links as well. If it is an Excalidraw link, DO NOT attempt to extract the SVG via playwright or curl. Instead, STOP and PROMPT the USER to upload a screenshot of the Excalidraw canvas so you can translate it into Mermaid diagrams later.
 
 ---
 
 ### Step 2: Synthesize the Concept Notes
+
+**CRITICAL: INTERVIEW PREP FOCUS**
+These notes are meant as **prep for system design interviews**. You MUST explicitly capture any interview tips, trade-offs, or preferences mentioned in the transcript (e.g., "In an interview, you should prefer X over Y because..."). Capturing these trade-offs and interview strategies is critical.
 
 Structure the notes logically to serve as a high-quality study guide:
 

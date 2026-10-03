@@ -27,12 +27,15 @@ This skill automates extracting, analyzing, and documenting system design interv
    - Extracts title, channel name, duration, and description (`shortDescription`).
    - Uses an isolated environment to pull official or auto-generated subtitle tracks with timestamps into `/tmp/yt_transcript.json`.
 3. **CRITICAL:** Ensure you read the *entire* transcript. If the JSON is too large for a single command output, read it in paginated chunks (e.g., 200 snippets at a time) so you do not miss the second half of the video.
-4. **CRITICAL:** Check the extracted `shortDescription` metadata. If the video description contains links to diagrams (like Excalidraw, Lucidchart) or external text notes, you must extract and use those links as well. If they are visual diagrams, translate the core structural concepts into Mermaid diagrams in your final notes.
+4. **CRITICAL:** Check the extracted `shortDescription` metadata. If the video description contains links to diagrams (like Excalidraw, Lucidchart) or external text notes, you must extract and use those links as well. If it is an Excalidraw link, DO NOT attempt to extract the SVG via playwright or curl. Instead, STOP and PROMPT the USER to upload a screenshot of the Excalidraw canvas so you can translate it into Mermaid diagrams later.
 5. Inspect the synthesized transcripts and diagram notes to understand the speaker's arguments, whiteboard diagrams, progression, questions asked by the audience, and specific trade-offs discussed.
 
 ---
 
 ### Step 2: Synthesize the System Design Chapter
+
+**CRITICAL: INTERVIEW PREP FOCUS**
+These notes are meant as **prep for system design interviews**. You MUST explicitly capture any interview tips, trade-offs, or preferences mentioned in the transcript (e.g., "In an interview, you should prefer X over Y because..."). Capturing these trade-offs and interview strategies is critical.
 
 Structure the synthesized notes following the 4-step interview methodology established across this repository:
 
