@@ -2,7 +2,7 @@
 
 **Source:** [Caching in System Design Interviews w/ Meta Staff Engineer (Hello Interview)](https://www.youtube.com/watch?v=1NngTUYPdpI)
 
-**TL;DR:** Caching is the ultimate tool for scaling read-heavy systems and reducing latency. It trades a bit of storage and complexity for speed by keeping recently used data in a faster layer. In a system design interview, caching should be brought up during the deep dive (non-functional requirements) to address scale and performance. You must be able to discuss **Where to Cache**, **Architectures**, **Eviction Policies**, and **Common Pitfalls**.
+**TL;DR:** Caching is the ultimate tool for scaling read-heavy systems and reducing latency. It trades a bit of storage and complexity for speed by keeping recently used data in a faster layer. In a system design interview, caching should be brought up during the deep dive (non-functional requirements) to address scale and performance. You must be able to discuss **Where to Cache**, **Architectures**, **Eviction Policies vs TTL**, and **Common Pitfalls**.
 
 ---
 
@@ -67,12 +67,19 @@ sequenceDiagram
 
 ---
 
-## 4. Eviction Policies (How data is removed)
+## 4. Cache Eviction vs. Cache Expiration (TTL)
 
-*   **LRU (Least Recently Used):** Evicts the item that hasn't been read or written in the longest time. (The most common default).
-*   **LFU (Least Frequently Used):** Evicts the item with the lowest total access count. Great if access patterns are highly skewed, but can suffer from "historical baggage".
+Because memory is expensive and limited, caches must delete old data. There are two entirely different concepts that control data removal: **Eviction** (running out of space) and **Expiration / TTL** (data becoming stale).
+
+### Eviction Policies (When the cache is FULL)
+*   **LRU (Least Recently Used):** Evicts the item that hasn't been read or written in the longest time. **This is the most common default in interviews.**
+*   **LFU (Least Frequently Used):** Evicts the item with the lowest total access count. Great if access patterns are highly skewed, but can suffer from "historical baggage" (an item was wildly popular a month ago and never gets evicted despite not being read anymore).
 *   **FIFO (First In, First Out):** Evicts the oldest item based strictly on insertion time. Rarely the right choice.
-*   **TTL (Time To Live):** Each item has a strict expiration time. Perfect when data freshness matters more than frequency (e.g., session tokens, API responses).
+
+### Time To Live (TTL) / Expiration
+*   **How it works:** Each cached item has a strict expiration time (e.g., 60 seconds). Once that time passes, the cache automatically deletes it.
+*   **When to use it:** Perfect for when **freshness matters more than frequency**. Use it for data that naturally goes stale: user sessions, social media feeds, API responses, or profile images.
+*   *Interview Tip:* Be ready to combine these! You can use an LRU cache with a 5-minute TTL, meaning data dies naturally after 5 minutes, but might be evicted sooner if the cache fills up.
 
 ---
 
@@ -82,29 +89,29 @@ There are two hard problems in computer science: naming things, and cache invali
 
 ### Pitfall 1: Cache Consistency (Stale Data)
 If a user updates their profile picture in the database, but the old picture is still in the cache, other users will see stale data.
-*   **Solution (Invalidate on Write):** Whenever you write to the DB, explicitly send a `DELETE` command to the cache for that key. The next read will force a fresh pull.
-*   **Solution (Eventual Consistency):** If it's a social media feed, set a short TTL (e.g., 5 minutes) and explicitly state: *"Some users will see stale data for 5 minutes, and that is an acceptable business trade-off."*
+*   **Solution 1 (Invalidate on Write):** Whenever you write to the DB, explicitly send a `DELETE` command to the cache for that key. The next read will force a fresh pull.
+*   **Solution 2 (Short TTL / Eventual Consistency):** If it's a social media feed, set a short TTL (e.g., 5 minutes) and explicitly state: *"Some users will see stale data for 5 minutes, and that is an acceptable business trade-off because it's not a critical financial transaction."*
 
 ### Pitfall 2: Cache Stampede (Thundering Herd)
-A massively popular key (like a live Super Bowl score) has a TTL of 60 seconds. When it expires, 100,000 concurrent user requests miss the cache and hit the database simultaneously, melting it down.
+A massively popular key (like a homepage feed) has a TTL of 60 seconds. When it expires, 100,000 concurrent user requests suddenly miss the cache and all try to rebuild the cache at the exact same time. This turns 1 query into 100,000 database queries instantly, causing cascading failures and melting down the database.
 
 ```mermaid
 flowchart TD
-    subgraph "Cache Stampede (Key Expires)"
+    subgraph "Cache Stampede (Key Expires via TTL)"
         C1[Client 1] --> API[App Server]
         C2[Client 2] --> API
         C3[Client 3] --> API
-        API -- "Cache Miss" --> Cache[(Redis)]
-        API -- "100k Concurrent Queries" --> DB[(Database)]
+        API -- "Cache Miss (TTL expired)" --> Cache[(Redis)]
+        API -- "100k Concurrent Heavy Queries" --> DB[(Database)]
         style DB fill:#ffcccc,stroke:#ff0000
     end
 ```
 
-*   **Solution 1: Request Coalescing (Single Flight):** When multiple requests miss the same key, only the *first* request is allowed to query the database. The other 99,999 requests wait for the first one to repopulate the cache.
-*   **Solution 2: Cache Warming (Background Refresh):** Instead of letting the key expire, a background worker proactively refreshes the key at the 55-second mark, ensuring it *never* expires while remaining fresh.
+*   **Solution 1: Request Coalescing (Single Flight):** When multiple requests miss the same key, only the *first* request is allowed to go to the database. The other 99,999 requests are forced to wait (usually via a lock or polling mechanism) for the first request to repopulate the cache, and then they all read from the newly refreshed cache.
+*   **Solution 2: Cache Warming (Proactive Background Refresh):** Instead of waiting for the popular key to expire at 60 seconds, a background worker proactively refreshes the key at the **55-second mark**. This means the key *never actually expires*, and the cache stampede is physically impossible.
 
 ### Pitfall 3: Hot Keys (The Celebrity Problem)
-If Taylor Swift's profile gets 99% of the traffic, the single cache node holding that specific key will be overwhelmed and crash, leaving the rest of the cluster idle.
+Even if your cache hit rate is perfect, if Taylor Swift's profile gets 99% of the traffic, the single cache shard holding that specific key will be overwhelmed by network bandwidth and crash, leaving the rest of the cluster idle.
 
 *   **Solution 1 (Replication):** Replicate the hot key across *all* cache nodes instead of hashing it to one. The router can then pick any random cache node to serve the data.
 *   **Solution 2 (Local In-Memory Cache):** Add a tiny in-process cache (e.g., Guava) directly inside the application servers for the top 10 most popular items to prevent requests from even hitting the Redis cluster.
