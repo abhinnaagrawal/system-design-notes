@@ -13,18 +13,67 @@
 *   **Pros:** Resilient (if the cache goes down, the app just hits the DB directly, though it might be slow). Only requested data gets cached (no wasted memory).
 *   **Cons:** Cache misses have a higher latency (3 trips: check cache, query DB, write to cache). 
 
+```mermaid
+sequenceDiagram
+    participant App
+    participant Cache
+    participant DB
+    App->>Cache: 1. Read Data
+    alt Cache Miss
+        Cache-->>App: Miss (Null)
+        App->>DB: 2. Read Data
+        DB-->>App: Return Data
+        App->>Cache: 3. Write Data
+    end
+```
+
 ### Write-Through
 *   **How it works:** The application only writes to the cache. The caching library/framework then synchronously writes to the database *before* returning success to the user. 
 *   **Pros:** Strong consistency between Cache and DB. No stale data.
 *   **Cons:** Slower writes (must wait for both Cache and DB to acknowledge). Suffer from the **Dual Write Problem** (if the DB write fails but the cache write succeeds, or vice versa, you have a split-brain scenario). Requires specialized frameworks (e.g., Spring Cache, Hazelcast).
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Cache
+    participant DB
+    App->>Cache: 1. Write Data
+    Cache->>DB: 2. Synchronous Write
+    DB-->>Cache: Ack
+    Cache-->>App: Ack
+```
 
 ### Write-Behind (Write-Back)
 *   **How it works:** The application writes to the cache and instantly gets a `200 OK`. The cache flushes these updates to the database asynchronously in batches later.
 *   **Pros:** Blazing fast write throughput. Perfect for metric pipelines, analytics, or heavily updated counters (e.g., YouTube video views).
 *   **Cons:** **Data Loss!** If the cache node crashes before the batch is flushed to the database, the data is gone forever. 
 
+```mermaid
+sequenceDiagram
+    participant App
+    participant Cache
+    participant DB
+    App->>Cache: 1. Write Data
+    Cache-->>App: Ack (Blazing Fast)
+    Note over Cache, DB: 2. Async Flush (Later)
+    Cache->>DB: Batch Write
+```
+
 ### Read-Through
 *   **How it works:** Similar to Cache-Aside, but the application doesn't orchestrate the fallback. The application simply asks the Cache for data. If the cache doesn't have it, the *cache itself* fetches it from the database transparently.
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Cache
+    participant DB
+    App->>Cache: 1. Read Data
+    alt Cache Miss
+        Cache->>DB: 2. Read Data (Transparent)
+        DB-->>Cache: Return Data
+    end
+    Cache-->>App: Return Data
+```
 
 ---
 
@@ -48,10 +97,40 @@ If a user updates their profile picture in the database, but the old picture is 
 
 ### Pitfall 2: Cache Stampede (Thundering Herd)
 Imagine you have a massively popular key (like the live score of the Super Bowl) with a TTL of 10 minutes. When that 10 minutes expires, the key is evicted. In the exact millisecond before the cache is repopulated, 50,000 concurrent user requests check the cache, get a miss, and *all 50,000 requests* hit the database simultaneously to fetch the score. The database instantly melts down.
+
+```mermaid
+flowchart TD
+    subgraph "Cache Stampede (Key Expires)"
+        C1[Client 1] --> API[App Server]
+        C2[Client 2] --> API
+        C3[Client 3] --> API
+        API -- "Cache Miss" --> Cache[(Redis)]
+        API -- "Heavy Query" --> DB[(Database)]
+        API -- "Heavy Query" --> DB
+        API -- "Heavy Query" --> DB
+        style DB fill:#ffcccc,stroke:#ff0000
+    end
+```
+
 *   **Solution:** **Background Refresh**. Instead of letting the key expire via TTL, have a background worker routinely fetch the latest score from the DB and update the cache proactively, ensuring the cache *never* expires.
 *   **Solution:** **Mutex Locks / Debouncing**. When a cache miss happens, the first request acquires a distributed lock to query the DB. The other 49,999 requests wait for the cache to be filled by the first request.
 
 ### Pitfall 3: Hot Keys (The Celebrity Problem)
 Even if you have 100 cache nodes perfectly balanced, if one piece of data (e.g., Taylor Swift's profile) gets 99% of the traffic, the single cache node holding that specific key will be overwhelmed and crash, while the other 99 nodes sit idle.
+
+```mermaid
+flowchart LR
+    subgraph "Hot Key (Taylor Swift)"
+        App1[App Server 1] -->|Query T.S.| Node2[(Cache Node 2)]
+        App2[App Server 2] -->|Query T.S.| Node2
+        App3[App Server 3] -->|Query T.S.| Node2
+        
+        Node1[(Cache Node 1)]
+        Node3[(Cache Node 3)]
+        
+        style Node2 fill:#ffcccc,stroke:#ff0000
+    end
+```
+
 *   **Solution (Replication):** Instead of hashing Taylor Swift to a single node, replicate her profile across *all* cache nodes. The request router can pick any random cache node to serve her profile.
 *   **Solution (Local In-Memory Cache):** Add a tiny cache directly inside the application servers (e.g., Guava cache in Java) for the top 10 most popular items. This prevents the requests from even reaching the Redis cluster.
