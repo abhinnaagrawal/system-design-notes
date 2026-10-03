@@ -141,10 +141,7 @@ flowchart TD
     *   **Pros:** Incredible flexibility. Trees require the aggregate operation to be strictly associative. Sqrt Decomposition allows you to answer bizarre, complex queries (like finding the most frequent element in a range, commonly paired with **Mo's Algorithm**) because you can manually iterate the partial blocks.
     *   **Cons:** Asymptotically slower than trees ($O(\sqrt{N})$ is much worse than $O(\log N)$ for very large datasets).
 
-
-*(Read full file: [Advanced Data Structures](./Core%20Concepts/Advanced%20Data%20Structures/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Authentication and Authorization</b> (Click to expand)</summary>
@@ -316,10 +313,7 @@ The most dynamic and complex model. Access is determined by evaluating boolean r
 * **Pros:** Infinite flexibility. Completely solves the "Role Explosion" problem.
 * **Cons:** Complex to engineer, hard to audit (you cannot easily run a SQL query to ask "Who has access to this file?"), and adds latency to every API request because the Policy Engine must dynamically compute multiple rules.
 
-
-*(Read full file: [Authentication and Authorization](./Core%20Concepts/Authentication%20and%20Authorization/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Caching Strategies</b> (Click to expand)</summary>
@@ -455,10 +449,7 @@ Dropping a cache into your design without justification is an immediate red flag
 4.  **State the Eviction Policy:** Choose LRU or a strict TTL and justify why.
 5.  **Address the Downsides:** Proactively bring up how you will handle Consistency, Hot Keys, or Stampedes before the interviewer even asks.
 
-
-*(Read full file: [Caching Strategies](./Core%20Concepts/Caching%20Strategies/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Consistent Hashing</b> (Click to expand)</summary>
@@ -652,10 +643,7 @@ flowchart TD
     end
 ```
 
-
-*(Read full file: [Consistent Hashing](./Core%20Concepts/Consistent%20Hashing/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>DNS and CDN</b> (Click to expand)</summary>
@@ -763,10 +751,7 @@ When you set up a CDN (like Cloudflare or AWS CloudFront), you usually change yo
 
 Because the CDN now acts as your Authoritative DNS Server, it can dynamically inspect where a DNS request is coming from and intelligently return the IP address of the CDN Edge Server closest to that specific user.
 
-
-*(Read full file: [DNS and CDN](./Core%20Concepts/DNS%20and%20CDN/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Database Indexes</b> (Click to expand)</summary>
@@ -905,10 +890,7 @@ When building features like "YouTube Video View Counts," you need real-time data
     *   **Trade-off:** Trades exact accuracy for extremely fast OLAP-style aggregations and low memory footprint. 
     *   **Who uses it:** Often attached to the end of streaming architectures. (Redis supports it, though its placement in a cache is debatable).
 
-
-*(Read full file: [Database Indexes](./Core%20Concepts/Database%20Indexes/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Encryption and TLS</b> (Click to expand)</summary>
@@ -976,10 +958,7 @@ TLS 1.3 was a massive upgrade released in 2018. It optimizes the handshake to ju
 *   **Security:** Removed support for outdated, vulnerable cryptographic algorithms (like MD5 or SHA-1) that were kept in TLS 1.2 for backwards compatibility.
 *   **0-RTT Resumption:** If you have visited a site recently, TLS 1.3 allows the client to use the previous session key to send HTTP data on the very first network packet (Zero Round Trip Time), making reconnections nearly instantaneous.
 
-
-*(Read full file: [Encryption and TLS](./Core%20Concepts/Encryption%20and%20TLS/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Geospatial Indexes</b> (Click to expand)</summary>
@@ -1076,10 +1055,7 @@ When querying, you don't just query the user's cell. You mathematically calculat
 | **Massive Scale Live Tracking (Uber)** | Redis / Custom DB | GeoHash / H3 (B-Tree) | Blazing Fast |
 
 
-
-*(Read full file: [Geospatial Indexes](./Core%20Concepts/Geospatial%20Indexes/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Message Brokers and Consistency</b> (Click to expand)</summary>
@@ -1188,10 +1164,7 @@ Do not use an asynchronous message broker in the critical path if you are design
 
 For these systems, you must stick to synchronous database writes (and potentially Distributed Transactions if crossing microservices). Yes, you will get lower availability (if the DB is down, the system rejects the write), but every single `200 Success` guarantees absolute correctness and zero stale reads.
 
-
-*(Read full file: [Message Brokers and Consistency](./Core%20Concepts/Message%20Brokers%20and%20Consistency/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Networking Foundations</b> (Click to expand)</summary>
@@ -1259,10 +1232,7 @@ When setting up a Reverse Proxy (like HAProxy) to load balance traffic across yo
 *   **Pros:** "Smart" routing. Can route based on URL path, HTTP headers, or even cookies (Sticky Sessions).
 *   **Cons:** **Slower and CPU intensive**. Maintaining two separate TCP connections (Client <-> Proxy, and Proxy <-> Backend) and decrypting traffic adds latency and server overhead.
 
-
-*(Read full file: [Networking Foundations](./Core%20Concepts/Networking%20Foundations/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>Partial Failures</b> (Click to expand)</summary>
@@ -1397,10 +1367,150 @@ sequenceDiagram
 
 This trick allows you to achieve two-phase commit safety without the full cooperation of the other team, completely avoiding the need for them to write custom 2PC API endpoints.
 
-
-*(Read full file: [Partial Failures](./Core%20Concepts/Partial%20Failures/README.md))*
 </details>
-<br>
+
+<details>
+<summary><b>Sharding</b> (Click to expand)</summary>
+
+# Database Sharding & Partitioning
+
+**Source:** [Sharding in System Design Interviews w/ Meta Staff Engineer (Hello Interview)](https://www.youtube.com/watch?v=L521gizea4s)
+
+**TL;DR:** When a single database instance (even a massive AWS Aurora instance maxing out at 256 TiB) can no longer handle the storage or throughput, you must physically split the data across multiple machines. This is called **Sharding**. However, sharding introduces massive complexity around hot spots, cross-shard queries, and distributed transactions. In an interview, **never shard prematurely**.
+
+---
+
+## 1. Partitioning vs. Sharding
+
+While often used interchangeably, there is a strict mechanical difference:
+
+*   **Partitioning:** Splitting a large table into smaller pieces *inside a single database instance*. It does not add more machines.
+    *   **Horizontal Partitioning:** Splitting rows (e.g., one partition per year of orders).
+    *   **Vertical Partitioning:** Splitting columns (e.g., moving large/rarely used text blob columns to a separate partition).
+*   **Sharding:** Horizontal partitioning *across multiple physical machines*. Each shard is a completely independent, standalone database with its own CPU, Memory, and Disk.
+
+---
+
+## 2. How to Shard (The Two Core Decisions)
+
+When you shard, you must decide exactly **What to shard by (The Shard Key)** and **How to distribute it (The Strategy)**.
+
+### A. Choosing the Shard Key
+A bad shard key leads to catastrophic load imbalances. A perfect shard key requires three traits:
+1.  **High Cardinality:** Millions of unique values (e.g., `user_id` is great, `is_premium` boolean is terrible because you'd only have 2 shards).
+2.  **Even Distribution:** Traffic and storage should spread evenly. (e.g., `created_at` is terrible because all new writes pile onto the "today" shard, leaving old shards idle).
+3.  **Aligns with Queries:** The most frequent queries should only need to hit a *single* shard (e.g., if you shard by `user_id`, a query for "get user's orders" is perfectly isolated to one shard).
+
+### B. Sharding Strategies (Distribution Mechanics)
+
+#### 1. Range-Based Sharding
+Groups records by a continuous range of values.
+*   **Mechanic:** Shard 1 handles `User ID 1 - 1M`. Shard 2 handles `1M - 2M`.
+*   **Pros:** Extremely efficient for range scans.
+*   **Cons:** Naturally creates hot spots if data is sequential (like timestamps).
+*   **When to use:** Multi-tenant SaaS architectures where each company/tenant is assigned a dedicated range of IDs.
+
+#### 2. Hash-Based Sharding (The Default)
+Uses a deterministic hash function (e.g., MurmurHash) to map keys to shards.
+*   **Mechanic:** `target_shard = hash(user_id) % num_shards`
+*   **Pros:** Perfectly even distribution of records, completely eliminating sequential hot spots.
+*   **Cons:** Adding or removing a shard changes the modulo denominator, forcing almost every single record in the entire database to move to a new shard. (Requires **Consistent Hashing** to fix).
+
+#### 3. Directory-Based Sharding
+Uses a central lookup table (a routing service) to map specific records to specific shards.
+*   **Mechanic:** Before querying the DB, the app queries the Directory Service: "Where does User 42 live?"
+*   **Pros:** Infinite flexibility. If a user becomes a massive celebrity, you can dynamically update the directory to move them to their own dedicated, isolated shard.
+*   **Cons:** The Directory Service becomes a Single Point of Failure (SPOF) and adds network latency to *every single query*. **Do not propose this in standard interviews without heavy justification.**
+
+```mermaid
+flowchart TD
+    subgraph Hash vs Directory Sharding
+        App1[Application]
+        App2[Application]
+        
+        Dir[(Directory Service \n SPOF)]
+        
+        S1[(Shard 1)]
+        S2[(Shard 2)]
+        
+        App1 -- "hash(user) % N" --> S1
+        App2 -- "1. Lookup User" --> Dir
+        Dir -- "2. Returns Shard 2" --> App2
+        App2 -- "3. Query" --> S2
+    end
+```
+
+---
+
+## 3. The 3 Major Sharding Pitfalls (Interview Traps)
+
+### Pitfall 1: Hot Spots (The Celebrity Problem)
+If you shard by `user_id` using Hash Sharding, Taylor Swift is still mathematically hashed to exactly *one* shard. Millions of fans viewing her profile will instantly overwhelm that single shard's CPU and network bandwidth.
+*   **Solution 1 (Dedicated Shard):** Use Directory Sharding to isolate her to a massively over-provisioned machine.
+*   **Solution 2 (Compound Shard Key):** Instead of sharding by `user_id`, shard by `hash(user_id + date)`. This forces Taylor Swift's traffic to spread across multiple shards depending on the day.
+*   **Solution 3 (Dynamic Chunking):** Use a DB like MongoDB that monitors hot chunks and automatically splits and migrates them to colder nodes.
+
+### Pitfall 2: Fan-Out Reads (Cross-Shard Operations)
+If you shard by `user_id`, but the product manager asks for a feature to show "The Top 10 Most Popular Posts Globally", you no longer know which shard has the data.
+*   **The Trap:** You are forced to query all 64 shards simultaneously, wait for the slowest shard to respond, merge the results in memory on the application server, and sort them. This completely destroys latency and CPU.
+*   **The Fix:** 
+    1. **Cache it:** Accept eventual consistency, compute the heavy cross-shard query once, and cache the result in Redis for 5 minutes.
+    2. **Denormalize:** Duplicate critical data into a separate globally-optimized database (like Elasticsearch) designed specifically for aggregate searches.
+
+### Pitfall 3: Distributed Transactions (Cross-Shard Consistency)
+If User A (Shard 1) sends money to User B (Shard 2), you can no longer use a standard ACID database transaction, because the shards do not share memory or locks.
+*   **The Trap (2-Phase Commit):** A naive approach uses a coordinator to lock both shards, prepare the write, and commit. If a network partition occurs mid-commit, the locks are stuck forever. **It is fragile and slow.**
+*   **The Fix (Saga Pattern):** Break the transaction into independent, local commits with asynchronous compensating actions.
+    1. Deduct money locally on Shard 1 (Commit).
+    2. Publish an event to Kafka.
+    3. Add money locally on Shard 2 (Commit).
+    4. *If Shard 2 fails, a compensating event is fired to refund Shard 1.*
+
+```mermaid
+sequenceDiagram
+    participant S1 as Shard 1 (User A)
+    participant Q as Message Queue
+    participant S2 as Shard 2 (User B)
+    
+    S1->>S1: 1. Local ACID TX: Deduct $50
+    S1->>Q: 2. Publish "Transfer Initiated"
+    Q->>S2: 3. Consume Event
+    alt Success
+        S2->>S2: 4a. Local ACID TX: Add $50
+    else Failure
+        S2->>Q: 4b. Publish "Transfer Failed"
+        Q->>S1: 5. Consume Event
+        S1->>S1: 6. Compensating TX: Refund $50
+    end
+```
+
+---
+
+## 4. Under the Hood: Sharding in Modern Databases
+In an interview, you don't need to reinvent the wheel. You should leverage built-in database sharding engines. *Warning: They do not all work the same way.*
+*   **Cassandra:** Uses Consistent Hashing natively via `Murmur3Partitioner` and virtual nodes (v-nodes) mapping partition keys to token ranges on a ring.
+*   **DynamoDB:** Hashes the partition key to internal storage nodes and dynamically splits/merges partitions based on throughput/size. (It hides the topology from the user).
+*   **MongoDB:** Uses range-based chunks. If you specify a hashed shard key, it hashes the value first, then assigns ranges of that hash space to chunks. A background "Balancer" actively migrates chunks between shards to ensure even distribution.
+*   **PostgreSQL / MySQL:** Relational databases do not natively shard out-of-the-box. You must place a proxy layer like **Vitess** (MySQL) or **Citus** (Postgres) in front of them to intercept SQL queries and route them to the correct underlying physical shard.
+
+---
+
+## 5. How to Answer Sharding in an Interview
+
+**Rule #1: NEVER shard prematurely.** 
+A well-tuned Postgres database can handle terabytes of data. Prove a bottleneck exists first.
+
+**The 4-Step Framework:**
+1.  **Identify the Limit:** *"We expect 50,000 writes per second. A single DB instance will struggle with that IOPS load, so we must shard."*
+2.  **Propose the Shard Key:** *"Since queries are user-centric (fetching personal feeds), I will shard by `user_id`."*
+3.  **Choose the Strategy:** *"I'll use Hash-Based sharding with Consistent Hashing to ensure an even distribution of users across nodes."*
+4.  **Call out the Trade-offs:** *"The downside is that global aggregate queries (like trending posts) become expensive fan-out reads. We will mitigate this by pre-computing trends asynchronously and caching them."*
+
+---
+### Full Excalidraw Reference
+![Sharding Excalidraw](file:///Users/abhinnaagarwal/.gemini/antigravity/brain/f7d7a5f9-5f39-4ac9-a664-8bf373190434/.user_uploaded/media_1791018416241.png)
+
+</details>
 
 <details>
 <summary><b>WebSockets</b> (Click to expand)</summary>
@@ -1490,10 +1600,7 @@ You should use WebSockets when your application requires **real-time, low-latenc
 
 *(Note: If you only need the server to push data to the client—like live score updates—SSE is often a simpler and better choice than WebSockets because it relies on standard HTTP).*
 
-
-*(Read full file: [WebSockets](./Core%20Concepts/WebSockets/README.md))*
 </details>
-<br>
 
 <details>
 <summary><b>gRPC</b> (Click to expand)</summary>
@@ -1640,108 +1747,4 @@ sequenceDiagram
 *   **Use gRPC:** For backend microservice-to-microservice communication where you control both ends, and latency/bandwidth are top priorities.
 *   **Use REST:** For public-facing APIs or communication with web browsers/mobile apps where simplicity and human readability are more important.
 
-
-*(Read full file: [gRPC](./Core%20Concepts/gRPC/README.md))*
 </details>
-<br>
-
-## 1. Core Data Structures & Algorithms
-Before jumping into infrastructure, many system design problems rely heavily on specific data structures:
-- [ ] **Trie (Prefix Tree):** Used for Search Autocomplete (Ch 13).
-- [x] **Quadtrees & Geohashes:** Essential for spatial indexing in Proximity Services, Nearby Friends, and Google Maps (Ch 16, 17, 18).
-- [x] **Consistent Hashing (Hash Rings):** Distributes data evenly across a cluster, minimizing reorganization when nodes are added/removed (Ch 5).
-- [ ] **Bloom Filters:** Probabilistic data structure to quickly test if an element is present. Used in Web Crawlers (Ch 9) and Databases (Ch 6) to avoid disk reads.
-- [x] **Merkle Trees:** Tree of hashes used to detect inconsistencies in distributed data quickly, heavily used in Object Storage, Google Drive, and Dynamo (Ch 6, 15, 24).
-- [x] **LSM-Trees (Log-Structured Merge-Tree) & SSTables:** The core storage engine behind high-write databases like Cassandra, RocksDB, and LevelDB (Ch 6).
-- [ ] **Token Bucket / Leaky Bucket / Sliding Window:** Algorithms used for Rate Limiting (Ch 4, 30).
-- [ ] **Base62 Encoding:** URL shortening and Unique ID generation (Ch 8, 7).
-- [ ] **Skip Lists:** The underlying data structure for Redis Sorted Sets, used in Leaderboards (Ch 25).
-- [x] **Interval Trees & Segment Trees:** Used for managing overlapping time windows (e.g., booking systems) and efficiently querying aggregate data over a specific range in `O(log N)` time.
-- [ ] **DAGs (Directed Acyclic Graphs):** Used for modelling dependencies in Distributed Job Schedulers and Video Transcoding pipelines (Ch 14, 31).
-
-### 📚 Learning Resources:
-- [x] **Consistent Hashing:** [ByteByteGo - Consistent Hashing | Algorithms You Should Know](https://www.youtube.com/watch?v=UF9Iqmg94tk)
-- [ ] **Bloom Filters:** [Gaurav Sen - What are Bloom Filters?](https://www.youtube.com/watch?v=bgzUdBVr5tE)
-- [ ] **LSM-Trees:** [Hussein Nasser - LSM Trees Explained: Powering Cassandra, RocksDB](https://www.youtube.com/watch?v=ciGAVER_erw)
-- [x] **Spatial/Geohashes:** [Hussein Nasser - Spatial Queries in PostgreSQL/PostGIS](https://www.youtube.com/watch?v=-qNSXK7s7_w)
-- [ ] **Rate Limiting:** [ByteByteGo - 4 Rate Limit Algorithms](https://www.youtube.com/watch?v=YXkOdWBwqaA)
-
-## 2. Databases & Storage Engines
-Understanding *which* database to pick is a crucial skill. You need to know their capacity limits, internal workings, and trade-offs (SQL vs. NoSQL, CAP theorem).
-- [x] **Relational Databases (RDBMS):** PostgreSQL, MySQL. Understand ACID properties, B-Tree indexes, sharding, and master-slave replication. Used in almost every system for structured, highly consistent data.
-- [ ] **Wide-Column Stores:** Cassandra, DynamoDB. Highly available, massive write throughput, eventual consistency.
-- [x] **Key-Value Caches & Stores:** Redis, Memcached. In-memory, ultra-fast. Learn about cache invalidation strategies, Redis Pub/Sub, and Redis Sorted Sets.
-- [ ] **Time-Series Databases (TSDB):** InfluxDB, Prometheus. Optimized for appending and querying time-stamped data (Ch 20).
-- [ ] **Graph Databases:** Neo4j, Amazon Neptune. Used for recommendations and News Feeds (Ch 11).
-- [ ] **Blob / Object Storage:** Amazon S3. For unstructured data like images and videos.
-
-### 📚 Learning Resources:
-- [ ] **General DB Internals:** The book *Designing Data-Intensive Applications (DDIA)* by Martin Kleppmann (The absolute gold standard).
-- [ ] **Database Architecture:** [Hussein Nasser's Database Engineering Course/Playlist](https://www.youtube.com/playlist?list=PLQnljOFTspQXjD0HOzN7P2tgzu7scWpl2)
-- [ ] **Caching:** [ByteByteGo - Top 5 Redis Use Cases](https://www.youtube.com/watch?v=a4yX7RUgTxI)
-- [ ] **Dynamo (Wide Column):** [Amazon Dynamo Paper summary by System Design Interview](https://www.youtube.com/watch?v=gV-1E-7nhR8)
-
-## 3. Distributed System Concepts
-How do multiple machines coordinate and agree on the state of the system?
-- [ ] **Replication & Consistency:** Quorum consensus (W + R > N), Leader/Follower vs. Leaderless replication, Eventual vs. Strong consistency.
-- [ ] **CAP Theorem & PACELC:** Trade-offs between Consistency, Availability, Partition tolerance, and Latency.
-- [ ] **Vector Clocks:** Resolving conflicts in masterless databases (Ch 6).
-- [ ] **Gossip Protocol:** How decentralized nodes discover each other and share cluster state (Ch 6).
-- [ ] **CRDTs (Conflict-Free Replicated Data Types):** Data structures that can be replicated across nodes and merged without conflicts (Rate Limiter - Ch 30).
-- [ ] **Distributed Locks & Coordination:** ZooKeeper, etcd. Used for electing leaders, managing configuration, and ensuring mutually exclusive access to resources (Ch 7, 31).
-
-### 📚 Learning Resources:
-- [ ] **CRDTs:** [Martin Kleppmann - CRDTs: The Hard Parts](https://www.youtube.com/watch?v=x7drE24geUw)
-- [ ] **Distributed Locks & Zookeeper:** [Hussein Nasser - What is Apache Zookeeper?](https://www.youtube.com/watch?v=R873BlNVUB4)
-- [ ] **CAP Theorem:** [IBM Technology - CAP Theorem Explained](https://www.youtube.com/watch?v=HTaKhMv_ZYU)
-- [ ] **MIT Distributed Systems:** [MIT 6.824 Distributed Systems Class (Full Playlist)](https://www.youtube.com/playlist?list=PLrw6a1wE39_tb2fErI4-WkMbsvGQk9_UB) (For a deep academic understanding)
-
-## 4. Communication Protocols & Web Technologies
-How do clients and servers, or internal microservices, talk to each other?
-- [ ] **HTTP/REST & GraphQL:** Standard stateless communication.
-- [x] **WebSockets & Server-Sent Events (SSE):** Persistent, bi-directional connections for Real-time Chat and News Feeds (Ch 12, 11).
-- [ ] **Long Polling:** The fallback for older clients that don't support WebSockets.
-- [x] **gRPC / Protocol Buffers (Protobuf):** Highly efficient, binary RPC frameworks used for internal microservice-to-microservice communication.
-- [ ] **UDP vs. TCP:** UDP for low-latency where packet loss is acceptable (Video Streaming, early layers of Stock Exchanges - Ch 28).
-- [x] **Load Balancing & TLS:** Understanding L4 vs L7 routing, proxying, and secure transport (TLS/SSL).
-- [x] **DNS & CDNs:** Resolving domains to IPs and globally caching static content.
-- [x] **Authentication & Authorization:** Securely verifying user identity (Session, JWT, OAuth) and verifying access control (RBAC, ABAC).
-
-### 📚 Learning Resources:
-- [ ] **HTTP Crash Course:** [Hussein Nasser - HTTP 1.0, 1.1, HTTP/2, HTTP/3](https://www.youtube.com/watch?v=0OrmKCB0UrQ)
-- [x] **TLS 1.2 & 1.3:** [Hussein Nasser - Transport Layer Security](https://www.youtube.com/watch?v=AlE5X1NlHgg)
-- [x] **Load Balancing:** [Hussein Nasser - Load balancing in Layer 4 vs Layer 7](https://www.youtube.com/watch?v=aKMLgFVxZYk)
-- [x] **WebSockets/SSE/Polling:** [Hussein Nasser - Push Technology Crash Course (WebSockets, SSE, Polling)](https://www.youtube.com/watch?v=2Nt-ZrNP22A)
-- [x] **gRPC vs REST:** [Hussein Nasser - gRPC Crash Course](https://www.youtube.com/watch?v=Yw4rkaTc0f8)
-
-## 5. Messaging & Streaming (Decoupling)
-Asynchronous communication is vital for scaling and fault tolerance.
-- [x] **Message Queues:** RabbitMQ, Amazon SQS. Used for task decoupling (Email Service, Transcoding).
-- [ ] **Event Streaming:** Apache Kafka, Amazon Kinesis. Immutable, append-only logs for high-throughput, ordered event processing (Ad Click Aggregation, Payment Systems).
-- [ ] **Stream Processing Frameworks:** Apache Flink, Spark Streaming. For aggregating real-time data over windows (Ch 21).
-
-### 📚 Learning Resources:
-- [ ] **Kafka vs RabbitMQ:** [ByteByteGo - Kafka vs RabbitMQ](https://www.youtube.com/watch?v=x4k1XEjNzYQ)
-- [ ] **Kafka Internals:** [Confluent - Apache Kafka in 100 Seconds](https://www.youtube.com/watch?v=uvb00oaa3k8) (and the rest of the Confluent channel)
-- [ ] **Stream Processing:** [Gaurav Sen - Event Driven Architecture / Stream Processing](https://www.youtube.com/watch?v=rJHTK2TfZ1I)
-
-## 6. Architecture Patterns
-- [ ] **Event Sourcing & CQRS:** Storing state as a sequence of immutable events rather than overwriting data. Critical for Payment Systems, Wallets, and Stock Exchanges (Ch 26, 27, 28) for auditing and reproducibility.
-- [x] **Distributed Transactions & Sagas:** How to maintain consistency across multiple microservices without locking up the system (Hotel Reservations, Payments - Ch 22, 26).
-- [x] **Idempotency:** Ensuring that retrying an operation (like a payment) doesn't result in duplicate side effects (Payment & Wallet - Ch 26, 27).
-- [ ] **Fan-out:** Pushing data to many followers. News Feed uses "Fan-out on write" vs "Fan-out on read" (Ch 11).
-- [ ] **Lambda vs. Kappa Architecture:** Big data processing paradigms (Ad Click Aggregation - Ch 21).
-
-### 📚 Learning Resources:
-- [ ] **CQRS and Event Sourcing:** [Greg Young - CQRS and Event Sourcing](https://www.youtube.com/watch?v=JHGkaShoyNs)
-- [ ] **Sagas & Distributed Transactions:** [Couchbase - Distributed Transactions & Saga Pattern](https://www.youtube.com/watch?v=D2R_NBu8Arw) (Also check out Chris Richardson's Microservices.io resources)
-- [x] **Idempotency:** [ByteByteGo - What is Idempotency?](https://www.youtube.com/watch?v=XAccGbtl3Z8)
-
-## Recommended Learning Path (Where to start?)
-If you are feeling overwhelmed, here is the order you should learn these concepts:
-- [x] **Network & Proxies:** HTTP, Load Balancers, DNS, CDNs.
-- [ ] **Databases:** Relational vs NoSQL trade-offs, Sharding, Replication, Indexing. *(Read DDIA by Martin Kleppmann)*
-- [x] **Caching:** Memcached/Redis, Cache eviction policies.
-- [ ] **Asynchronous Processing:** Message Queues (RabbitMQ) vs. Event Streams (Kafka).
-- [x] **Specialized Data Structures:** Consistent Hashing, Bloom Filters, Quadtrees.
-- [ ] **Advanced Distributed Concepts:** Distributed locks (ZooKeeper), Consensus, CRDTs, Event Sourcing.
