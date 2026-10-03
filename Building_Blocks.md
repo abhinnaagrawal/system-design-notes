@@ -1508,7 +1508,7 @@ A well-tuned Postgres database can handle terabytes of data. Prove a bottleneck 
 
 ---
 ### Full Excalidraw Reference
-![Sharding Excalidraw](file:///Users/abhinnaagarwal/.gemini/antigravity/brain/f7d7a5f9-5f39-4ac9-a664-8bf373190434/.user_uploaded/media_1791018416241.png)
+![Sharding Excalidraw](excalidraw.png)
 
 </details>
 
