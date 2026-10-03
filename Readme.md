@@ -55,6 +55,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Message Brokers & Strong Consistency](./Core%20Concepts/Message%20Brokers%20and%20Consistency/)
  * [Partial Failures & Idempotency](./Core%20Concepts/Partial%20Failures/)
  * [Database Indexes & The RUM Conjecture](./Core%20Concepts/Database%20Indexes/)
+ * [Caching Strategies (Architectures, Eviction, Stampedes)](./Core%20Concepts/Caching%20Strategies/)
 
 # Additonal Resources
 
