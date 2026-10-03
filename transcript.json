@@ -1,0 +1,1096 @@
+{
+  "video_id": "eWpOlIBxB_U",
+  "metadata": {
+    "title": "When NOT to use a message broker? - How Message Brokers Kill Strong Consistency",
+    "author": "System Design Fight Club",
+    "lengthSeconds": 0,
+    "shortDescription": ""
+  },
+  "snippets": [
+    {
+      "text": "hey guys i just wanted to do a quick",
+      "start": 3.36,
+      "duration": 6.08
+    },
+    {
+      "text": "video on uh how uh",
+      "start": 5.44,
+      "duration": 7.279
+    },
+    {
+      "text": "message brokers kill strong consistency",
+      "start": 9.44,
+      "duration": 4.64
+    },
+    {
+      "text": "um",
+      "start": 12.719,
+      "duration": 4.241
+    },
+    {
+      "text": "it's it's pretty easy to see the value",
+      "start": 14.08,
+      "duration": 6.32
+    },
+    {
+      "text": "add of message brokers and so it almost",
+      "start": 16.96,
+      "duration": 5.52
+    },
+    {
+      "text": "raises the question of when you would",
+      "start": 20.4,
+      "duration": 5.2
+    },
+    {
+      "text": "not want to use a message broker",
+      "start": 22.48,
+      "duration": 5.92
+    },
+    {
+      "text": "um so i think one of the most clear-cut",
+      "start": 25.6,
+      "duration": 4.8
+    },
+    {
+      "text": "examples of when you definitely actually",
+      "start": 28.4,
+      "duration": 5.52
+    },
+    {
+      "text": "would not want to use a message broker",
+      "start": 30.4,
+      "duration": 6.56
+    },
+    {
+      "text": "is when you want strong consistency",
+      "start": 33.92,
+      "duration": 5.52
+    },
+    {
+      "text": "this is a question that came up when i",
+      "start": 36.96,
+      "duration": 6.32
+    },
+    {
+      "text": "was covering session one of tinyurl",
+      "start": 39.44,
+      "duration": 5.439
+    },
+    {
+      "text": "and i actually thought it would make for",
+      "start": 43.28,
+      "duration": 3.599
+    },
+    {
+      "text": "a really nice short video so i'm just",
+      "start": 44.879,
+      "duration": 3.2
+    },
+    {
+      "text": "going to go ahead and cover it",
+      "start": 46.879,
+      "duration": 2.481
+    },
+    {
+      "text": "separately",
+      "start": 48.079,
+      "duration": 5.361
+    },
+    {
+      "text": "um so here in the first case we have uh",
+      "start": 49.36,
+      "duration": 7.28
+    },
+    {
+      "text": "just a pretty classic uh pattern where",
+      "start": 53.44,
+      "duration": 5.04
+    },
+    {
+      "text": "you have one user that's going to be",
+      "start": 56.64,
+      "duration": 3.599
+    },
+    {
+      "text": "writing to a data store and then you",
+      "start": 58.48,
+      "duration": 3.68
+    },
+    {
+      "text": "read from it",
+      "start": 60.239,
+      "duration": 4.56
+    },
+    {
+      "text": "and so in this traditional setup uh you",
+      "start": 62.16,
+      "duration": 4.72
+    },
+    {
+      "text": "would have a strong consistency so we",
+      "start": 64.799,
+      "duration": 3.521
+    },
+    {
+      "text": "could say for example that the data",
+      "start": 66.88,
+      "duration": 4.72
+    },
+    {
+      "text": "store is postgresql for example",
+      "start": 68.32,
+      "duration": 5.92
+    },
+    {
+      "text": "so you would have your right going in to",
+      "start": 71.6,
+      "duration": 4.72
+    },
+    {
+      "text": "the right service it performs the right",
+      "start": 74.24,
+      "duration": 4.239
+    },
+    {
+      "text": "operation on the data store",
+      "start": 76.32,
+      "duration": 4.32
+    },
+    {
+      "text": "data store says yep i wrote it back",
+      "start": 78.479,
+      "duration": 4.801
+    },
+    {
+      "text": "successfully and then it returned to 200",
+      "start": 80.64,
+      "duration": 4.72
+    },
+    {
+      "text": "okay to the",
+      "start": 83.28,
+      "duration": 3.12
+    },
+    {
+      "text": "client",
+      "start": 85.36,
+      "duration": 3.119
+    },
+    {
+      "text": "and then you have the read one it comes",
+      "start": 86.4,
+      "duration": 3.84
+    },
+    {
+      "text": "in with a request and then it's just",
+      "start": 88.479,
+      "duration": 5.201
+    },
+    {
+      "text": "going to immediately see that data so as",
+      "start": 90.24,
+      "duration": 6.879
+    },
+    {
+      "text": "soon as the right scenario is done the",
+      "start": 93.68,
+      "duration": 5.52
+    },
+    {
+      "text": "reader will be able to pick up on it as",
+      "start": 97.119,
+      "duration": 4.801
+    },
+    {
+      "text": "soon as that 200 okay returns back",
+      "start": 99.2,
+      "duration": 7.36
+    },
+    {
+      "text": "so uh the right case here just involves",
+      "start": 101.92,
+      "duration": 7.44
+    },
+    {
+      "text": "what you see here now what happens if",
+      "start": 106.56,
+      "duration": 5.12
+    },
+    {
+      "text": "you introduce a message broker between",
+      "start": 109.36,
+      "duration": 4.56
+    },
+    {
+      "text": "the right capture service and the data",
+      "start": 111.68,
+      "duration": 3.119
+    },
+    {
+      "text": "store",
+      "start": 113.92,
+      "duration": 4.4
+    },
+    {
+      "text": "so i have that diagram written over here",
+      "start": 114.799,
+      "duration": 5.761
+    },
+    {
+      "text": "and uh the",
+      "start": 118.32,
+      "duration": 4.72
+    },
+    {
+      "text": "difference is that",
+      "start": 120.56,
+      "duration": 5.68
+    },
+    {
+      "text": "the right capture store only has to",
+      "start": 123.04,
+      "duration": 5.04
+    },
+    {
+      "text": "write to the message broker before it",
+      "start": 126.24,
+      "duration": 4.159
+    },
+    {
+      "text": "returns back successfully",
+      "start": 128.08,
+      "duration": 4.4
+    },
+    {
+      "text": "to the client",
+      "start": 130.399,
+      "duration": 4.881
+    },
+    {
+      "text": "um so you have a request come in",
+      "start": 132.48,
+      "duration": 4.96
+    },
+    {
+      "text": "the right capture service receives it it",
+      "start": 135.28,
+      "duration": 3.679
+    },
+    {
+      "text": "writes the message broker and then it",
+      "start": 137.44,
+      "duration": 4.159
+    },
+    {
+      "text": "immediately returns back a message",
+      "start": 138.959,
+      "duration": 4.64
+    },
+    {
+      "text": "to the right service like yep i've got",
+      "start": 141.599,
+      "duration": 4.481
+    },
+    {
+      "text": "it on the broker uh it's stored here in",
+      "start": 143.599,
+      "duration": 5.28
+    },
+    {
+      "text": "kafka kinesis sqs whatever it is and",
+      "start": 146.08,
+      "duration": 4.72
+    },
+    {
+      "text": "then it returns back 200 okay",
+      "start": 148.879,
+      "duration": 4.241
+    },
+    {
+      "text": "well so what if there's an outage",
+      "start": 150.8,
+      "duration": 5.68
+    },
+    {
+      "text": "downstream for example the data store",
+      "start": 153.12,
+      "duration": 6.56
+    },
+    {
+      "text": "or perhaps uh the",
+      "start": 156.48,
+      "duration": 6.0
+    },
+    {
+      "text": "um task runners for some reason are down",
+      "start": 159.68,
+      "duration": 5.12
+    },
+    {
+      "text": "so either this or this",
+      "start": 162.48,
+      "duration": 4.8
+    },
+    {
+      "text": "then uh you'll have it written and",
+      "start": 164.8,
+      "duration": 4.48
+    },
+    {
+      "text": "you'll think oh okay so it's it's uh",
+      "start": 167.28,
+      "duration": 3.28
+    },
+    {
+      "text": "it's captured it's it's going to be",
+      "start": 169.28,
+      "duration": 2.959
+    },
+    {
+      "text": "available to the readers",
+      "start": 170.56,
+      "duration": 3.679
+    },
+    {
+      "text": "uh but if you have an outage this could",
+      "start": 172.239,
+      "duration": 3.841
+    },
+    {
+      "text": "be several hours it could even be a",
+      "start": 174.239,
+      "duration": 4.481
+    },
+    {
+      "text": "whole day uh it's a data store it's down",
+      "start": 176.08,
+      "duration": 4.799
+    },
+    {
+      "text": "you could even get a lost right",
+      "start": 178.72,
+      "duration": 4.879
+    },
+    {
+      "text": "uh if you don't have this set up uh if",
+      "start": 180.879,
+      "duration": 4.241
+    },
+    {
+      "text": "you don't have a good retention policy",
+      "start": 183.599,
+      "duration": 2.881
+    },
+    {
+      "text": "you could actually get your right",
+      "start": 185.12,
+      "duration": 3.28
+    },
+    {
+      "text": "operations lost",
+      "start": 186.48,
+      "duration": 4.64
+    },
+    {
+      "text": "um and so uh this read service it won't",
+      "start": 188.4,
+      "duration": 4.96
+    },
+    {
+      "text": "see your data until your data makes",
+      "start": 191.12,
+      "duration": 4.72
+    },
+    {
+      "text": "always all the way from a message broker",
+      "start": 193.36,
+      "duration": 4.0
+    },
+    {
+      "text": "to the data store you're going to have",
+      "start": 195.84,
+      "duration": 2.96
+    },
+    {
+      "text": "stale reads",
+      "start": 197.36,
+      "duration": 4.64
+    },
+    {
+      "text": "um so the the right scenario here only",
+      "start": 198.8,
+      "duration": 6.0
+    },
+    {
+      "text": "involves what you see",
+      "start": 202.0,
+      "duration": 4.239
+    },
+    {
+      "text": "over here",
+      "start": 204.8,
+      "duration": 3.92
+    },
+    {
+      "text": "uh you're just making onto the message",
+      "start": 206.239,
+      "duration": 4.881
+    },
+    {
+      "text": "broker and in ddia",
+      "start": 208.72,
+      "duration": 4.159
+    },
+    {
+      "text": "designing data intensive applications it",
+      "start": 211.12,
+      "duration": 3.52
+    },
+    {
+      "text": "said message brokers you can kind of",
+      "start": 212.879,
+      "duration": 4.08
+    },
+    {
+      "text": "think of them as a as a data store",
+      "start": 214.64,
+      "duration": 4.56
+    },
+    {
+      "text": "and uh that's that's true it's just",
+      "start": 216.959,
+      "duration": 3.92
+    },
+    {
+      "text": "you're storing the data on a message",
+      "start": 219.2,
+      "duration": 3.92
+    },
+    {
+      "text": "broker in fact i think with kinesis in",
+      "start": 220.879,
+      "duration": 3.601
+    },
+    {
+      "text": "aws",
+      "start": 223.12,
+      "duration": 3.28
+    },
+    {
+      "text": "it might actually be implemented on top",
+      "start": 224.48,
+      "duration": 4.8
+    },
+    {
+      "text": "of dynamodb if i'm remembering correctly",
+      "start": 226.4,
+      "duration": 4.16
+    },
+    {
+      "text": "it's the right scenario it's just",
+      "start": 229.28,
+      "duration": 2.56
+    },
+    {
+      "text": "getting to the message broker before it",
+      "start": 230.56,
+      "duration": 3.2
+    },
+    {
+      "text": "returns back to success",
+      "start": 231.84,
+      "duration": 3.52
+    },
+    {
+      "text": "um why would you even want a message",
+      "start": 233.76,
+      "duration": 5.199
+    },
+    {
+      "text": "broker really um well so",
+      "start": 235.36,
+      "duration": 6.079
+    },
+    {
+      "text": "it's good for increasing availability",
+      "start": 238.959,
+      "duration": 4.321
+    },
+    {
+      "text": "um so uh",
+      "start": 241.439,
+      "duration": 3.681
+    },
+    {
+      "text": "if if you don't want to",
+      "start": 243.28,
+      "duration": 4.159
+    },
+    {
+      "text": "you don't want to overload the data",
+      "start": 245.12,
+      "duration": 4.64
+    },
+    {
+      "text": "store for example if it's a time series",
+      "start": 247.439,
+      "duration": 4.401
+    },
+    {
+      "text": "database it's uh it's a common practice",
+      "start": 249.76,
+      "duration": 3.52
+    },
+    {
+      "text": "stick a message broker in front if you",
+      "start": 251.84,
+      "duration": 3.44
+    },
+    {
+      "text": "want to improve the availability",
+      "start": 253.28,
+      "duration": 3.44
+    },
+    {
+      "text": "what you're what you're doing is",
+      "start": 255.28,
+      "duration": 4.16
+    },
+    {
+      "text": "basically turning a push into a pull",
+      "start": 256.72,
+      "duration": 3.519
+    },
+    {
+      "text": "so",
+      "start": 259.44,
+      "duration": 3.039
+    },
+    {
+      "text": "you have a right service it's pushing",
+      "start": 260.239,
+      "duration": 4.721
+    },
+    {
+      "text": "onto a message broker which is designed",
+      "start": 262.479,
+      "duration": 4.481
+    },
+    {
+      "text": "for high availability you have some kind",
+      "start": 264.96,
+      "duration": 3.76
+    },
+    {
+      "text": "of other data store that's not designed",
+      "start": 266.96,
+      "duration": 4.08
+    },
+    {
+      "text": "explicitly for high availability and so",
+      "start": 268.72,
+      "duration": 4.56
+    },
+    {
+      "text": "then you can pull off of the message",
+      "start": 271.04,
+      "duration": 3.52
+    },
+    {
+      "text": "broker and",
+      "start": 273.28,
+      "duration": 4.08
+    },
+    {
+      "text": "push with retries very effectively you",
+      "start": 274.56,
+      "duration": 4.4
+    },
+    {
+      "text": "don't really want to have your retry",
+      "start": 277.36,
+      "duration": 5.279
+    },
+    {
+      "text": "logic on the right service because that",
+      "start": 278.96,
+      "duration": 6.72
+    },
+    {
+      "text": "uh could increase a lot of latency uh",
+      "start": 282.639,
+      "duration": 5.521
+    },
+    {
+      "text": "you'd have to have your retries before",
+      "start": 285.68,
+      "duration": 4.799
+    },
+    {
+      "text": "you return to 200 success it's easier",
+      "start": 288.16,
+      "duration": 4.4
+    },
+    {
+      "text": "just to have it written on to a highly",
+      "start": 290.479,
+      "duration": 3.601
+    },
+    {
+      "text": "available service",
+      "start": 292.56,
+      "duration": 4.88
+    },
+    {
+      "text": "uh that isn't as hard to uh persist it",
+      "start": 294.08,
+      "duration": 4.32
+    },
+    {
+      "text": "to",
+      "start": 297.44,
+      "duration": 4.08
+    },
+    {
+      "text": "um uh you typically don't really account",
+      "start": 298.4,
+      "duration": 3.92
+    },
+    {
+      "text": "for",
+      "start": 301.52,
+      "duration": 4.239
+    },
+    {
+      "text": "uh streams to be down uh when you're",
+      "start": 302.32,
+      "duration": 5.04
+    },
+    {
+      "text": "designing when you're doing a system",
+      "start": 305.759,
+      "duration": 2.561
+    },
+    {
+      "text": "design",
+      "start": 307.36,
+      "duration": 3.04
+    },
+    {
+      "text": "uh you might be able to account for a",
+      "start": 308.32,
+      "duration": 3.84
+    },
+    {
+      "text": "message broker being down and you just",
+      "start": 310.4,
+      "duration": 4.16
+    },
+    {
+      "text": "do that by adding a message that you",
+      "start": 312.16,
+      "duration": 3.759
+    },
+    {
+      "text": "might be able to account for a data",
+      "start": 314.56,
+      "duration": 3.04
+    },
+    {
+      "text": "store being done you just kind of do",
+      "start": 315.919,
+      "duration": 3.521
+    },
+    {
+      "text": "that by um throwing a message broker in",
+      "start": 317.6,
+      "duration": 4.0
+    },
+    {
+      "text": "front of it um but you don't really",
+      "start": 319.44,
+      "duration": 4.16
+    },
+    {
+      "text": "account for message brokers going down",
+      "start": 321.6,
+      "duration": 3.68
+    },
+    {
+      "text": "and any system designs that i've really",
+      "start": 323.6,
+      "duration": 3.599
+    },
+    {
+      "text": "seen you don't really expect kafka to go",
+      "start": 325.28,
+      "duration": 3.28
+    },
+    {
+      "text": "down it's kind of like trying to design",
+      "start": 327.199,
+      "duration": 4.161
+    },
+    {
+      "text": "for aws itself going down which i mean",
+      "start": 328.56,
+      "duration": 4.0
+    },
+    {
+      "text": "i've seen a couple of times but",
+      "start": 331.36,
+      "duration": 2.48
+    },
+    {
+      "text": "typically you don't really do it",
+      "start": 332.56,
+      "duration": 2.72
+    },
+    {
+      "text": "particularly in a system design",
+      "start": 333.84,
+      "duration": 2.32
+    },
+    {
+      "text": "interview",
+      "start": 335.28,
+      "duration": 3.919
+    },
+    {
+      "text": "so it's it's uh you can expect a data",
+      "start": 336.16,
+      "duration": 4.24
+    },
+    {
+      "text": "store to go down but not really a",
+      "start": 339.199,
+      "duration": 2.641
+    },
+    {
+      "text": "message broker",
+      "start": 340.4,
+      "duration": 4.239
+    },
+    {
+      "text": "um and again all it really does for",
+      "start": 341.84,
+      "duration": 4.72
+    },
+    {
+      "text": "improving availability of the data store",
+      "start": 344.639,
+      "duration": 4.881
+    },
+    {
+      "text": "is you're you're turning a push into a",
+      "start": 346.56,
+      "duration": 5.12
+    },
+    {
+      "text": "pull off of it and persisting it",
+      "start": 349.52,
+      "duration": 5.04
+    },
+    {
+      "text": "and um so it's it's very advantageous",
+      "start": 351.68,
+      "duration": 5.04
+    },
+    {
+      "text": "for availability and again with cap",
+      "start": 354.56,
+      "duration": 4.479
+    },
+    {
+      "text": "theorem you see how that that trade-off",
+      "start": 356.72,
+      "duration": 3.44
+    },
+    {
+      "text": "kind of um",
+      "start": 359.039,
+      "duration": 3.361
+    },
+    {
+      "text": "works out in cap theorem with uh trading",
+      "start": 360.16,
+      "duration": 3.84
+    },
+    {
+      "text": "off availability for",
+      "start": 362.4,
+      "duration": 3.76
+    },
+    {
+      "text": "trading off consistency for availability",
+      "start": 364.0,
+      "duration": 4.0
+    },
+    {
+      "text": "so you've improved availability but",
+      "start": 366.16,
+      "duration": 3.44
+    },
+    {
+      "text": "again if you have strong consistency",
+      "start": 368.0,
+      "duration": 3.28
+    },
+    {
+      "text": "here you've gotten rid of it you've",
+      "start": 369.6,
+      "duration": 3.2
+    },
+    {
+      "text": "improved availability and you've",
+      "start": 371.28,
+      "duration": 4.24
+    },
+    {
+      "text": "decreased consistency so that's you know",
+      "start": 372.8,
+      "duration": 5.679
+    },
+    {
+      "text": "cap theorem uh consistency availability",
+      "start": 375.52,
+      "duration": 5.519
+    },
+    {
+      "text": "partitioning tolerance pick two",
+      "start": 378.479,
+      "duration": 4.241
+    },
+    {
+      "text": "you can't you can't say no i'm not going",
+      "start": 381.039,
+      "duration": 3.681
+    },
+    {
+      "text": "to give up partitioning tolerance uh",
+      "start": 382.72,
+      "duration": 4.16
+    },
+    {
+      "text": "it's it's actually consistency or",
+      "start": 384.72,
+      "duration": 4.0
+    },
+    {
+      "text": "availability pick one",
+      "start": 386.88,
+      "duration": 3.68
+    },
+    {
+      "text": "and um so if you're improving",
+      "start": 388.72,
+      "duration": 4.64
+    },
+    {
+      "text": "availability with a message broker you",
+      "start": 390.56,
+      "duration": 4.639
+    },
+    {
+      "text": "are getting rid of uh consistency and",
+      "start": 393.36,
+      "duration": 4.16
+    },
+    {
+      "text": "that's how that whole thing works out",
+      "start": 395.199,
+      "duration": 3.361
+    },
+    {
+      "text": "is um",
+      "start": 397.52,
+      "duration": 1.92
+    },
+    {
+      "text": "uh",
+      "start": 398.56,
+      "duration": 3.6
+    },
+    {
+      "text": "when you're when your data stores down",
+      "start": 399.44,
+      "duration": 3.92
+    },
+    {
+      "text": "it's uh",
+      "start": 402.16,
+      "duration": 3.36
+    },
+    {
+      "text": "it's gonna be more available your rights",
+      "start": 403.36,
+      "duration": 3.92
+    },
+    {
+      "text": "are more available but then you're going",
+      "start": 405.52,
+      "duration": 3.679
+    },
+    {
+      "text": "to get stale reads from the read service",
+      "start": 407.28,
+      "duration": 4.479
+    },
+    {
+      "text": "it's not going to immediately see the",
+      "start": 409.199,
+      "duration": 5.041
+    },
+    {
+      "text": "data from the data store as opposed to",
+      "start": 411.759,
+      "duration": 4.481
+    },
+    {
+      "text": "if you really want strong consistency in",
+      "start": 414.24,
+      "duration": 4.32
+    },
+    {
+      "text": "your design for example it's the wallet",
+      "start": 416.24,
+      "duration": 4.0
+    },
+    {
+      "text": "service",
+      "start": 418.56,
+      "duration": 5.12
+    },
+    {
+      "text": "from alex u's second book or if it's a",
+      "start": 420.24,
+      "duration": 4.959
+    },
+    {
+      "text": "stock exchange design or something",
+      "start": 423.68,
+      "duration": 2.959
+    },
+    {
+      "text": "similar where you want really strong",
+      "start": 425.199,
+      "duration": 2.72
+    },
+    {
+      "text": "consistency",
+      "start": 426.639,
+      "duration": 3.361
+    },
+    {
+      "text": "you might want to go ahead and just not",
+      "start": 427.919,
+      "duration": 4.241
+    },
+    {
+      "text": "have the message broker at all",
+      "start": 430.0,
+      "duration": 3.52
+    },
+    {
+      "text": "since that would force you into stale",
+      "start": 432.16,
+      "duration": 3.599
+    },
+    {
+      "text": "reads and so yes you're going to get",
+      "start": 433.52,
+      "duration": 5.36
+    },
+    {
+      "text": "lower availability but every single uh",
+      "start": 435.759,
+      "duration": 5.601
+    },
+    {
+      "text": "200 success you get off of the right",
+      "start": 438.88,
+      "duration": 5.599
+    },
+    {
+      "text": "service is guaranteed to have a strong",
+      "start": 441.36,
+      "duration": 5.44
+    },
+    {
+      "text": "uh it's strong consistency and and it",
+      "start": 444.479,
+      "duration": 4.641
+    },
+    {
+      "text": "will not have still reads as long as",
+      "start": 446.8,
+      "duration": 4.399
+    },
+    {
+      "text": "you're using something like postgresql",
+      "start": 449.12,
+      "duration": 3.44
+    },
+    {
+      "text": "or spanner or something else that",
+      "start": 451.199,
+      "duration": 2.481
+    },
+    {
+      "text": "supports",
+      "start": 452.56,
+      "duration": 2.24
+    },
+    {
+      "text": "uh",
+      "start": 453.68,
+      "duration": 3.44
+    },
+    {
+      "text": "strong consistency then you'll you'll",
+      "start": 454.8,
+      "duration": 3.92
+    },
+    {
+      "text": "have that strong consistency as long as",
+      "start": 457.12,
+      "duration": 3.359
+    },
+    {
+      "text": "you do not throw a message broker in",
+      "start": 458.72,
+      "duration": 2.8
+    },
+    {
+      "text": "there",
+      "start": 460.479,
+      "duration": 3.041
+    },
+    {
+      "text": "so there you have it uh when would you",
+      "start": 461.52,
+      "duration": 4.56
+    },
+    {
+      "text": "not want to use a message broker",
+      "start": 463.52,
+      "duration": 5.119
+    },
+    {
+      "text": "it is hard to see some cases but one of",
+      "start": 466.08,
+      "duration": 4.8
+    },
+    {
+      "text": "them is when you want strong consistency",
+      "start": 468.639,
+      "duration": 6.521
+    },
+    {
+      "text": "for your data store thanks",
+      "start": 470.88,
+      "duration": 4.28
+    }
+  ]
+}

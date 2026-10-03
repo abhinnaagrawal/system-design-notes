@@ -1,0 +1,631 @@
+Hey guys, welcome to System Design Fight Club. Today I'm going to be going over 
+most of what I know about database indexing. This is a topic that I've wanted to
+ do for a while, so I'm pretty excited to finally get a chance to cover it. Uh w
+hat we have here at the front is a list of all the things that I'm hoping to cov
+er in this video. Along the left are some visuals I'm hoping will really help wh
+en I'm trying to explain some of these concepts. Hopefully, I'll get around to a
+dding some chapters or key moments or whatever it's called to this video so that
+ it gets much easier to click around for whatever uh concept you're most interes
+ted in hearing about. Otherwise, this is basically the end of the script that I'
+ve actually written out for this video. And uh video editing takes a tremendous 
+amount of time, which is why I don't do that. So, the video is about to get a bi
+t more clunky. Um most of what I know about this topic comes from the following 
+resources. uh designing data intensive applications by Martin Kleman and databas
+e internals by Alex Petrov. This is uh kind of going to be relevant a little bit
+ later in the video. I've also had to read a lot of documentation on specific da
+tabases to figure out certain things like um what databases support what feature
+s, why those features even make sense. Um there was a few that aren't even cover
+ed in these books such as um vector indices, skip lists. So, um, that's why I fe
+lt compelled to even make this video. I I'm not just going to summarize those bo
+oks and make a video about it. That's lame. Uh, we're going to add a little bit 
+more that aren't covered in those, um, books. So, there's two key concepts that 
+I think are going to be really important for setting some context for, uh, the t
+ypes of indexes that I'm going to be covering. Uh, the first one is the rum conj
+ecture. You can read about it in database internals by Alex Petrov. It's the bes
+t thing that I think covers the rum conjecture. I actually couldn't even find a 
+Wikipedia article about the Rome conjecture. Um, it has uh I think it came from 
+a a paper an academic paper. There's a whole academic paper about it. It's this 
+really obvious concept, but like you you don't it's one of those things that lik
+e after it's explained to you, it like really helps to uh think about stuff, but
+ um it's it's like super obvious. It's kind of like CAP theorem but for uh index
+es. So RUM stands for read update memory overhead. Um and you have to make a tra
+de-off between the speed of your read operations and the speed of your write ope
+rations. Um you can kind of do uh a little trade-off involving memory overhead. 
+That's a little bit of a in between on those. An example of that is with LSM tre
+es where your right operations are super fast. they just go straight to um disk,
+ just a a pinned to file. They're very fast, but then you have all this extra sp
+ace wasted at the end of this file. It's just kind of sitting around. Um so that
+ that's that's where you you have this wasted memory by trying to make your read
+ operations a lot more fast. Um and uh I think I'd already said that there isn't
+ really a Wikipedia article on rum conjecture. The best resource for finding stu
+ff about it is on database internals by Alex Petrov. um or maybe the the the aca
+demic paper on it. The second concept uh you might have read you might have seen
+ this before if you've read designing data intensive applications by Martin Kman
+. It's that a database is basically a write ahead log with a materialized view. 
+For example, Kafka can kind of be thought of as purely a write ahead log. Um if 
+you were to add indexes to Kafka, you're kind of turning it into a database. The
+ fastest way to do um write operations in a database is if you have uh no indexe
+s at all. if you just have the the righthead log on its own, it's a a really um 
+insightful way to kind of view databases is that you just start with the righthe
+ad log and then you can kind of um add these indexes over top of it as a materia
+lized view. So that's also kind of why uh the first type of index I want to cove
+r is no index. Um so if you don't have any indexes at all, you just have the rig
+ht ahead log. That's all that's left. Uh that's the fastest way to do a write op
+eration. That's why I wanted to cover it is that like like I said with run conje
+cture um the when you whenever you add a index you're making a trade-off of um i
+ncreasing the uh amount of time that takes to perform a write operation. Uh when
+ever you add an index that means that every time you're trying to add a new reco
+rd there's a little bit of extra uh processing time that needs to be used in ord
+er to update all the indexes that it's going to be included on. Um, so the faste
+st way to do a write operation is if you don't have any uh if you don't have any
+ indexes at all. And so that's why Kafka is um really fast at handling uh write 
+operations. There's there's no indexes on it. Um data warehouses also don't real
+ly have um indexes. Uh so when you when you add these indexes, it speeds up your
+ uh record lookups. If you're trying to look up a individual record, you're goin
+g to have like a log of in access, but typically when you're working with data w
+arehouses, it's um OLAP queries and you're just doing full table scans anyways. 
+So, you don't really need to have really fast lookups of individual records beca
+use you're just going to go ahead and scan the full table anyways. Uh in some ca
+ses, you might add a materialized an actual thing called a materialized view. An
+d we're going to maybe talk about that a little bit at the end. Um I'm not super
+ familiar with those materialized views, but um usually when I've done something
+ with um a data warehouse or with OLAP queries. Um it just kind of pulls out the
+ entire file and it just kind of scans over the whole thing. And so they actuall
+y just kind of um typically forego the use of uh indexes entirely and then they 
+just do something a little bit alternative where they have the column R data sto
+rage where um it's really fast at doing those full table scans over a record ove
+r over a column. So you would maybe like filter the the full table over um speci
+fic ranges uh for the value. Um, and so you're just scanning down the full table
+ along one of those columns. And so then the the column access is really fast, b
+ut you don't have any secondary indexes because you're not doing individual uh r
+ecord lookups. Um, when you're doing something like a Spark job, I'd imagine tha
+t it might be doing something to have these other auxiliary data structures in m
+emory. I'd imagine, but but like on disk, it it like pulls stuff into memory. An
+d so like the on disk storage is just going to be column R. It's not going to ha
+ve any secondary indexes there. Um and uh well that's my coverage for no index. 
+Uh for primary keys um we're of course going to talk about it in a distributed s
+etting as well. Uh primary key is a partition key plus an optional sort key. Um 
+the partition key is basically what node that you're going to put the record ont
+o. And then that also helps for retrieval because then it's going to know what u
+h what node to pull the data off of. Um picking out a proper partitioning key is
+ really important for making sure your key range queries are really efficient. U
+m I have some diagrams over here um to kind of show that with key range queries.
+ Um so it's it's it's like if you don't pick out a proper partition key, you you
+ get this like scatter gather that's not really performant. I have a whole video
+ on this that's 100 seconds long and a lot more uh welllaid out. Um but uh parti
+tioning keys very important for picking out uh for for uh optimizing the perform
+ance of your key range queries. Um I did actually kind of have some examples for
+ that. Um so traditionally under uh so let let's say that we have a posts table 
+for a social media website something kind of like Facebook but not necessarily s
+uch huge volume. um and you don't really have celebrity issues. So, this schema 
+might kind of make sense. Um when it's under a single node setup, uh you would b
+e able to do an auto increment like this. Uh and you can just have um when you h
+ave the whole thing on one node, it's possible to just colllocate all of the rec
+ords. And so then you're able to just go ahead and use a primary key right here.
+ Um but when it's distributed, you're not actually able to do an auto increment.
+ And then your uh your uh primary key your your so you can't do a um an auto inc
+rement in a distributed database. That would require total ordering. That's why 
+you can't do an auto increment in distributed database. Well, you can if it's li
+nearizable like Spanner. Um but that's also really expensive. And so usually you
+ try and avoid having to do a total ordering by just dodging the the need for an
+ auto increment. you just get rid of the auto increment and then you just have u
+yu IDs instead that look like this. And so uh then you're you're you can still u
+se this as a a primary key I guess in distributed setting. Um and so if you're g
+oing to do hash partitioning um in a distributed database you can go ahead and u
+se post ID for that. Um and and it would still know like what node to uh go to f
+or the write operation and for the read operation. But your key range queries um
+ like I said uh over here for uh how it looks under hash partitioning you now do
+n't know what uh node that a specific thing might uh live on if you're doing a k
+ey range query. So if I'm trying to retrieve like all of my own posts on uh so l
+ike let's say that I'm doing a view of my um own accounts posts. Uh so it's like
+ the if you go to my Twitter account or something like that then um you would wa
+nt to have all of my posts come come up and um those might be on a bunch of diff
+erent nodes. Uh so that's why it looks like this under a hash partitioning. Um s
+o that's actually really inefficient. You want to avoid doing that scatter gathe
+r like that. And so that's why you would pick out a partitioning key of um this.
+ And then uh that's not uniquely identifying. You need to have a sort key as wel
+l. And so your sort key can be something like uh this one. And then you have you
+r uniqueness constraint satisfied. And then when you're doing a key range query 
+for a specific user, you would have it uh all servable off of a single node. Um 
+and you have your unique your uniqueness constraint satisfied. Um so you'd also 
+be able to look up individual posts. So, like with Twitter for example, um somet
+imes news articles will do this thing where they show a specific tweet and um if
+ you click on that tweet, it'll pull up a page that consists solely of that sing
+ular tweet. Um and so then it's not doing a key range query, it's doing a a sing
+le record lookup. And so you don't have to like so under that scenario, hash par
+titioning works just fine. But the fact that you still have the user profiles um
+ is why you would typically want to use a partitioning key so that you can serve
+ up those key range queries really efficiently. Um yeah. Okay. Um was there anyt
+hing else I wanted to cover for primary keys? Oh, well, so there's a second sort
+ key that we could have used here. We probably could have used the time stamp as
+ the sort key unless we allowed users to post two tweets in the same millisecond
+. Um, so I I mean maybe we'd have some kind of rate limiting. It would it'd be k
+ind of hard to properly enforce that without having a linearizable database. Um,
+ so the the safer thing to do would probably be to just go ahead and go off of p
+ost IDs because you can go ahead and generate a UYU ID properly. Um, but this is
+ a good candidate for like a secondary index for example. Uh, and we'll talk abo
+ut secondary indexes a bit more later in the video. Um, I think first I want to 
+talk about KV stores. So KV stores actually use a hash table in RAM. Um, typical
+ly when you're working with a cache like memcacheed, um, or Reddus, I I don't ac
+tually like using Reddus for this example because typically your cache is not go
+ing to support secondary indexes and it's not going to support persisting to dis
+k, which Reddus does. Reddus used to just be a cache. Um, but now it supports al
+l these crazy things that are used for regular old databases. So, memcache is a 
+better example of this. It's entirely in RAM. I'm fairly certain. I'm fairly cer
+tain they're not pulling a Reddus and just doing tons of crazy features. I'm pre
+tty sure it's just a plain old key store. Uh, usually caches don't support any s
+econdary indexes at all. Um, and uh, so it's entirely in RAM. Uh, I was I was ac
+tually really curious about why there aren't any um, persistent databases that a
+lso support this like hasht thing. Apparently hashts don't work on disk. Um so w
+ith Bres's log of in lookup a hashts bigo of one. So it was like why don't you s
+upport having a hasht style um index on like dynamob or something. Apparently ha
+shts just don't really work on disk from what I've heard. Um but they they're mu
+ch more efficient than than b trees or lsm trees that the most efficient way of 
+looking up a record you know big O of one that's a hash table. You can't have it
+ with disk apparently. you can't have it on a hard disk. Um, so that's why you c
+an only find that with like memcache or reddus. Uh, and I thought that was reall
+y fascinating. Um, and since the the lookups, so like I said with with memcache,
+ it usually usually caches don't support secondary indexes at all. Um, so you're
+ only going to be able to support single record lookups where you specify like t
+he full primary key in order to retrieve the full record. And um um because of t
+hat uh you don't have that concern that you would have with um key range queries
+. You you don't have key range queries really on um caches uh to my understandin
+g. So it it makes a lot of sense to actually do hash partitioning I think most t
+he time with caches. Um, with Reddus, you might do some other things because you
+ might be taking advantage of indices. But I think with caches, you would usuall
+y want to use a hash partitioning strategy because you're mainly just doing sing
+le record lookups because it's a key value store. You're looking up a specific k
+ey for a specific value. So, you can go ahead and use hash partitioning almost a
+ll the time with those. Um, and then that brings us to uh the traditional um ind
+exes that you're going to see talked about the most. Uh, B trees and LSM trees. 
+These usually apply to the primary key. Um you usually see those more rare types
+ of uh indexes when you're talking about um the secondary indexes. So like r tre
+es, inverted indexes, those usually apply a lot more to um the secondary index. 
+Uh the primary index. Um so this is this is what's used by default for your prim
+ary keys. If you're not specifying something else, you're usually going to get e
+ither a B tree or an LSM tree. And the default tree that's used is going to depe
+nd on the implementation internals of your database. So for DynamoB, the storage
+ engine that it uses um is actually going to use uh B trees. I don't know what t
+he spec specific um storage engine that uses um is called um whether it's like N
+ODB versus like wired tiger or something like that. But I do know that it curren
+tly uses B trees. Um for other um databases like Cassandra, u it uses um LSM tre
+es. Um Spanner uh also uses an LSM tree. Um I actually was a little surprised by
+ that. I thought it might have used a B tree, but um LSM trees were actually I t
+hink kind of invented at Google. So it does kind of make sense that most of thei
+r databases like Spanner are going to be using an LSM tree as well. Um, but uh t
+his this is like these are the default indexes that are going to be used by your
+ database if you don't specify uh anything else. And uh it's it's usually what y
+ou're I I I don't think you can get any of the weird types of trees for your pri
+mary key. I don't know if you can actually get an R tree for your primary key. I
+t's it's typically going to be one of these two. Um and uh one of them is so B t
+rees are actually read optimized. So we see that run conjecture coming up here i
+s that one of them is more optimized for read operations while the other one is 
+more op uh more optimized for write operations. Um B trees are the most efficien
+t uh it's it's the most efficient way to look up a record for read operations wh
+ile for LSM trees it's a it's a simple append to file like I said earlier and so
+ it's a lot more optimized for writes. There's actually more tuning you can do u
+h within B trees and LSM trees that actually uh are are uh doing more fancy stuf
+f with that trade-off between um read latency and write latency. Um so for for B
+ trees, for example, you actually have BW trees. There's a few others. Um they'r
+e they're described in detail in database internals by Alex Petrov. I'm not goin
+g to go over them here. Um, so like I can't specify to Dynamo DB that I want to 
+use a BW tree or like a B+ tree or B star tree or whatever they're all called. U
+m, so I I'm like not really able to pick which of these I'm going to use. I do k
+now that it's going to vary depending on what storage engine that you use. So I 
+think MongoDB for example has this variation of B trees where it like buffers th
+e rights which is really interesting. But like I'm I'm not able to specify that 
+uh within like which database I'm using. I can't specify that to Dynamo DB. And 
+I think that the trade-offs between like a regular B tree and like a BW tree are
+ not going to be significant enough to really force me to switch from DynamoB ov
+er to MongoDB. Um so that's why I haven't really studied it myself a whole lot. 
+if you're really interested in like rolling your own database from scratch, you'
+d probably want to like look into that a whole lot. Um, and again, uh, database 
+internals is probably the best book for that. I couldn't find that kind of detai
+ls, um, in any other any of the other books that I've, uh, been reading so far. 
+Um, and then, uh, LSM tries also do have some kind of tuning that you can do in 
+terms of like the the rate of the compactions that it does. Um, but, uh, again, 
+it still is an LSM tree. It still is an LSM tree. it's it's not doing it. It jus
+t has a different layout to its files than the way that B trees do. And so you'r
+e just really not going to get the same kind of um read speed that you would wit
+h just using a B tree. Um but there is options for trying to tune it a little bi
+t. Um I' I've never personally done that and I haven't heard of anybody that I h
+aven't seen any like company blog posts that uh really emphasize doing that kind
+ of thing. Okay, I'm trying to figure out if there was anything else that I want
+ed to cover before going over secondary indexes. Oh yeah, I don't know if I full
+y covered this while I was talking about the example with the different partitio
+ning strategies, but um so if you're specifying um a partitioning key and you wa
+nt to do hash partitioning, um if you're if you're trying to do hash partitionin
+g, this is what you'd use as the partitioning key. While if you're trying to do 
+range partitioning, you would use this as the partitioning key. if you're trying
+ to just um that's under the use case where you're trying to view a specific acc
+ount's profile with all their like tweets or all their Facebook posts. Um it's r
+ange partitioning because it pulls up all of their posts off of a single node. Y
+ou're able to service it like this. While if you were using this as the partitio
+ning key, um that's hash partitioning. And so it has it doesn't know which speci
+fic node all the posts are located on. they're actually probably spread a across
+ uh multiple and so you're going to get this scatter gather pattern. Um this is 
+detailed a lot in designing data intensive applications. I believe it's kind of 
+I think it's over in um like the fourth chapter. It's the one after where he tal
+ks about B trees versus LSM trees. I think it's the partitioning chapter. Okay, 
+I think we're good to move on to secondary indexes. Uh so this is where that lin
+k from W3 schools was really relevant. Um it doesn't just index like you don't h
+ave a secondary index on all four of these fields to begin with. You have to spe
+cify it using something like the create index uh statement which uh I usually se
+nd people this link when they hear me talking about secondary indexes that you t
+hat it's even a thing that you have to specify. Yes, if you want to have a log o
+f in lookup on um so for example uh with inverted indexes if you're trying to fi
+nd all the uh tweets that include the word coffee you're going to have to add a 
+inverted index over like this field uh you are able to do that in postgresql pos
+tgrql as well. It does support inverted indexes. We're going to go over that aga
+in towards the end. Um, but uh, if you wanted to be able to look up all of um, a
+ specific user's tweets that include a specific word, you have to add a secondar
+y index there. It's not there by default. And there's special syntax specificall
+y for doing that. It's it's not indexed by default, though. You have to manually
+ add secondary indexes. Uh, for Dynamo DB, it supports up to, I think, like 30 s
+econdary indexes. It supports up to 30 um, local secondary indexes. It sports I 
+think like eight global secondary indexes. I'm going to talk about the differenc
+e between these two things a little bit more later on, but um secondary indexes,
+ it's extra stuff. We're trying to speed it up. Um so, for example, if you're tr
+ying to add pagionation um uh as in like a paged view of a person's tweets where
+ they're sorted chronologically. Um, so for example, you you know, you have your
+ your the tweets that I sent in January and then you want to look at the tweets 
+I sent in, um, December, uh, and then another month back. Uh, you'd be sorting t
+hem by the time stamp. And, um, if you want to make that a lot faster, you would
+ go ahead and add a secondary index over this field. And if you don't specify wh
+at type of index that you want to use like arch tree versus um you know any of t
+hese other fancy ones like an inverted index by default it's going to use whatev
+er is built into the storage engine. So if you're I I think PostgresQL might act
+ually support uh using a different storage engine that is an LSM tree. Um but th
+e default storage engine of PostgresQL is definitely one that uses B trees to my
+ understanding. Um so uh that means that um whatever you specified as the uh pri
+mary key is going to use a B tree and then when you add a secondary index that i
+s also going to be a B tree. Um as opposed to Cassandra where the LSM tree is uh
+ what it uses for the default type of index. So in Cassandra um this would use u
+h well actually it'd be the sort key that uses an LSM tree. This one is just wha
+t node it's on. So the sort key is going to be what uses an LSM tree. And then i
+f you wanted to add a secondary index for the timestamp, that one is also going 
+to be an LSM tree. So whatever the default of the storage engine is is what it's
+ going to use by default for the secondary indexes. Um but you are also able to 
+specify um so in PostgreSQL, if you wanted to add a R tree over a couple of diff
+erent indexes, your a couple of different keys, you can actually specify that wo
+uld be an R tree. So, if you don't do that, it's it's just going to use the B tr
+ee by default. Um, and I'm also going to talk about concatenated indexes in a bi
+t, and that will that'll be interesting. Um, I'll just leave it at that. Um, so 
+I mentioned that the indexes are usually local. So, by default, your secondary i
+ndexes are going to be local secondary indexes as opposed to global secondary in
+dexes. Um, so that's also what's kind of going on here with the key range query 
+is that you can actually kind of um if you're not if you have data that lives on
+ a bunch of different nodes that you're trying to retrieve in a key range query,
+ you can go ahead and do a global secondary index on that, then it does actually
+ speed it up a lot. Um and so you don't really have that issue with the scatter 
+gather that you get under hash partitioning. But uh it requires um something tha
+t's a lot more intensive for the write operations. You actually have to go ahead
+ and write to all of the to my understanding you have to write to all of the nod
+es in order for the global index to work. Um, that's kind of like the difference
+ between a local versus global secondary index is that the local index is just a
+ B tree that's on that specific machine and it only has data about that one spec
+ific machine. For global secondary index, there's data about all the records bas
+ically on all the machines from what I've heard. And so in order to um add a rec
+ord or update a record, it has to send updates to multiple machines. So if you'r
+e updating just one record, it still has to write to multiple different machines
+ in order to update the global secondary index. And so that requires that that's
+ going to be uh very expensive for your write operations. It's good for your rea
+d. So again, we're seeing that that rum conjecture at play here is that you're a
+ble to speed up your your key range queries for the reads by adding a global sec
+ondary index, but it's very very expensive for your write operations, which is w
+hy you don't really see it in practice. Um, I've I've definitely not really seen
+ this um brought up in a lot of uh use cases because it's uh uh it it only reall
+y makes sense for cases where it's read heavy with uh a lot of key range queries
+ um and you're not able to avoid the scatter gather. Usually you're able to avoi
+d the scatter gather by doing by picking a proper partitioning key. So like with
+ with this example, we were able to avoid a scatter gather and that's what you u
+sually see. Um if for some reason you're not able to avoid that, it might make s
+ense to do uh the global secondary index. But um another alternative is that you
+'re you can just do um multiple read optimized views of a database. So you would
+ have your your your primary store and then you would just have multiple differe
+nt um downstream versions of it that are partitioned in different ways. And so t
+hen depending on the type of uh key range query like whether you're trying to lo
+ok at pageionated stuff by chronological order versus stuff by I don't know what
+ else it would be but like by by content or if you had some other thing that was
+ weird location. I guess you'd go ahead and partition by location on some other 
+secondary downstream data store. And then if you're trying to look at tweets fro
+m a specific location, you could go ahead and like read off of that or something
+. Um, so it it's it's rare that you would actually want to go for a global secon
+dary index. It it doesn't make sense in a lot of cases. It's it's I I have yet t
+o really find a case where it would make sense and you can't just do uh read opt
+imized views instead. It's it's interesting. Uh they are implemented in Dynamob.
+ Like I said, it supports up to like eight global secondary indexes. I think Spa
+nner supports it as well. Um but it just like doesn't make sense very often. So,
+ it's it's like a very fascinating feature and I'm actually like it's um I I kin
+d of have um it's not a huge goal for me, but like I'd like to find a use case w
+here it like totally makes sense, like provably makes sense to use a global seco
+ndary index. And there's there's it's kind of tricky, but they're worth bringing
+ up because, you know, it's it's a type of index. Okay. Is there anything else I
+ wanted to cover for secondary indexes? I have like these other notes off screen
+. Oh. Oh, no. I did cover that. Okay. Yeah. And then I don't have anything that 
+like showcases I I literally can't think of a use case where global secondary ne
+xus makes sense. Um, all right. multi-dimensional indices. So let's say that our
+ tweets also had a latitude and longitude. So we have um latitude, longitude and
+ you can do let's say it's like -47 47° and then we have um they're located at 3
+2.78. Um, so if you're trying to have it um if you're trying to look up tweets f
+rom around a certain location under a concatenated index, it just kind of append
+s them one after the other. And so those are it it has like a B tree where it's 
+sorted by latitude and then longitude and you're not really narrowing them both 
+down at the same time. Um, some examples of um concatenated indexes are actually
+ with our our primary key. So in the case of um if you actually went back to tha
+t single node setup um where I was talking about um uh an auto increment if you 
+did have an auto increment of um say four five six7 is the post ID because you'r
+e using that auto increment and you're trying to do a you're trying to create a 
+primary key uh you could go ahead and have it as the you could have your primary
+ key as like user ID, post ID. Uh there's cases where you like need extra things
+ in order to like fully specify uh the to fully fill the uniqueness constraint. 
+Sometimes you have to um use multiple columns to satisfy that uniqueness constra
+int. So then you can you make a concatenated index where you're narrowing down b
+y one attribute and then another um and combined maybe the two different um colu
+mns do not individually um provide uniqueness but combined they do provide uniqu
+eness and so you concatenate them together. It's kind of like if you were to jus
+t make another field called primary key and it just consists of my um user ID co
+ncatenated to my post ID like as a string concatenation just like that. So that'
+s that's basically what a concatenated index is is it's sorted by if if all the 
+records are sorted alphabetically. I think that's usually how you do that with s
+trings if you're using a B tree rather than a inverted index. it's going to narr
+ow it down alphabetically and so it's sorted first by the username and then by t
+he post ID um so that's concat concatenated it's not it's not narrowing down by 
+both at the same time you are actually able to narrow down by um two attributes 
+at the same time and um the the most classical example of that is if you're doin
+g uh geographical queries with latitude and longitude um there's a bunch of diff
+erent ways that you're able to do it trees quad trees geo hashes. Um, I really l
+ike our trees for some reason. I Well, I mean, they're they're built into Postgr
+ql. Um, uh, I don't know. It just has some kind of like jona sequa to it. Uh, I 
+like our trees. Um, geohashes have some kind of issue where it's it's I I I don'
+t want to go over geographical indices in detail. There's plenty of resources ou
+t there for that and then I would just be quoting them. Um, I think Alex Shu's v
+olume two book actually kind of talks about the trade-offs of these different th
+ings, but um, it's something to be aware of. And, uh, so quad trees I thought ar
+e only two-dimensional, while with archeries, it's much higher dimensional than 
+that. You can support, uh, narrowing down by, uh, three like different attribute
+s at the same time or even like five. Uh, it's really fascinating. you you're ab
+le to support not it's geographical data is the most common use case for these m
+ulti-dimensional indices but you you are able to do like three or more different
+ attributes for the narrowing down and um so if in uh in PostgreSQL if you're tr
+ying to do the create index for something that has geographical data um you woul
+d you would use that create index syntax and uh oh I don't think it actually spe
+cifies how you would clarify which type of tree that you want to um use but you 
+you would just have something like uh here I'll go ahead and share so if we were
+ trying to do um geoindex where we have latitude and longitude, you're able to s
+pecify R tree in there. And that's that's actually how you do that is that you y
+ou specify that you want to use an R tree. Otherwise, it's going to use a B tree
+ by default. So, when you're trying to use an R tree or a inverted index with Po
+stgreSQL, it it does support those. uh you have to specify that you want the R t
+ree or the inverted index. Otherwise, it's going to use a B tree and it's just g
+oing to be a concatenated index instead. You have to specify the type of tree if
+ you want to use the special ones from the secondary index options. Okay, I thin
+k we're good to move on to inverted indexes. Um, oh, I also also when you're usi
+ng the multi-dimensional indices, if you have a use case where you need um to us
+e one of these fancy indexes, so if you if you have geographical data, that's ac
+tually going to limit your um database choices. So, if geographical data and hav
+ing really performant lookups of geographic data is important for your use case,
+ you can't use DynamoB. Actually, I don't think Dynamob supports any type of mul
+ti-dimensional index. Um, PostgreSQL supports our trees. I I brought that up mul
+tiple times. Um, Alaskport supports quad trees. Reddus has geohash. I I didn't r
+eally come across a lot of other databases that support these things though. Um,
+ there's probably a couple, but it was uh I I didn't really dig that far into it
+. I'm I'm not going to spend all day trying to find databases that support the m
+ulti-dimensional indices. Um like if it comes up in like an interview that like 
+oh so we're going to be designing Uber uh I want to use a quad tree. I I feel li
+ke it's it might be fair game for your interviewer to go okay what database like
+ like what are are you like are you going to roll that yourself? Are you going t
+o roll Quad Trees yourself if you're designing Uber? I don't think that's I don'
+t think that's uh reasonable unless you're in most cases where you're you're dea
+ling with um geographical data. It's not so core to your business or your busine
+ss is not large enough that you it would be financially feasible for you to just
+ roll your own quad tree. Uh so instead you would want to find a database that a
+lready has that implemented. So like if if my own team at Amazon was dealing wit
+h geographical information for whatever reason, it wouldn't be such a key part o
+f how Amazon works that uh we would be like okay time to roll our own quad tree 
+implementation. No, instead we would use um open search which is like built on t
+op of a really old version of elastic search. And so it's like oh geographic dat
+a and um it's actually this is going to be hit a lot. It's going to be you know 
+it's going to have like 100,000 TPS. Okay, we should probably make sure this is 
+efficient. Let's use elastic search. Um, that's why I care about knowing about t
+hese implementations is that I like to be kind of realistic and um, yeah, you yo
+u you shouldn't be ruling quad trees yourself unless you're actually, you know, 
+working on Uber on the geographic systems. I think I've gone on about that enoug
+h. Uh, we can talk about inverted indexes now. Um, yeah. So, inverted indexes, y
+ou're also not going to find those everywhere. You're not going to find that in 
+Dynamo DB. I don't think that supports an inverted index. Um, elastic search is 
+what you're what is most known for supporting inverted index indexes, but um, yo
+u actually aren't forced to use elastic search. There is actually a couple of ot
+her options. Um, PostgreSQL supports it. I'm fairly certain Reddus supports it. 
+I don't I'm going to go ahead and link this file in the comments like I usually 
+do. um Reddus supports it. Uh PostgreSQL like you don't have to use elastic sear
+ch. So what what's great about PostgresQL supporting it is that if you were goin
+g to do that manual partitioning trick that I've probably done in in you know so
+ many videos uh you can do the manual partitioning of PostgreSQL and then you ca
+n have your very efficient key range queries plus an R tree or or an inverted in
+dex. So you can do your manual partitioning strategy and have an inverted index.
+ So um uh I don't know how well elastic search I I'm I'm using elastic search at
+ at at work and and um I don't I don't know how well it really supports various 
+partitioning strategies. It's it's wonky in its own ways and it doesn't necessar
+ily have everything that you want. Postrql has a lot of features though. But, yo
+u know, it also has our trees on top of inverted indexes. Um, so I I mean, if yo
+u're using Elastic Search and you want an inverted index, you also have geograph
+ic data. So, it's like tweets with geographic data and you want to find you want
+ to find all the tweets that have the word coffee within Seattle, Seattle's geog
+raphic location. Um, you'd be able to use elastic search with a quad tree. Um, a
+nd it supports inverted indexes. You can also use PostgreSQL with an R tree and 
+an inverted index because it supports that with Reddus. Apparently, it also supp
+orts inverted indices. And then it has uh geohashes. I don't know if it supports
+ uh I don't recall Reddus supporting either of these things. So, you would maybe
+ not be able to use Reddus for uh that use case. Um, and inverted indexes are al
+so really fascinating because uh, google.com actually is a gigantic inverted ind
+ex. They don't use elastic search. They don't use elastic search. Um, they of co
+urse roll it themselves. They have their own home rolled inverted index. It's gi
+gantic. It It's uh, it would not work well under Alaska search. I think I'd rece
+ntly heard that GitHub even had kind of outgrown their own um elastic search set
+up that they were using for code search. Um maybe if I find the link to that I'l
+l stick it in the description or something. But uh sometimes you can be uh too b
+ig for using elastic search and so uh you might just roll it yourself like googl
+e.com does. Um, otherwise if it's something smaller, um, I don't know if Twitter
+'s too big for elastic search, but, um, you know, if you if you're trying to loo
+k up text, if you're trying to support text search on something, uh, text search
+ on something, uh, smaller than Google.com, which is the majority of the interne
+t, uh, you could go ahead and use elastic search for that or PostgreSQL. Uh it j
+ust kind of depends on what you're trying to do with your your your database and
+ the specifics of um whether it's more read heavy or write heavy. So if it's a b
+it more writeheavy um I don't know if elastic search would be so great for that.
+ I don't know it it depends on the use case. It depends on the use case but it's
+ important to have multiple options that you're not just strapped to elastic sea
+rch. Um and then going back to our example, uh so you can form an R tree over tw
+o locations and um that would look really interesting. Secondary index tree and 
+you can do another inverted uh another index over here. you have a secondary ind
+ex and you would have to specify again you would have to specify that it is a in
+verted index while with time stamp you don't have to specify anything it'll just
+ go ahead and give you a B tree by default I'm going to delete this okay um so I
+ think we're good on covering inverted indices uh we're getting on to the much m
+ore rare stuff. Um, so for example, skip lists. Uh, very niche, very very niche.
+ It's uh there's only like one like access pattern where uh it makes a lot of se
+nse to um use uh skip list gaming leaderboard. Um Alex, you has some great cover
+age on that use case. Um I've only heard of it implemented in Reddus. I don't kn
+ow anything else that implements a skip list. I don't know if it's because it's 
+one of those things just like key value stores where you can't have a hash table
+ on disk. I don't know if you're able to have a skip list on disk. If you're not
+ able to have a skip list implemented with disk, then that would make sense. Tha
+t would be why nobody else has a skip list. But it's um for certain cases, I I t
+hink I was even able to find at least one other thing where uh skip list would b
+e really helpful as an axis pattern, but I can't think of the problem right now.
+ U maybe it was get active events. I think get active events. Uh there was one v
+ariation of it where skip lists seemed like it would maybe help a lot. Um but it
+ was like okay now I'm forced to use Reddus and um I'd prefer to only use Reddus
+ as a cache. I don't know why Reddus is implementing so many weird things. Um, a
+nd Reddis Reddus has a lot, but it doesn't have everything. And just being stuck
+ with this uh one solution is um not great. Uh, it'd be great if there were othe
+r options there, but like for the one case of uh where you need this weird acces
+s pattern like the one present from gaming leaderboard, uh, it like really calls
+ for a skip list and like you only have that in Reddus. Um, I'm not going to go 
+over the internals of a skip list. It's It's really interesting. It's kind of li
+ke a a linked list with like linked lists that allow you to skip over chunks of 
+it. I'm not going to draw the whole thing out. Um, there's other resources that 
+probably do that pretty well. Um, so I think we're going to move on. Um, vector 
+indexes. So, this is another one that's really niche. Uh, you can find it in Pin
+e Cone. uh Facebook's phase, I don't know if it's pronounced like that. Um so th
+ese things are specifically created for being a vector database and so then they
+ support vector indices. Um it's kind of been really hot over the last year. The
+y're they're useful for uh machine learning problems. They're they're very cruci
+al to machine learning problems actually. I think it's not just chat gpt where t
+hese are useful. It's uh basically it seems like they're useful for basically an
+ything where you want to have um personalization. Um so it's uh like the the You
+Tube home feed for example uh has personalization to it. Your recommendations ar
+e different than other people's recommendations. Um anything that has that perso
+nalization aspect to it and a really massive scale um they're probably going to 
+want to use a vector index to my understanding. Um, so very apparently like a ve
+ry uh common thing to anything that's scaled machine learning. Um, and so then i
+t's been hot over the last year. And so you're seeing stuff like uh this new dat
+abase called planet scale actually forked my SQL in order to add uh vector index
+es to it. And um Reddis, which likes to just implement absolutely everything und
+er the sun. What the Uh, it also has vector indices. Um, I don't like that Reddu
+s has vector indices. I It's It's a cache. Why does my cache have vector indices
+ support? That is rather crazy. Um, but these kind of were like the earlier thin
+gs to do it, I think. And then like these I think have come like within the last
+ year. Um, I think phase has been around for a little while. Uh, I just read thr
+ough the documentation last week. I think it's been around for at least a few ye
+ars while these things just sprung up out of I I mean I can't confirm that Reddi
+t did it within the last year, but it's just been so much more hot within the la
+st year that I would not be surprised that decided, oh, hey, this is cool. A coo
+l new index, cool new niche, you know, database feature. Let's uh let's throw it
+ in there. Um, yeah, usually if you need vector data, if you if you need this ki
+nd of thing, you're you're it's usually such a specific use case, such a specifi
+c access pattern that you would like know that it's going to be a part of your u
+m justification in your initial choice of the infrastructure for your your servi
+ces. And so you're going to just like know like, oh, I'm going to need a vector 
+database here. You don't have it as like an afterthought like where you know, yo
+u wouldn't you wouldn't find yourself in a pinch with um like PostgreSQL and be 
+like, "Oh, shoot. My problem is now a machine learning problem. Now I wish that 
+I was not locked into PostgreSQL." Uh, no. You're usually going to like know abo
+ut this thing like up front because it's just so specific. Like you you load the
+se like embeddings into it. You you're not going to like have embeddings just ki
+nd of like come about and then be like, "Oh, I need vector indices." Because we 
+have this these embeddings and like now we've decided to start trying to do mach
+ine learning stuff with it. Now you have the embeddings because you are doing ma
+chine learning and so like you're going to just know in advance this is a machin
+e learning problem. We're going to need a vector database and then you're going 
+to pick it. So that's like I don't know why you would ever use Reddus as your ve
+ctor database. I'd use something that like is much more like oriented entirely a
+round handling vector data super efficiently. And so I you you probably use thes
+e. Yeah. Um yeah, I I I I don't even know what to think of this this beyond that
+. It's uh really one of the latest things I've come across. And yeah, it's weird
+. Um okay, let's move on. Um data cubes and materialized views. Okay, so we talk
+ed about a database is a write ahead log with a materialized view. There's actua
+lly this thing called a materialized view. Um it's for like speeding up stuff li
+ke count um min max. There's also uh anything that's an aggregate operation in y
+our SQL. So that would mean that this is a thing that involves doing a full tabl
+e scan in order to compute. And so you can do these, you know, you just prempute
+e the whole thing once and then you store it in a certain way and that's called 
+a materialized view. Uh I have no idea what the hell a data cube is, but it's ou
+t there. I've never used it. I've worked with OAP stuff a little bit. I think it
+'s if you're It really seems like it's more of a thing that like somebody entire
+ly oriented around being a data analyst would maybe make use of, but like these 
+are things out there. You wouldn't have these on um Dynamo DB. It doesn't you yo
+u can't do I don't think Dynamo DB actually supports these operations. I'd be su
+rprised if it does. It doesn't support joins. I'm fairly certain Dynamo DB does 
+not even have joins supported in the syntax. Most NoSQL databases do not support
+ joins because they it's like they don't do OLAP and joins are a part of OLAP qu
+eries. And so similarly, it would just not make sense to have these in their lan
+guage either. like you can't you don't have the keyword join in the syntax of Dy
+namo DB or Cassandra I'm fairly certain and so then you can also just not allow 
+these in the syntax because they would require a full table scan and it's like t
+hat's not you're not using the database properly so it's just not going to be th
+ere. Uh if you want that kind of stuff, you should be using um iceberg and then 
+just use trino on top of it. Or you can use snowflake or you can use um I think 
+data bricks is working on a I'm fairly certain that's another OLAP or data wareh
+ouse technology. Um so yeah, you're only going to find you. So it's it's you you
+ have to use data warehouse or OLAP databases in order to get these indexes. um 
+you're not going to be able to just throw it onto Dynamob. So I also wanted to t
+alk about count min sketch. It's not actually an index. I'm fairly certain that 
+count min sketch is not actually called an index. But if you think about rum, if
+ you think about that rum conjecture for count min sketch, like it's kind of mak
+ing uh a very a very alternative trade-off. It's trading off accuracy for really
+ fast OLAP queries because this is from uh these are all what you would call um 
+real time analytics. Uh and the word analytics that's OLAP that's real time OLAP
+. When you when you execute an OLAP query it's okay for it to take like 45 minut
+es. uh under under normal OLAP queries where you're working with a data warehous
+e, you you're like, "Okay, here's my gigantic um OLAP query and like you're the 
+only one using the database. It's not being smacked with like 10kts. Um you're t
+he only one using the data warehouse and you know it's it's not end userf facing
+. It's not something that determines how fast your web pages are going to load. 
+Um, so it can take 45 minutes, but in some cases you need to have like these num
+bers immediately. So like if it's a YouTube video where you want to see the view
+ count for that video, um, the user is not going to wait 45 minutes for the web 
+page to load. You need it real time. You need a real time count. You need a real
+- time count for the YouTube video. Real time analytics. That's where this comes
+ from. Um, and you know, OLAP queries, they're usually really expensive. How in 
+the heck do you pull off the kind of um read speeds that you need here? You you'
+re really you really need to make some interesting trade-offs in order to make t
+hose those kinds of um things run fast. I guess it it's I I think it kind of sto
+res a uh materialized view, but it also does crazy, you know, statistics things 
+in order to make it work. And so that's why I think that it you can kind of thin
+k of it as um a very interesting trade-off in terms of the rum conjecture. Um an
+d then you know not everything has Reddus has this too. I know Reddus has this. 
+I I  know Reddus has count min sketch. Why does it have count min sketch? Who ge
+ts a cache and then thinks you know what I need here? I need some real time coun
+ters. I need I need some real time analytical queries on my cache. Why is that i
+n there? That doesn't make any sense. Um, usually you have to pick your your a s
+pecific Oh, I did already have Reddus there. Okay. I I didn't realize it was eve
+n in there. Yeah, I did. I did already type Reddis. Yeah. What the who who gets 
+a cash and then thinks, you know what, I can go ahead and I I'm gonna need some 
+analytics, some really expensive OLAP queries here and they're going to need a t
+hey're gonna need a go just instantly. You you usually like have a stream and th
+en you're going to attach this thing to the end of it. And so you you're going t
+o go ahead and pick a real-time analytics um a real- time analytics like product
+ for it. You're not going to like just be like, "Oh, shoot. you know, I got this
+ like database here. Um, I wish I sure wish I could do some real-time analytics 
+on my PostgreSQL instance. You usually have to grab one of these specific tools 
+and then you're you're using it for that very specific access pattern that has a
+risen. There's there's a specific access pattern of, you know, you uh view count
+s on YouTube. It has arosen. you've already got your your YouTube video thing an
+d then the PMs are like, "Okay, now we want to have this view counter and so you
+ just grab this extra infrastructure component and you're using that for the job
+." Um, again, very interesting trade-off in terms of the Braum conjecture. And I
+ don't know if I had anything else for this video. Want to make sure that I cove
+red everything that I wanted to talk about. All right, I guess that's everything
+ that I wanted to cover. So, I'll let you guys go. Thanks for watching. 
