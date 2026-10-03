@@ -35,6 +35,8 @@ This skill automates extracting, analyzing, and documenting system design interv
 ### Step 2: Synthesize the System Design Chapter
 
 **CRITICAL: INTERVIEW PREP FOCUS**
+**CRITICAL: EXHAUSTIVE DETAIL & CONCEPT DISTINCTION**
+Do not gloss over mechanical details or summarize too aggressively. If the speaker explains exactly *how* a solution works under the hood (e.g., how Request Coalescing uses locks, or how an LSM tree merges SSTables), you MUST capture that explicit mechanism. Furthermore, if the speaker compares two similar concepts (e.g., Eviction vs Expiration/TTL, or Hash vs Range Partitioning), you must create a dedicated section breaking down the exact differences so no nuance is lost. Your goal is that the user NEVER has to watch the video to get the missing details.
 These notes are meant as **prep for system design interviews**. You MUST explicitly capture any interview tips, trade-offs, or preferences mentioned in the transcript (e.g., "In an interview, you should prefer X over Y because..."). Capturing these trade-offs and interview strategies is critical.
 
 Structure the synthesized notes following the 4-step interview methodology established across this repository:
