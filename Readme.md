@@ -58,6 +58,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Caching Strategies (Architectures, Eviction, Stampedes)](./Core%20Concepts/Caching%20Strategies/)
  * [Database Sharding & Partitioning](./Core%20Concepts/Sharding/)
  * [Apache Cassandra Deep Dive](./Core%20Concepts/Cassandra/)
+ * [Amazon DynamoDB Deep Dive](./Core%20Concepts/DynamoDB/)
 
 # Additonal Resources
 
@@ -135,6 +136,11 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 
 ### Apache Cassandra
 - [Cassandra Deep Dive w/ Ex-Meta Staff Engineer (Hello Interview)](https://www.youtube.com/watch?v=TD3-INhm60Q)
+
+
+### Amazon DynamoDB
+- [DynamoDB Deep Dive w/ Ex-Meta Staff Engineer (Hello Interview)](https://www.youtube.com/watch?v=2X2SO3Y-af8)
+
 
 
 
