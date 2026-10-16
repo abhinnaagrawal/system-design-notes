@@ -59,6 +59,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Database Sharding & Partitioning](./Core%20Concepts/Sharding/)
  * [Apache Cassandra Deep Dive](./Core%20Concepts/Cassandra/)
  * [Amazon DynamoDB Deep Dive](./Core%20Concepts/DynamoDB/)
+ * [Data Structures for Big Data (Bloom Filter, Count-Min, HyperLogLog)](./Core%20Concepts/Data%20Structures%20for%20Big%20Data/)
 
 # Additonal Resources
 
@@ -140,6 +141,11 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 
 ### Amazon DynamoDB
 - [DynamoDB Deep Dive w/ Ex-Meta Staff Engineer (Hello Interview)](https://www.youtube.com/watch?v=2X2SO3Y-af8)
+
+
+### Data Structures for Big Data
+- [Data Structures for Big Data in Interviews - Bloom Filters, Count-Min Sketch, HyperLogLog (Hello Interview)](https://www.youtube.com/watch?v=IgyU0iFIoqM)
+
 
 
 
