@@ -56,6 +56,8 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Partial Failures & Idempotency](./Core%20Concepts/Partial%20Failures/)
  * [Database Indexes & The RUM Conjecture](./Core%20Concepts/Database%20Indexes/)
  * [Caching Strategies (Architectures, Eviction, Stampedes)](./Core%20Concepts/Caching%20Strategies/)
+ * [Database Sharding & Partitioning](./Core%20Concepts/Sharding/)
+ * [Apache Cassandra Deep Dive](./Core%20Concepts/Cassandra/)
 
 # Additonal Resources
 
@@ -125,5 +127,14 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 
 ### Job Scheduler
 - [Job Scheduler (6+ Approaches) - System Design Fight Club](https://www.youtube.com/watch?v=ur3ioZhwG8w)
+
+
+### Database Sharding & Partitioning
+- [Sharding in System Design Interviews w/ Meta Staff Engineer (Hello Interview)](https://www.youtube.com/watch?v=L521gizea4s)
+
+
+### Apache Cassandra
+- [Cassandra Deep Dive w/ Ex-Meta Staff Engineer (Hello Interview)](https://www.youtube.com/watch?v=TD3-INhm60Q)
+
 
 
