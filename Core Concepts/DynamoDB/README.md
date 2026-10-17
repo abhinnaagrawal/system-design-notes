@@ -91,6 +91,101 @@ In a chat or order history table, you want items ordered chronologically. A naiv
 
 ---
 
+### C. The Range Query Dilemma: Can DynamoDB do Range Queries like CockroachDB?
+
+A frequent senior/staff interview question is: *"Can DynamoDB perform range queries across the table like CockroachDB, PostgreSQL, or Spanner?"*
+
+The short answer is **no, not globally across the entire table**. 
+
+```mermaid
+flowchart TD
+    subgraph Cockroach["CockroachDB: Range-Based Partitioning (Globally Ordered)"]
+        direction LR
+        CR1["<b>Range 1 [000 - 100)</b><br/>Node A"] --> CR2["<b>Range 2 [100 - 200)</b><br/>Node B"] --> CR3["<b>Range 3 [200 - 300)</b><br/>Node C"]
+        CQuery["Query: BETWEEN 50 AND 250<br/>⚡ Sequential seek & multi-range scan"] -.-> CR1 & CR2 & CR3
+    end
+
+    subgraph Dynamo["DynamoDB: Hash-Based Partitioning (Consistent Hashing)"]
+        direction LR
+        DP1["<b>Partition 1</b><br/>Hash: 0x00... - 0x55...<br/>user_102, user_891"] 
+        DP2["<b>Partition 2</b><br/>Hash: 0x55... - 0xAA...<br/>user_100, user_304"]
+        DP3["<b>Partition 3</b><br/>Hash: 0xAA... - 0xFF...<br/>user_101, user_502"]
+        DQuery["Query: user_id BETWEEN 100 AND 102<br/>❌ Impossible via Query! Must Scan ALL partitions"]
+    end
+```
+
+#### 1. The Architectural Root Cause: Hash vs. Range Partitioning
+* **CockroachDB (Range Partitioning):** Organizes the entire database into a monolithic, lexicographically ordered key-value keyspace, split into contiguous **64MB Ranges**. A query like `WHERE user_id BETWEEN 100 AND 200` maps to an indexed seek in the Range descriptor tree and a sequential forward iterator scan across ranges in Pebble (its LSM engine).
+* **DynamoDB (Hash Partitioning):** Calculates an internal hash (MD5) of the **Partition Key (PK)** to assign items to physical storage partitions. **Hashing deliberately destroys global ordering** to evenly disperse writes. Consequently, `user_100`, `user_101`, and `user_102` are scattered across completely different physical storage nodes. DynamoDB physically cannot seek across multiple partition keys in a range.
+
+#### 2. How DynamoDB DOES Support Range Queries: Scoped to a Single Partition
+DynamoDB supports range queries **strictly when scoped to an exact Partition Key** via the **Sort Key (SK)**:
+* **The Equality Rule:** The `Query` API requires an exact equality condition on the Partition Key (`PK = 'chat_101'`).
+* **The Local Range:** All items sharing that `PK` reside on the exact same physical storage partition, indexed in a local **B-Tree ordered by the Sort Key**.
+* **Supported Range Operators on the Sort Key:**
+  `=`, `<`, `>`, `<=`, `>=`, `BETWEEN`, `begins_with()`
+
+```python
+# ✅ VALID DynamoDB Query: Scoped to a single partition
+response = table.query(
+    KeyConditionExpression=Key('chat_id').eq('room_99') & Key('timestamp').between('2026-10-17T10:00:00', '2026-10-17T10:05:00')
+)
+
+# ❌ INVALID DynamoDB Query: Attempting a range scan on the Partition Key
+# DynamoDB will reject this call; .between() is NOT supported on Partition Keys!
+response = table.query(
+    KeyConditionExpression=Key('chat_id').between('room_01', 'room_50')
+)
+```
+
+#### 3. What Happens If You Force a Global Range Query? (`Query` vs. `Scan`)
+If an application requires querying across multiple partition keys without knowing their exact values (e.g., *"Find all orders created between 2 PM and 4 PM across all users"*), DynamoDB forces you to use the **`Scan` API**:
+
+| Metric | `Query` API | `Scan` API |
+| :--- | :--- | :--- |
+| **Partition Target** | Targets **exactly 1 physical partition** via `PK = X` | Reads **every single partition** across the entire cluster |
+| **Data Evaluated** | Only inspects matching items within the Sort Key range | Inspects **100% of all items** in the table, then filters in memory |
+| **RCU Cost** | Consumes Read Units only for the matched items | **Consumes Read Units for the entire table volume** |
+| **Latency** | 2–5 ms (Single-digit ms) | Seconds to minutes (scales linearly with total table size $O(N)$) |
+| **Production Risk** | Safe at any scale | **Severe:** Can throttle production writes/reads by saturating partition read quotas |
+
+#### 4. The Cassandra Connection: Clustering Key vs. Sort Key
+Cassandra’s **Clustering Key** is the direct architectural equivalent of DynamoDB’s **Sort Key**:
+
+$$\text{PRIMARY KEY} = (\underbrace{\text{Partition Key}}_{\text{Hash on Token Ring: Murmur3}}) + [\underbrace{\text{Clustering Key(s)}}_{\text{Sorted on-disk in SSTables}}]$$
+
+Both systems make the identical architectural trade-off: **Hash at the cluster level (zero write hotspots), but Sort at the local partition level.**
+
+However, Cassandra's Clustering Key offers distinct capabilities compared to DynamoDB:
+1. **Multi-Column Clustering Keys:** Cassandra allows compound clustering keys (e.g., `PRIMARY KEY (tenant_id, year, month, day, event_id)`), giving multi-level hierarchical range queries. DynamoDB allows only **one single Sort Key attribute** (requiring application developers to manually concatenate strings like `2026#10#17#event_01`).
+2. **Explicit Storage Order:** Cassandra allows specifying on-disk physical sort direction:
+   `WITH CLUSTERING ORDER BY (created_at DESC)`
+   This optimizes reverse-chronological feeds so newest items are read forward sequentially off disk. DynamoDB physically stores items ascending, requiring `ScanIndexForward=False` for reverse traversal.
+3. **The Global Range Penalty in Cassandra (`ALLOW FILTERING`):**
+   Attempting a cross-partition range scan in Cassandra (`SELECT * FROM users WHERE user_id >= 100 AND user_id <= 200`) is prohibited unless you append `ALLOW FILTERING`. Doing so triggers a cluster-wide scatter-gather across all nodes, frequently causing Java GC pauses and JVM Out-Of-Memory (`OOMKilled`) crashes.
+4. **Why Cassandra Dropped `ByteOrderedPartitioner` (BOP):**
+   Early Cassandra offered a range-partitioner (`ByteOrderedPartitioner`) that preserved lexicographical order across the cluster. It was abandoned because of **catastrophic write hotspotting**: sequential timestamps or IDs caused 100% of writes to hammer the single node holding the active range, leaving the rest of the cluster idle.
+
+#### 5. Architectural 3-Way Comparison Matrix
+
+| Architectural Dimension | Amazon DynamoDB | Apache Cassandra | CockroachDB (Distributed SQL) |
+| :--- | :--- | :--- | :--- |
+| **Cluster Partitioning** | **Hash-Based** (Consistent Hashing) | **Hash-Based** (Murmur3 Token Ring) | **Range-Based** (64MB Contiguous Ranges) |
+| **Global Table Range Scans** | ❌ **No** (Dangerous `Scan` API) | ❌ **No** (Dangerous `ALLOW FILTERING`) | ✅ **Yes** (Native SQL multi-range scan) |
+| **Single-Partition Range Scans** | ✅ **Yes** (via Sort Key) | ✅ **Yes** (via Clustering Key) | ✅ **Yes** (Standard indexed seek) |
+| **Multi-Column Range Keys** | ❌ **No** (Only 1 Sort Key allowed) | ✅ **Yes** (Compound clustering keys) | ✅ **Yes** (Any composite B-Tree index) |
+| **On-Disk Sort Direction** | Fixed (ASC only) | Configurable (`ASC` or `DESC`) | Configurable per index column |
+| **Write Hotspot on Timestamps** | 🟢 **Low** (Hashing spreads writes evenly) | 🟢 **Low** (Murmur3 scatters writes) | 🔴 **High** (Sequential writes hammer rightmost range) |
+| **Cross-Entity Joins & ACID** | ❌ No joins; Partition-level ACID | ❌ No joins; Row-level LWW | ✅ Full relational joins; Serializable ACID |
+
+#### 6. Production Workarounds in DynamoDB for Cross-Entity Range Queries
+If an interview requires range queries across multiple entities in DynamoDB, propose these production patterns:
+1. **Synthetic Time-Bucketing:** Suffix the Partition Key with a coarse time window (e.g., `PK = "ORDERS#2026-10-17-10"`, `SK = timestamp#order_id`). The application queries that single bucket, or issues parallel scatter-gather queries across adjacent hour buckets.
+2. **GSI with Sharded Buckets:** Create a Global Secondary Index where `GSI_PK = "ORDERS_BUCKET_" + (order_id % 10)` and `GSI_SK = timestamp`. Querying a time range executes 10 parallel queries across the 10 buckets.
+3. **Dual-Engine Pattern (CQRS):** Write to DynamoDB for fast OLTP key-value mutations, and stream events via **DynamoDB Streams** to **OpenSearch / Elasticsearch**, which builds inverted B-tree/BKD indexes designed for multi-attribute range filtering.
+
+---
+
 ## 3. Secondary Indexes: GSI vs. LSI (Deep Dive)
 
 When you need to query attributes outside your primary key, DynamoDB provides two types of secondary indexes. Understanding the deep mechanical differences between them is a classic senior/staff interview requirement.

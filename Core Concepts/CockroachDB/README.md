@@ -99,6 +99,8 @@ Value: {"name": "Alice", "balance": 250.00}
     SELECT * FROM users WHERE user_id BETWEEN 100 AND 200;
     ```
     maps directly to a sequential seek and forward scan in the storage engine from `/51/1/100` to `/51/1/200` without contacting unrelated ranges.
+  * **Contrast with DynamoDB & Cassandra (Why NoSQL Chose Hash Partitioning):**
+    Unlike CockroachDB, NoSQL databases like DynamoDB and Cassandra partition their clusters via **Consistent Hashing / Murmur3**. While hashing guarantees zero write hotspots by scattering keys uniformly across nodes, it fundamentally destroys global ordering—making global range queries impossible without an expensive full-table scan (`Scan` in DynamoDB, `ALLOW FILTERING` in Cassandra). CockroachDB preserves global ordering to enable native multi-range SQL scans across 64MB Ranges, while mitigating the sequential write hotspot problem via hash-sharded indexes (`USING HASH WITH BUCKETS`) or UUIDs.
 
 ---
 

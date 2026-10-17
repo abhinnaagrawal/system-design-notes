@@ -167,6 +167,31 @@ Early versions of Cassandra supported `ByteOrderedPartitioner` (BOP), which pres
 * If partition keys are sequentially ordered (such as timestamp prefixes, sequential integer IDs, or alphabetic usernames starting with common letters), **all write traffic slams the single node holding that active range**, while the other 99 nodes sit completely idle.
 * Cassandra's core design philosophy deliberately sacrificed cross-partition range scans in favor of `Murmur3Partitioner` to guarantee perfect write balancing across massive clusters.
 
+#### 5. Clustering Key vs. DynamoDB Sort Key vs. CockroachDB 64MB Ranges
+
+In system design interviews, candidates are often asked to compare how Cassandra, DynamoDB, and CockroachDB handle range queries:
+
+* **Cassandra & DynamoDB share the same two-tier model:**
+  $$\text{Primary Key} = \text{Hash-Based Partition Key (Cluster Placement)} + \text{Range-Based Clustering/Sort Key (Node Placement)}$$
+  Both databases reject global range scans across the cluster to avoid write hot-spotting, confining range scans strictly to rows within the same partition key.
+* **Where Cassandra Outperforms DynamoDB on Range Modeling:**
+  1. **Multi-Column Clustering Keys:** Cassandra natively supports compound clustering keys (e.g., `PRIMARY KEY (tenant_id, year, month, day, event_id)`). You can filter `WHERE tenant_id = 'T1' AND year = 2026 AND month = 10 AND day >= 1 AND day <= 15`. In DynamoDB, you are limited to exactly **one Sort Key**, forcing artificial string concatenation (`2026#10#01`).
+  2. **Explicit On-Disk Sort Direction:** Cassandra allows setting physical storage order per column at schema creation:
+     `WITH CLUSTERING ORDER BY (created_at DESC)`
+     This ensures reverse-chronological queries (e.g., "fetch latest 10 messages") perform a forward sequential disk seek. DynamoDB always stores items in ascending order on disk.
+* **Where CockroachDB Differs (Cluster-Wide Range Partitioning):**
+  Unlike Cassandra and DynamoDB, CockroachDB uses **Range Partitioning across the entire cluster** (splitting an ordered keyspace into contiguous 64MB ranges). It natively supports global range scans (e.g., `WHERE created_at BETWEEN X AND Y` across all tenants) without full-cluster scatter-gather, at the cost of requiring mitigations (hash-sharded indexes / UUIDs) against sequential write hotspots.
+
+| Architectural Dimension | Apache Cassandra | Amazon DynamoDB | CockroachDB (Distributed SQL) |
+| :--- | :--- | :--- | :--- |
+| **Cluster Partitioning** | **Hash-Based** (Murmur3 Token Ring) | **Hash-Based** (Consistent Hashing) | **Range-Based** (64MB Contiguous Ranges) |
+| **Global Table Range Scans** | ❌ **No** (Dangerous `ALLOW FILTERING`) | ❌ **No** (Dangerous `Scan` API) | ✅ **Yes** (Native SQL multi-range scan) |
+| **Single-Partition Range Scans** | ✅ **Yes** (via Clustering Key) | ✅ **Yes** (via Sort Key) | ✅ **Yes** (Standard indexed seek) |
+| **Multi-Column Range Keys** | ✅ **Yes** (Compound clustering keys) | ❌ **No** (Only 1 Sort Key allowed) | ✅ **Yes** (Any composite B-Tree index) |
+| **On-Disk Sort Direction** | Configurable (`ASC` or `DESC`) | Fixed (ASC only) | Configurable per index column |
+| **Write Hotspot on Timestamps** | 🟢 **Low** (Murmur3 scatters writes) | 🟢 **Low** (Hashing spreads writes evenly) | 🔴 **High** (Sequential writes hammer rightmost range) |
+| **Cross-Entity Joins & ACID** | ❌ No joins; Row-level LWW | ❌ No joins; Partition-level ACID | ✅ Full relational joins; Serializable ACID |
+
 > **💡 System Design Interview Tip:**
 > If an interviewer asks for a query pattern that requires range scans across primary entities (e.g., *"Find all users registered between May 1 and May 10"* or *"Scan orders by price range"*):
 > * **DO NOT use Cassandra** with `ALLOW FILTERING` or range scans on partition keys.
