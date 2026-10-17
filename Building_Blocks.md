@@ -1283,6 +1283,122 @@ A critical question in distributed systems interviews is whether Cassandra write
 | **Write Latency** | **$1\text{--}3\text{ ms}$** | $50\text{--}200\text{ ms}$ | $10\text{--}30\text{ ms}$ |
 | **Primary Use Case** | 99% of normal Cassandra writes | Cross-database ACID transactions | Atomic uniqueness (`IF NOT EXISTS`) |
 
+---
+
+#### The "Failed Write Resurrection" Dilemma: Timeout vs. Failure Semantics
+
+A classic distributed systems interview paradox arises from partial write failures:
+
+> **Scenario:** A client writes with `ConsistencyLevel = QUORUM` ($W=2, RF=3$). Node 1 writes successfully, but Node 2 and Node 3 time out. The client receives a write error. Later, a client reads with `QUORUM`. Will the orphan data on Node 1 ever be cleaned up?
+
+```mermaid
+flowchart TD
+    subgraph WritePhase["Write Phase: Client Receives WriteTimeoutException"]
+        W_Client[Client] -->|Write Key K| W_Coord[Coordinator]
+        W_Coord -->|Ack 1ms| N1["Node 1 (Data written at T=100)"]
+        W_Coord -.->|Timeout 2000ms| N2["Node 2 (Empty)"]
+        W_Coord -.->|Timeout 2000ms| N3["Node 3 (Empty)"]
+        W_Coord -->>|Error: Only 1 of 2 Acks| W_Client
+    end
+
+    subgraph ReadPhase["Read Phase: Client Reads at QUORUM (R=2)"]
+        R_Client[Client] -->|Read Key K| R_Coord[Coordinator]
+        R_Coord --> N1_R["Node 1 (Has T=100)"]
+        R_Coord --> N2_R["Node 2 (Has T=0)"]
+        R_Coord -->>|Returns Data! T=100 > T=0| R_Client
+        R_Coord -.->|Read Repair: Writes T=100| N2_R
+    end
+
+    WritePhase --> ReadPhase
+```
+
+##### 1. Will the Orphan Data Ever Be Cleaned Up?
+**NO. Cassandra will NEVER delete or roll back that data on Node 1.**
+* Node 1 has no idea the coordinator returned an error to the client. To Node 1, it received a valid mutation, appended it to its CommitLog, and inserted it into its Memtable with timestamp $T = 100$.
+* There is no undo log, rollback journal, or uncommitted flag. Cassandra moves state strictly forward in time.
+
+##### 2. What Happens During a Quorum Read?
+When an application reads at `QUORUM` ($R = 2$), the coordinator picks 2 replicas:
+* **Possibility A (Coordinator picks Node 2 & Node 3):** Both nodes are empty ($T = 0$). The query returns **"Key Not Found"**.
+* **Possibility B (Coordinator picks Node 1 & Node 2):** 
+  * Node 1 returns the data ($T = 100$). Node 2 returns empty ($T = 0$).
+  * Cassandra applies **Last-Write-Wins (LWW)**: $100 > 0$.
+  * **The "failed" write is returned as valid data to the client!**
+  * **Read Repair is Triggered:** The coordinator asynchronously writes the data with timestamp $T = 100$ to Node 2 to fix the mismatch.
+  * **Result:** Now 2 out of 3 replicas have the data—**the failed write has been resurrected to Quorum on the read path!**
+
+##### 3. What Happens During Background Repair (Merkle Trees)?
+Even if a read never touches Node 1, background anti-entropy repair will ensure the orphan data survives:
+* Periodic **Anti-Entropy Repair (`nodetool repair`)** compares token ranges between replicas using **Merkle Trees**.
+* Node 1 compares its hash with Node 2 and Node 3, discovering a mismatch.
+* Node 1 presents its row with timestamp $T = 100$, while Nodes 2 and 3 have nothing.
+* By LWW rules, **Node 2 and Node 3 adopt the row**. The "failed" write is now permanently stored on 100% of the cluster!
+* Furthermore, if the coordinator stored **Hinted Handoffs** for Nodes 2 and 3 during the original write, it will replay those hints the moment Nodes 2 and 3 respond to heartbeats.
+
+##### 4. How Is This Scenario "Valid" in Cassandra?
+Why did the architects of Dynamo and Cassandra design the system this way?
+1. **Timeout $\neq$ Failure:** In distributed systems, a network timeout is an **indeterminate state (Ambiguous Outcome)**, not a failure.
+2. **What the Error Actually Means:** Cassandra's error is explicitly `WriteTimeoutException: Cannot achieve consistency level QUORUM (1 acknowledged, 2 required)`. It does **not** state that the mutation was aborted; it warns the client that the coordinator cannot guarantee quorum within the deadline.
+3. **The Two Generals' Problem:** When Node 2 times out, the coordinator cannot distinguish whether Node 2 dropped the packet, or wrote the data and dropped the acknowledgment. Attempting to roll back would require another network round-trip that could also fail or partition.
+4. **The Price of Write Scale:** Ensuring a timed-out write never appears requires distributed locking (2PC), which destroys write availability during network partitions and caps throughput. Cassandra deliberately trades this away for $500\text{k}+$ writes/sec append-only performance.
+
+##### 5. Production Mitigation Patterns
+* **Idempotent Retries (Standard Policy):** Because Cassandra writes are timestamped upserts, the standard client policy upon receiving `WriteTimeoutException` is to **retry the exact same write**. The retry populates the remaining replicas, turning the partial write into a clean quorum write.
+* **Compensating Deletes:** If an application requires a failed write to not persist, it must catch `WriteTimeoutException` and explicitly send a **`DELETE`** (which writes a **Tombstone** with timestamp $T_{delete} > T_{write}$).
+* **State Machines:** Write state changes as `status = 'PENDING'`. A background reaper expires pending rows that never transitioned to `'CONFIRMED'`.
+
+---
+
+#### Does Cassandra Have ACID? (BASE vs. ACID)
+
+Cassandra is fundamentally a **BASE system** (*Basically Available, Soft-state, Eventual consistency*), not an ACID database.
+
+```mermaid
+flowchart LR
+    subgraph ACID["ACID Invariants in Cassandra"]
+        A["<b>A - Atomicity</b><br/>✅ Single-Partition: YES<br/>❌ Multi-Partition: Eventual (Batchlog)"]
+        C["<b>C - Consistency</b><br/>❌ ACID Invariants: NO<br/>(No Foreign Keys / Checks)"]
+        I["<b>I - Isolation</b><br/>❌ Transactions: NO<br/>(Read Uncommitted)"]
+        D["<b>D - Durability</b><br/>✅ CommitLog: YES<br/>(Survives power loss)"]
+    end
+```
+
+##### 1. Atomicity: Partial (Single Partition Only)
+* **Single Partition:** **YES.** Mutations to a single partition (even across multiple columns or multiple rows in that partition) are atomic. Either all columns update or none do.
+* **Multi-Partition:** **NO.** Logged batches (`BEGIN BATCH ... APPLY BATCH`) provide **eventual atomicity** via the internal `system.batches` batchlog (retrying forward until all statements apply), but they do not provide instantaneous atomic rollback.
+
+##### 2. Consistency: NO (in the ACID Sense)
+* *Note: Do not confuse ACID Consistency with CAP Theorem Consistency!*
+* In ACID, Consistency means **application invariants and relational integrity**: foreign keys, `CHECK` constraints, cascade deletes, or enforcing `balance >= 0`.
+* Cassandra supports **none of these**. It only validates data types and primary key uniqueness. All application business invariants must be enforced in application code.
+
+##### 3. Isolation: NO (Operates at Read Uncommitted)
+* Cassandra has **no row locks** and **no multi-version concurrency control (MVCC) snapshots**.
+* Reads operate at **Read Uncommitted**: a concurrent read query can observe intermediate partial column updates of an executing batch.
+* There are no SQL transaction isolation levels (`READ COMMITTED`, `REPEATABLE READ`, `SERIALIZABLE`).
+* *Exception:* Paxos Lightweight Transactions (LWT) provide linearizability for a single conditional statement, but do not provide multi-statement isolation.
+
+##### 4. Durability: YES
+* Writes are appended to an on-disk sequential **CommitLog** before acknowledging the client.
+* If a machine loses power a millisecond after acknowledging, it replays the CommitLog on reboot and repopulates the Memtable in memory. Zero committed data is lost.
+* Defaults to `commitlog_sync: periodic` (flushed every 10 seconds, buffered in OS page cache) for maximum write throughput, or `commitlog_sync: batch` (`fsync` on every write) for strict hardware durability.
+
+##### Comprehensive ACID vs. BASE Comparison
+
+| Property | Relational Databases <br/>*(PostgreSQL, MySQL)* | Distributed ACID Databases <br/>*(CockroachDB, Google Spanner)* | Apache Cassandra |
+| :--- | :--- | :--- | :--- |
+| **Atomicity** | Full Multi-Table Atomicity | Full Multi-Node Atomicity (2PC over Raft) | **Single-Partition Only** |
+| **Consistency** | Foreign Keys, Triggers, Checks | Foreign Keys, Strict Serializability | ❌ **None** (Application enforced) |
+| **Isolation** | Read Committed, Repeatable Read, Serializable | Strict Serializable (MVCC + Locks) | ❌ **None** (Read Uncommitted) |
+| **Durability** | WAL on Disk | Distributed Consensus WAL | ✅ **CommitLog on Disk** |
+| **Rollback Capability** | ✅ Full `ROLLBACK` support | ✅ Full `ROLLBACK` support | ❌ **NEVER rolls back** |
+| **Primary Trade-off** | Vertical scale limit | Higher write latency ($20\text{--}50\text{ ms}$) | **Blazing Writes ($1\text{ ms}$), AP Scale** |
+
+> **🚨 The Golden Staff Engineer Rule:**
+> If a system requires that a failed write **must never take effect**, or requires multi-row atomic invariants (like bank account transfers or inventory booking), **NEVER USE CASSANDRA**. Choose a distributed ACID database with rollback support (such as **CockroachDB**, **Google Spanner**, or **PostgreSQL**).
+
+---
+
 ### B. The Read Path (Multi-Tier Retrieval & Reconciliation)
 
 Because data for a single row may be split across the in-memory Memtable and multiple on-disk SSTables, reading is inherently more complex than writing.
