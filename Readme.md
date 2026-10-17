@@ -49,7 +49,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Networking Foundations (OSI, NAT, Proxies, L4/L7 Load Balancing)](./Core%20Concepts/Networking%20Foundations/)
  * [DNS and CDNs](./Core%20Concepts/DNS%20and%20CDN/)
  * [gRPC (Google RPC)](./Core%20Concepts/gRPC/)
- * [Geospatial Indexes (QuadTrees, Geohashing, Hilbert Curves)](./Core%20Concepts/Geospatial%20Indexes/)
+ * [Geospatial Indexes & Proximity Search (QuadTree, BKD, R-Tree, GeoHash, S2, H3)](./Core%20Concepts/Geospatial%20Indexes/)
  * [Advanced Data Structures (Merkle, Segment, Fenwick, Sqrt Decomp)](./Core%20Concepts/Advanced%20Data%20Structures/)
  * [Consistent Hashing](./Core%20Concepts/Consistent%20Hashing/)
  * [Message Brokers & Strong Consistency](./Core%20Concepts/Message%20Brokers%20and%20Consistency/)
@@ -150,3 +150,9 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 
 ### Time Series Databases
 - [How do Time Series Databases Work? (Hello Interview)](https://www.youtube.com/watch?v=Qd76ZmfRs_Q)
+
+
+### Geospatial Indexes & Proximity Search
+- [Proximity Search & Geospatial Indexes Explained (Hello Interview)](https://www.youtube.com/watch?v=dQXdSxn7d1g)
+- [Designing a Location Database: QuadTrees and Hilbert Curves (Gaurav Sen)](https://www.youtube.com/watch?v=OcUKFIjhKu0)
+- [Spatial Queries in PostgreSQL / PostGIS (Hussein Nasser)](https://www.youtube.com/watch?v=-qNSXK7s7_w)
