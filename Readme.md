@@ -61,6 +61,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Amazon DynamoDB Deep Dive](./Core%20Concepts/DynamoDB/)
  * [Data Structures for Big Data (Bloom Filter, Count-Min, HyperLogLog)](./Core%20Concepts/Data%20Structures%20for%20Big%20Data/)
  * [Time Series Databases (Prometheus, InfluxDB, Gorilla)](./Core%20Concepts/Time%20Series%20Databases/)
+ * [Conflict-Free Replicated Data Types (CRDTs)](./Core%20Concepts/CRDTs/)
 
 # Additonal Resources
 
@@ -156,3 +157,10 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 - [Proximity Search & Geospatial Indexes Explained (Hello Interview)](https://www.youtube.com/watch?v=dQXdSxn7d1g)
 - [Designing a Location Database: QuadTrees and Hilbert Curves (Gaurav Sen)](https://www.youtube.com/watch?v=OcUKFIjhKu0)
 - [Spatial Queries in PostgreSQL / PostGIS (Hussein Nasser)](https://www.youtube.com/watch?v=-qNSXK7s7_w)
+
+
+### Conflict-Free Replicated Data Types (CRDTs)
+- [Conflict Resolution for Eventual Consistency • Martin Kleppmann (GOTO 2016)](https://www.youtube.com/watch?v=yCcWpzY8dIA)
+- [CRDTs and the Quest for Distributed Consistency • Martin Kleppmann (InfoQ)](https://www.youtube.com/watch?v=B5NULPSiOGw)
+- [CRDTs: The Hard Parts • Martin Kleppmann](https://www.youtube.com/watch?v=x7drE24geUw)
+
