@@ -635,3 +635,304 @@ flowchart TD
 * AOF persistence with `appendfsync everysec` can lose up to 1 second of writes during a power failure.
 * Replication to read-replicas is **asynchronous**; failover via Sentinel can result in data loss for writes that hadn't reached replicas.
 * **Rule:** Use Redis as an in-memory cache, transient message buffer, or non-critical state engine. Never use it as the source of truth for financial balances without backing it with a durable ACID store (PostgreSQL / CockroachDB).
+
+---
+
+## 11. Real-World Application Scenarios & Architectural Design Patterns
+
+Across large-scale system designs, Redis is employed far beyond simple key-value caching. The following battle-tested patterns appear repeatedly in modern production architectures and system design interviews.
+
+---
+
+### Pattern 1: Distributed Locking with Fencing Tokens (`SET NX PX` + Redlock)
+
+When multiple application workers need mutual exclusion over a shared resource (e.g., generating an invoice or processing a single order payout), Redis provides high-performance distributed locking.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Worker1 as Worker A
+    actor Worker2 as Worker B
+    participant Redis as Redis Lock
+    participant DB as Database / Storage
+
+    Worker1->>Redis: SET lock:order_901 "uuid-A" NX PX 30000
+    Redis-->>Worker1: OK (Lock Acquired)
+    
+    Worker2->>Redis: SET lock:order_901 "uuid-B" NX PX 30000
+    Redis-->>Worker2: nil (Lock Busy, Retry Later)
+    
+    Worker1->>DB: Perform Mutex Work with Fencing Token (Token: 42)
+    
+    Note over Worker1,Redis: Safe Release via Atomic Lua Script
+    Worker1->>Redis: EVAL (Delete ONLY if val == "uuid-A")
+    Redis-->>Worker1: 1 (Released)
+```
+
+#### 1. Safe Lock Acquisition:
+```text
+SET lock:order_901 <unique_client_uuid> NX PX 30000
+```
+* `NX`: Only set if key does not exist (atomically guarantees mutual exclusion).
+* `PX 30000`: Sets a 30-second TTL (prevents permanent deadlocks if the worker crashes).
+* `<unique_client_uuid>`: Crucial random value preventing clients from deleting other clients' locks.
+
+#### 2. Safe Atomic Lock Release (Lua Script):
+A naive `DEL lock:order_901` causes **silent lock corruption**:
+* *The Bug:* Worker A takes the lock. Worker A encounters a 35-second Stop-The-World GC pause or network stall. The 30-second lock expires. Worker B acquires the lock. Worker A wakes up and calls `DEL lock:order_901`, deleting Worker B's lock!
+* *The Fix:* Workers must release the lock only if the value matches their unique UUID:
+```lua
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+```
+
+#### 3. Martin Kleppmann's Fencing Token Critique
+Even with safe release, if Worker A pauses while holding the lock and writes to storage *after* its lock expired, it can overwrite Worker B's valid work.
+* **The Solution:** Use **Fencing Tokens** (monotonically increasing numbers like `INCR lock_epoch:order_901`). Storage rejects any write with a token lower than the latest committed token.
+
+---
+
+### Pattern 2: Rate Limiting & Traffic Shaping (3 Production Approaches)
+
+```mermaid
+flowchart TD
+    Req[Incoming API Request] --> Choice{Rate Limiter Type}
+    
+    Choice -->|Fixed Window Counter| FWC["<b>Fixed Window (INCR + EXPIRE)</b><br/>Lowest memory ($O(1)$)<br/>⚠️ 2x burst risk at window boundary"]
+    Choice -->|Sliding Window Log| SWL["<b>Sliding Window Log (ZSET)</b><br/>Zero boundary burst<br/>Higher memory ($O(requests)$)"]
+    Choice -->|Token Bucket| TB["<b>Token Bucket (Hash + Lua)</b><br/>Smooth traffic bursts<br/>Constant memory ($O(1)$)"]
+```
+
+#### Approach A: Fixed Window Counter (Simple & Fast)
+```lua
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+if current > tonumber(ARGV[2]) then
+    return 0 -- Throttled
+else
+    return 1 -- Allowed
+end
+```
+
+#### Approach B: Sliding Window Log via Sorted Sets (`ZSET`)
+Eliminates boundary bursts by recording timestamps of every individual request:
+```lua
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local clearBefore = now - window
+
+-- 1. Evict requests older than the sliding window
+redis.call('ZREMRANGEBYSCORE', key, 0, clearBefore)
+
+-- 2. Count current requests in window
+local currentRequests = redis.call('ZCARD', key)
+
+if currentRequests < limit then
+    -- 3. Add current request with timestamp as score and unique member
+    redis.call('ZADD', key, now, now .. '-' .. math.random())
+    redis.call('EXPIRE', key, math.ceil(window / 1000))
+    return 1 -- Allowed
+else
+    return 0 -- Rate Limited
+end
+```
+
+---
+
+### Pattern 3: Real-Time Leaderboards & High-Score Rankings (`ZSET`)
+
+Gaming leaderboards and competitive ranking systems require updating scores for millions of users and rendering Top-100 lists in real time.
+
+```mermaid
+flowchart LR
+    Ingest[Score Ingestion: 50,000 QPS] -->|ZINCRBY leaderboard 50 player_101| ZSet[(Redis ZSET: leaderboard)]
+    
+    ZSet -->|ZREVRANGE 0 9 WITHSCORES| TopK[Top 10 Global Leaderboard]
+    ZSet -->|ZREVRANK player_101| UserRank[Player Absolute Rank: #42]
+    ZSet -->|ZREVRANGEBYSCORE min max| Surrounding[Surrounding Competitors]
+```
+
+#### Key Operations:
+1. **Update Score:** `ZINCRBY leaderboard 50 "player_101"` ($O(\log N)$).
+2. **Fetch Top-10 Players:** `ZREVRANGE leaderboard 0 9 WITHSCORES` ($O(\log N + K)$).
+3. **Fetch Player's Exact Rank:** `ZREVRANK leaderboard "player_101"` ($O(\log N)$).
+
+#### The Tie-Breaking Sub-Pattern:
+In competitive gaming, if Player A and Player B have the same score, the player who reached it **earlier** must rank higher.
+* Append a fractional inverted timestamp to the score:
+  $$\text{Final Score} = \text{Game Score} + \left(1 - \frac{\text{Timestamp}}{10^{13}}\right)$$
+* Both players have score $1000$, but Player A (timestamp $T_1$) gets $1000.83$, while Player B (timestamp $T_2 > T_1$) gets $1000.81$. Redis sorts Player A first natively!
+
+---
+
+### Pattern 4: Distributed Delayed Task Scheduler (`ZSET` + List)
+
+Used for executing future asynchronous tasks (e.g., auto-canceling an unpaid order after 15 minutes, or sending reminder notifications).
+
+```mermaid
+flowchart LR
+    Producer[Order Service] -->|ZADD delayed_tasks execution_time order_id| ZSet[(ZSET: delayed_tasks)]
+    
+    subgraph Poller["Periodic Worker (Lua Script)"]
+        Poll[ZRANGEBYSCORE 0 now] --> Move[ZREM & LPUSH to ready_queue]
+    end
+    
+    ZSet --> Poller --> ReadyList[(List: ready_queue)]
+    ReadyList -->|BRPOP ready_queue 0| Worker[Execution Worker]
+```
+
+#### Atomic Poller Script (Lua):
+Prevents duplicate task pickup among competing workers:
+```lua
+local tasks = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, ARGV[2])
+if #tasks > 0 then
+    redis.call('ZREM', KEYS[1], unpack(tasks))
+    redis.call('LPUSH', KEYS[2], unpack(tasks))
+end
+return tasks
+```
+Workers run `BRPOP ready_queue 0`, blocking until a task is ready with zero busy-waiting.
+
+---
+
+### Pattern 5: Geospatial Proximity & Ride-Sharing Matching (`GEOADD` + `GEORADIUS`)
+
+In ride-sharing (Uber/Lyft) and food delivery, driver locations are updated every 3–5 seconds ($100\text{k}+$ writes/sec).
+
+* **Location Ingestion:**
+  ```text
+  GEOADD active_drivers -122.4194 37.7749 "driver_42"
+  ```
+  * Redis converts `(lat, long)` into a 52-bit integer **GeoHash** and stores it as the `score` in a standard **Sorted Set (`ZSET`)**.
+* **Proximity Query (Find nearest 10 drivers within 5 km):**
+  ```text
+  GEORADIUS active_drivers -122.4194 37.7749 5 km WITHDIST WITHCOORD ASC LIMIT 10
+  ```
+  * Runs in $O(N + \log M)$ where $N$ is the number of elements in the bounding box, returning in sub-2ms.
+
+---
+
+### Pattern 6: WebSocket Fan-Out & User Online Presence
+
+In chat and notification architectures, millions of clients maintain persistent WebSocket connections across hundreds of stateless gateway servers.
+
+```mermaid
+flowchart TD
+    ClientA[User Alice] -->|WebSocket| GW1[Gateway Server 1]
+    ClientB[User Bob] -->|WebSocket| GW2[Gateway Server 2]
+    
+    GW1 -->|PUBLISH channel:bob 'Hi Bob'| RedisBus[(Redis Pub/Sub)]
+    RedisBus -->|Broadcasts to Subscriber| GW2
+    GW2 -->|Push message| ClientB
+```
+
+#### 1. Cross-Server Message Routing (Redis Pub/Sub):
+* Gateway Server 2 subscribes to `channel:bob`.
+* When Alice sends a message to Bob on Gateway Server 1, Gateway 1 issues `PUBLISH channel:bob <json>`.
+* Redis instantly routes the message to Gateway 2, which pushes it down Bob's open WebSocket.
+
+#### 2. User Online Presence (Heartbeat TTL):
+* Client sends a heartbeat ping every 15 seconds:
+  ```text
+  SET presence:user_101 "online" EX 30
+  ```
+* To check if a user is online: `EXISTS presence:user_101`.
+* If the user loses network or crashes, the key expires after 30 seconds, automatically flipping their status to offline with zero ghost connections.
+
+---
+
+### Pattern 7: Massive Deduplication & User Retention (Bitmaps & HyperLogLog)
+
+#### A. 365-Day User Login Streak (Bitmaps):
+* Instead of storing login dates in SQL tables or arrays, use a single Redis key per user:
+  ```text
+  SETBIT user:login:101:2026 107 1 -- User 101 logged in on Day 107
+  ```
+* **Storage Cost:** 365 bits = **46 bytes per user per year!**
+* **Total Days Logged In:** `BITCOUNT user:login:101:2026` ($O(N)$ CPU popcount instruction).
+* **Multi-Day Cohort Analysis:** Use `BITOP AND result key1 key2` to find users active on both Day A and Day B.
+
+#### B. Unique Daily/Monthly Active Users (HyperLogLog):
+* Record unique user visits: `PFADD dau:2026-10-17 "user_101" "user_102"`.
+* Count unique visitors: `PFCOUNT dau:2026-10-17`.
+* Merge daily counts into monthly: `PFMERGE mau:2026-10 dau:2026-10-01 dau:2026-10-02 ...`
+* **Scale:** Tracks **billions of unique users with 0.81% standard error using only 12 KB of RAM!**
+
+---
+
+### Pattern 8: Atomic Inventory Allocation & Flash Sale Checkouts (Lua)
+
+In flash sales or ticket booking, thousands of requests per second hit a single product with limited stock. Relational database `SELECT ... FOR UPDATE` causes connection pool exhaustion and deadlocks.
+
+```mermaid
+sequenceDiagram
+    actor User as Buyer Request
+    participant App as Checkout Service
+    participant Redis as Redis Inventory
+    participant DB as Postgres / CockroachDB
+
+    User->>App: Buy 2 Tickets
+    App->>Redis: EVAL Stock-Check Script
+    alt Stock Available
+        Redis-->>App: 1 (Stock decremented in RAM)
+        App->>DB: Asynchronously create Order & Payment
+        App-->>User: Order Reserved!
+    else Stock Depleted
+        Redis-->>App: 0 (Out of stock)
+        App-->>User: Sold Out!
+    end
+```
+
+#### Atomic Stock Decrement Script:
+```lua
+local stock = tonumber(redis.call('GET', KEYS[1]) or 0)
+local requested = tonumber(ARGV[1])
+
+if stock >= requested then
+    redis.call('DECRBY', KEYS[1], requested)
+    return 1 -- Success
+else
+    return 0 -- Sold out / Insufficient stock
+end
+```
+* **Guarantee:** Executes entirely on Redis's single execution thread; **zero possibility of race conditions or double-selling**, processing over 80,000 reservation checks per second.
+
+---
+
+### Pattern 9: Idempotency Keys & Request Deduplication
+
+To prevent duplicate charges when network retries occur:
+1. Client generates a unique UUID: `Idempotency-Key: pay_abc123`.
+2. The payment service checks Redis before hitting payment gateways:
+   ```text
+   SET idempotency:pay_abc123 "PROCESSING" NX EX 120
+   ```
+3. If the command returns `nil`, another request is already processing $\implies$ return `409 Conflict` or poll for completion.
+4. When finished, update: `SET idempotency:pay_abc123 <response_json> XX EX 86400`.
+5. Retries return the cached `<response_json>` without charging the customer twice.
+
+---
+
+### Pattern 10: One-Hit-Wonder Cache Filter (RedisBloom)
+
+In large content networks, **up to 80% of cached web assets are requested only once** and never again ("One-Hit Wonders"), thrashing expensive RAM caches.
+
+```mermaid
+flowchart TD
+    Req[GET Asset /image_99] --> CheckBloom{Exists in Bloom Filter?}
+    
+    CheckBloom -->|No (First Access)| AddBloom["Add to Bloom Filter<br/>Fetch from DB / S3<br/><b>DO NOT CACHE IN REDIS</b>"]
+    CheckBloom -->|Yes (Second Access)| CacheInRedis["Admit to Redis Cache!<br/>(Asset is genuinely popular)"]
+```
+* **Mechanism:** When a request misses the cache, check an in-memory Bloom filter.
+  * If absent $\implies$ record it in the Bloom filter, return asset, but **do not write to Redis cache**.
+  * If present $\implies$ this is at least the second request! Write it to Redis cache.
+* **Result:** Slashes cache churn by **60–70%**, preserving memory exclusively for multi-access data.
+
