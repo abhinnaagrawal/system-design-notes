@@ -161,13 +161,27 @@ Memory Layout of embstr (Single 64-Byte Cache Line):
 
 ---
 
-### B. Lists & Hashes: Ziplist, Listpack & Quicklist
+### B. Compact Sequential Memory: Ziplist vs. Listpack vs. Quicklist
 
 When a user creates a Redis List (`LPUSH`), Hash (`HSET`), or Sorted Set (`ZADD`) with a small number of elements, a standard linked list or hash table would waste massive amounts of memory on pointers.
 
-#### 1. The Ziplist (Contiguous Compact Memory)
-* A standard doubly-linked list node costs: $8\text{ bytes (prev)} + 8\text{ bytes (next)} + 8\text{ bytes (val ptr)} = 24\text{ bytes}$ of pointer overhead per element!
-* A **Ziplist** eliminates pointers entirely by serializing elements into a single contiguous block of memory:
+```mermaid
+flowchart TD
+    subgraph PointerBloat["Standard Doubly-Linked List (Memory Inefficient)"]
+        direction LR
+        P1["Node 1<br/>prev: 8B | next: 8B | val_ptr: 8B<br/><b>24 Bytes of Pointer Overhead per Element!</b>"]
+    end
+
+    subgraph CompactSeq["Compact Contiguous Memory (Pointer-Free)"]
+        direction LR
+        Z1["<b>Legacy: Ziplist</b><br/>Stores prevlen at entry start<br/>⚠️ Prone to O(N^2) Cascading Updates"]
+        L1["<b>Modern (Redis 7+): Listpack</b><br/>Stores backlen at entry tail<br/>✅ Zero Cascading Updates!"]
+    end
+```
+
+#### 1. The Ziplist (Legacy Compact Structure)
+A standard doubly-linked list node costs $8\text{ bytes (prev)} + 8\text{ bytes (next)} + 8\text{ bytes (val ptr)} = 24\text{ bytes}$ of pointer overhead per element!
+A **Ziplist** eliminates pointers entirely by serializing elements into a single contiguous block of memory:
 
 ```text
 Ziplist Memory Layout:
@@ -178,21 +192,120 @@ Each entry stores:
 * `encoding`: Type and length of the current entry (integer vs string).
 * `content`: The raw binary data.
 
-> [!WARNING]
-> **The Cascading Update Problem:** Because each entry stores `prevlen` (encoded in 1 byte if $<254$ bytes, or 5 bytes if $\ge 254$ bytes), inserting an entry can trigger a cascade where every subsequent entry must expand its `prevlen` field, causing $O(N^2)$ memory reallocation. Redis 7+ replaced Ziplists with **Listpacks** to eliminate cascading updates.
-
-#### 2. The Quicklist (Hybrid of Linked Lists and Ziplists)
-When a list grows large, a single continuous Ziplist causes severe memory reallocation stalls during writes.
-* Redis uses a **Quicklist**: a doubly-linked list where each individual node is a compact **Ziplist** (typically capped at 8 KB).
-* **Benefits:** Retains CPU cache friendliness and high compression from Ziplists, while allowing $O(1)$ head/tail insertions without massive memory reallocations.
+#### 2. The Cascading Update Problem (Why Ziplist Failed)
+In a Ziplist, `prevlen` uses a variable-length encoding:
+* If the previous entry is $< 254$ bytes: `prevlen` occupies **1 byte**.
+* If the previous entry is $\ge 254$ bytes: `prevlen` occupies **5 bytes** (`0xFE` flag followed by a 4-byte unsigned integer).
 
 ```mermaid
 flowchart LR
-    subgraph Quicklist["Quicklist (Doubly-Linked List of Ziplists)"]
+    E1["Entry 1<br/>Length: 253 bytes"] --> E2["Entry 2<br/>prevlen: 1 byte<br/>Total: 253 bytes"] --> E3["Entry 3<br/>prevlen: 1 byte<br/>Total: 253 bytes"]
+    
+    Update["Update Entry 1 -> 254 bytes"] -.-> E1
+    
+    E2_Expand["Entry 2 prevlen expands to 5 bytes!<br/>Entry 2 total becomes 257 bytes!"]
+    E3_Expand["Entry 3 prevlen expands to 5 bytes!<br/>Entry 3 total becomes 257 bytes!"]
+    
+    E1 ==>|Triggers Cascade| E2_Expand ==>|Triggers Cascade| E3_Expand
+```
+
+* **The Disaster Scenario:** Imagine 1,000 contiguous entries each having a length of exactly $253$ bytes. Their `prevlen` fields all take 1 byte.
+* If Entry 1 is updated to $254$ bytes:
+  1. Entry 2's `prevlen` must expand from 1 byte to 5 bytes ($+4$ bytes).
+  2. Because Entry 2 grew by 4 bytes, its total size is now $253 + 4 = 257$ bytes!
+  3. Because Entry 2 is now $> 254$ bytes, Entry 3's `prevlen` must also expand from 1 byte to 5 bytes ($+4$ bytes)!
+  4. This chain reaction cascades across all $1,000$ entries, forcing Redis to reallocate, shift memory, and copy bytes $1,000$ times.
+* **Worst-Case Cost:** Updating or inserting a single element escalates to **$O(N^2)$ time complexity**, causing the single-threaded event loop to freeze!
+
+---
+
+#### 3. The Modern Solution: Listpack (Redis 7+ Standard)
+To eradicate cascading updates forever, Salvatore Sanfilippo (Antirez) designed **Listpack** ("a lists-of-strings serialization format"). Starting in Redis 5.0 (for Streams) and fully replacing Ziplist in **Redis 7.0**, Listpack is the default internal encoding for Hashes, Sorted Sets, and Quicklists.
+
+##### The Core Architectural Rule of Listpack:
+> **An entry must NEVER store information about the previous entry!**
+
+Instead, each entry stores **its own total length at the very tail of the entry** (`backlen` / `element-tot-len`).
+
+```text
+Listpack Overall Memory Layout:
++----------------+----------------+----------------+----------------+-----+----------------+----------+
+|  <tot-bytes>   |  <num-elements>|    <entry 1>   |    <entry 2>   | ... |    <entry N>   |  <end>   |
+|   (4 bytes)    |   (2 bytes)    |                |                |     |                |  (0xFF)  |
++----------------+----------------+----------------+----------------+-----+----------------+----------+
+```
+
+##### Inside a Single Listpack Entry:
+```text
+Listpack Entry Structure:
++--------------------------+------------------------------+---------------------------+
+|        <encoding>        |            <data>            |         <backlen>         |
+|  (Type & payload length) | (Raw integer or string bytes)|  (Total entry length)     |
++--------------------------+------------------------------+---------------------------+
+```
+
+##### The `backlen` Variable-Length Integer Encoding:
+* `backlen` stores the total number of bytes in this entry (`len(encoding) + len(data)`).
+* It is encoded from right to left using **7 bits per byte** (with the highest bit, bit 7, used as a continuation indicator):
+  * If bit 7 is `1`, more bytes of `backlen` precede it (reading backward).
+  * If bit 7 is `0`, this is the most significant byte of `backlen`.
+* It can occupy between **1 and 5 bytes**, supporting entry lengths up to $34\text{ GB}$ (though Redis entries are typically under a few KB).
+
+##### How Backward Traversal Works Without `prevlen`:
+How can Redis traverse backward if an entry doesn't know where the previous entry started?
+1. The read pointer sits at the start of Entry $i$.
+2. It steps backward by **1 byte** into the tail of Entry $i-1$.
+3. It reads the variable-length `backlen` by scanning backward until finding a byte with bit 7 equal to `0`.
+4. It decodes the integer $L = \text{backlen}$.
+5. It jumps backward by $L$ bytes. **It is now positioned exactly at the start (`encoding`) of Entry $i-1$!**
+
+```mermaid
+sequenceDiagram
+    participant Cursor as Traversal Pointer
+    participant Curr as Entry i (Current)
+    participant Prev as Entry i-1 (Target)
+
+    Note over Cursor,Curr: Currently at start of Entry i
+    Cursor->>Prev: 1. Step back 1 byte into tail of Entry i-1
+    Note over Prev: 2. Decode variable-length backlen (e.g., L = 42 bytes)
+    Cursor->>Prev: 3. Jump backwards by L (42) bytes
+    Note over Cursor,Prev: Arrived exactly at the start of Entry i-1!
+```
+
+##### Why Cascading Updates are Impossible in Listpack:
+Because Entry $i$'s `backlen` records **only Entry $i$'s own size**, changing Entry $i-1$ has **zero effect on Entry $i$**. Modifying an entry is strictly local:
+$$\text{Worst-Case Insertion / Update Time} = O(N) \text{ memory shift (strictly linear, never } O(N^2)\text{)}$$
+
+---
+
+#### 4. The Quicklist Evolution (Quicklist + Listpack)
+When a list grows beyond small element counts, maintaining a single massive Listpack would still cause noticeable `realloc()` overhead.
+* Redis uses a **Quicklist**: a doubly-linked list where each individual node wraps a compact **Listpack** (default: capped at 8 KB via `list-max-listpack-size -2`).
+* In Redis 7+, `quicklistNode` replaced its legacy internal Ziplist pointer with a modern Listpack pointer.
+* **Result:** Blazing $O(1)$ push/pop at list extremities, zero pointer bloat for stored items, and zero risk of cascading update freezes.
+
+```mermaid
+flowchart LR
+    subgraph ModernQuicklist["Modern Quicklist (Redis 7+ Standard)"]
         direction LR
-        Node1["QuicklistNode 1<br/>[Ziplist: 20 items]"] <--> Node2["QuicklistNode 2<br/>[Ziplist: 35 items]"] <--> Node3["QuicklistNode 3<br/>[Ziplist: 18 items]"]
+        Node1["QuicklistNode 1<br/>[Listpack: 20 items]"] <--> Node2["QuicklistNode 2<br/>[Listpack: 35 items]"] <--> Node3["QuicklistNode 3<br/>[Listpack: 18 items]"]
     end
 ```
+
+---
+
+#### 5. Comprehensive Comparison: Ziplist vs. Listpack
+
+| Architectural Dimension | Ziplist (Legacy, Redis 2.6 – 6.2) | Listpack (Modern Standard, Redis 7.0+) |
+| :--- | :--- | :--- |
+| **Backward Traversal Metadata** | `prevlen` stored at the **start** of each entry | `backlen` stored at the **tail** of each entry |
+| **Cascading Updates** | ❌ **YES ($O(N^2)$ worst-case risk)** | ✅ **NEVER ($O(1)$ local guarantee)** |
+| **Entry Framing** | `<prevlen> <encoding> <data>` | `<encoding> <data> <backlen>` |
+| **Max Entry Length** | $4\text{ GB}$ ($5\text{ bytes}$) | $34\text{ GB}$ ($5\text{ bytes}$, 7-bit variable encoding) |
+| **Memory Efficiency** | Extremely compact (zero pointers) | Equal or slightly more compact than Ziplist |
+| **Usage in Hashes (`HSET`)** | Used when `hash-max-ziplist-entries` | Modern: `hash-max-listpack-entries` |
+| **Usage in Sorted Sets (`ZADD`)** | Used when `zset-max-ziplist-entries` | Modern: `zset-max-listpack-entries` |
+| **Usage in Quicklist** | Quicklist nodes wrapped Ziplists | Quicklist nodes wrap **Listpacks** |
 
 ---
 
