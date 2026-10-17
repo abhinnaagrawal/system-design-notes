@@ -73,7 +73,9 @@ CockroachDB does not store tables as rigid row files on disk. Instead, **the ent
 ### A. The Key Encoding Anatomy
 Every row in a table is mapped to one or more sorted key-value pairs. Keys are formatted as binary-encoded tuples:
 
-$$\text{Key} = \texttt{/<TableID>/<IndexID>/<IndexedValues>/<ColumnFamilyID>/<Timestamp>}$$
+```text
+Key = /<TableID>/<IndexID>/<IndexedValues>/<ColumnFamilyID>/<Timestamp>
+```
 
 ```
 Example: A Table 'users' (Table ID: 51) with Primary Key 'user_id'
@@ -99,7 +101,9 @@ Value: {"name": "Alice", "balance": 250.00}
     maps directly to a sequential seek and forward scan in the storage engine from `/51/1/100` to `/51/1/200`.
 * **Secondary Indexes:**
   * Stored as additional keys where the indexed column is in the key prefix:
-    $$\text{Key} = \texttt{/<TableID>/<SecondaryIndexID>/<email_val>/<PrimaryKeyVal>}$$
+    ```text
+    Key = /<TableID>/<SecondaryIndexID>/<email_val>/<PrimaryKeyVal>
+    ```
   * An index lookup reads the secondary index key, extracts the `<PrimaryKeyVal>`, and fetches the primary row.
 
 ---

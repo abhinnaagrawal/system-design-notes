@@ -675,8 +675,8 @@ graph TD
 ```
 
 *   **Single-DC Guarantee ($RF = 3$):**
-    *   $W = \text{LOCAL_QUORUM} (2)$
-    *   $R = \text{LOCAL_QUORUM} (2)$
+    *   $W = \text{LOCAL\_QUORUM} = 2$
+    *   $R = \text{LOCAL\_QUORUM} = 2$
     *   $R + W = 4 > 3 \implies$ **Strong Consistency guaranteed within the region** at $<3\text{ ms}$ latency.
 *   **Cross-DC Guarantee:** Updates propagate asynchronously between regions. Cross-region consistency is **eventual**, resolved deterministically via Last-Write-Wins (LWW) timestamps.
 
