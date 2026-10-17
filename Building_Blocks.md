@@ -5851,7 +5851,7 @@ flowchart TD
     end
 ```
 
-### The Two-Pronged Expiration Strategy
+### A. The Two-Pronged Expiration Strategy
 Redis never sets individual timers per key (which would waste memory and CPU). It uses two complementary mechanisms:
 
 #### 1. Passive Expiration (Lazy Deletion on Read)
@@ -5866,6 +5866,79 @@ To reclaim memory from keys that are never read, Redis runs a periodic time even
 2. Checks their expiration timestamps and deletes all expired keys.
 3. If **more than 25% of the sampled keys (5+ keys) were expired**, it immediately repeats the process on another 20 random keys.
 4. **Safety Valve:** The active sweeper has a hard timeout ($25\text{ ms}$) per cycle to prevent the single-threaded event loop from stalling client requests.
+
+---
+
+### B. TTL Expiration Notifications (Keyspace Notifications & Pub/Sub)
+
+Redis can notify clients when a key expires via **Keyspace Notifications**, which publish events over **Redis Pub/Sub**.
+
+#### 1. Configuration & Mechanics
+By default, keyspace notifications are disabled to conserve CPU. You enable them via the `notify-keyspace-events` config string:
+```bash
+CONFIG SET notify-keyspace-events Ex
+```
+* `E` = Keyevent events (published with `__keyevent@<db>__` prefix).
+* `x` = Expired events (generated whenever a key with an expiration is deleted).
+
+Subscribers listen to one of two channel formats:
+* **Keyevent Channel (`__keyevent@<db>__:expired`):** The channel name specifies the event; the message payload is the **key name** (e.g. `"order:901"`).
+* **Keyspace Channel (`__keyspace@<db>__:<key>`):** The channel name specifies the key; the message payload is `"expired"`.
+
+```bash
+# Listen for all expired keys across all databases
+redis-cli PSUBSCRIBE "__keyevent@*__:expired"
+```
+
+#### 2. Under the Hood: When Does Redis Actually Fire the Notification?
+A common misconception is that Redis runs a background timer per key that fires at the exact millisecond the TTL reaches zero.
+In reality, the internal C function `notifyKeyspaceEvent()` is triggered **only when the key is physically deleted from memory** inside `deleteExpiredKeyAndPropagate()`.
+
+```mermaid
+flowchart TD
+    KeySet["Key set with TTL (EX 10)"] --> TTLZero["10s Elapsed (TTL = 0)<br/>⚠️ NO NOTIFICATION FIRED YET!"]
+    
+    TTLZero --> P1["<b>Path 1: Passive Expiration (Lazy)</b><br/>A client executes GET/SET on key.<br/>Redis checks TTL, sees it is expired, deletes it."]
+    TTLZero --> P2["<b>Path 2: Active Expiration (serverCron)</b><br/>10 times/sec, Redis samples 20 random keys.<br/>If sampled key is expired, Redis deletes it."]
+
+    P1 & P2 --> PhysicalDelete["Key physically removed from memory<br/>dictDelete(expires, key)"]
+    PhysicalDelete --> PublishEvent["🔔 notifyKeyspaceEvent('expired')<br/>Published to Pub/Sub Channel"]
+```
+
+#### 3. The Two Fatal Production Traps
+
+1. **The Timing Delay Trap (Non-Realtime Expiration):**
+   * If a key expires, but **no client reads it**, the key remains in memory until `serverCron` randomly samples it.
+   * If Redis holds hundreds of thousands or millions of keys with TTLs, **it can take seconds, minutes, or even hours** before the active sweeper randomly picks that key.
+   * **Result:** A 15-minute order timeout notification might actually fire at 18 or 25 minutes!
+2. **The Fire-and-Forget Zero Durability Trap:**
+   * Redis Pub/Sub provides **no buffering, no acknowledgments, and no message history**.
+   * If your subscriber worker restarts, crashes, or drops connection for 200 milliseconds, **every single expiration event published during that gap is permanently lost**.
+
+#### 4. The Production Alternative: Sorted Set (`ZSET`) Delayed Queue
+For reliable, exact-second delayed task execution, production architectures use a **Redis Sorted Set (`ZSET`)** instead of TTL keyspace notifications:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor App as Order Service
+    participant Redis as Redis ZSET ('order_timeouts')
+    participant Worker as Background Sweeper Worker
+
+    Note over App,Redis: 1. Schedule timeout at timestamp epoch
+    App->>Redis: ZADD order_timeouts <target_timestamp_epoch> "order:901"
+
+    loop Every 1 second
+        Worker->>Redis: ZRANGEBYSCORE order_timeouts 0 <current_epoch> LIMIT 0 50
+        Redis-->>Worker: Returns ["order:901"]
+        Worker->>Redis: ZREM order_timeouts "order:901"
+        Worker->>Worker: Process timeout & cancel order
+    end
+```
+* **Why ZSET is Superior:**
+  * **Deterministic Timing:** `ZRANGEBYSCORE 0 now` executes against exact epoch timestamps.
+  * **Crash Resilient:** If workers die, items remain safely in the `ZSET` and are processed immediately upon worker recovery.
+  * **Atomic Dequeue via Lua:** Multiple worker pods can pull and lock tasks using an atomic Lua script (`ZRANGEBYSCORE` + `ZREM`) without race conditions.
 
 ---
 
@@ -6018,13 +6091,13 @@ flowchart TD
 
 ## 10. System Design Interview Playbook & Traps
 
-### When to Choose Redis
+### A. When to Choose Redis
 1. **High-Performance Read Caching:** Sub-millisecond latency for hot database queries (Cache-Aside pattern).
 2. **Complex In-Memory Primitives:** Leaderboards (`ZSET`), Rate limiters (Lua + Sliding Window), Session stores, Geo queries (`GEOADD`).
 3. **Transient Messaging:** Pub/Sub or message buffering (Redis Streams with Consumer Groups).
 4. **Fast Counters & Deduplication:** `INCR`, HyperLogLog for unique DAU tracking, Bloom Filters.
 
-### Critical Interview Traps to Avoid
+### B. Critical Interview Traps to Avoid
 
 #### 1. The Linux `fork()` Copy-on-Write Memory Spike
 * **The Trap:** If Redis is running on a 64 GB machine using 50 GB of RAM, triggering an RDB snapshot or AOF rewrite forks a child process.
@@ -6043,6 +6116,41 @@ flowchart TD
 * AOF persistence with `appendfsync everysec` can lose up to 1 second of writes during a power failure.
 * Replication to read-replicas is **asynchronous**; failover via Sentinel can result in data loss for writes that hadn't reached replicas.
 * **Rule:** Use Redis as an in-memory cache, transient message buffer, or non-critical state engine. Never use it as the source of truth for financial balances without backing it with a durable ACID store (PostgreSQL / CockroachDB).
+
+---
+
+### C. The Redis Usage Spectrum: Advisable vs. NOT Advisable (Anti-Patterns)
+
+Because Redis is so versatile, teams frequently fall into the trap of using it as a "hammer for every nail." The following matrix delineates where Redis is best-in-class, where it is situational with strict guardrails, and where it is a dangerous anti-pattern.
+
+```mermaid
+flowchart TD
+    subgraph Tier1["🟢 Tier 1: Strongly Advisable (Best-in-Class)"]
+        T1_1["• Read Cache-Aside (Sub-ms lookups)<br/>• Real-Time Leaderboards (ZSET skiplist)<br/>• Sliding-Window Rate Limiters (Lua scripts)<br/>• Session Stores with Auto-Expiring TTL<br/>• HyperLogLog / Bloom Filter Deduplication<br/>• Distributed Mutex (Short-lived lock + fencing tokens)"]
+    end
+
+    subgraph Tier2["🟡 Tier 2: Situational (Acceptable with Guardrails)"]
+        T2_1["• Ephemeral Pub/Sub (Typing indicators, live telemetry)<br/>• Redis Streams (Lightweight queues < 50k msgs/s)<br/>• Delayed Job Queues (ZSET epoch scheduling)<br/>• Basic Proximity (GEOSEARCH without complex GIS polygons)"]
+    end
+
+    subgraph Tier3["🔴 Tier 3: STRICT ANTI-PATTERNS (Avoid in Production)"]
+        T3_1["• Primary Financial / ACID Database (Ledgers, balances)<br/>• Event Triggers via TTL Expiry Notifications<br/>• Massive Cold Data / Blob Storage (PDFs, images)<br/>• Deep Analytical / Multi-Attribute Range Queries<br/>• Primary SAGA Distributed Txn Coordinator<br/>• Unbounded Long-Retention Queues (Memory exhaustion)"]
+    end
+```
+
+#### Detailed Breakdown of Anti-Patterns: Why They Fail & What to Use Instead
+
+| Use Case | Status | Why Redis Fails / Risks | Better Purpose-Built Alternative |
+| :--- | :--- | :--- | :--- |
+| **Primary Financial / ACID Store** | 🔴 **Anti-Pattern** | Asynchronous replication (loss on failover), weak AOF durability (1s data loss window), no multi-table relational rollbacks. | **PostgreSQL, MySQL, CockroachDB** |
+| **TTL Expiration Event Triggers** | 🔴 **Anti-Pattern** | Non-realtime delays (lazy/probabilistic active sweeper), Pub/Sub fire-and-forget drops events on network blips. | **Redis ZSET delayed queue, AWS SQS, Temporal.io** |
+| **Large Blob / Cold Data Storage** | 🔴 **Anti-Pattern** | RAM is 5–10x more expensive than SSDs. Storing large JSON, images, or cold history wastes expensive memory bandwidth. | **Amazon S3, Cloudflare R2, MongoDB** |
+| **Multi-Attribute / Complex Range Queries** | 🔴 **Anti-Pattern** | No cost-based query optimizer, no secondary indexes on arbitrary attributes, no joins. Requires full cluster scans or brittle manual sets. | **Elasticsearch, OpenSearch, ClickHouse, PostgreSQL** |
+| **Primary SAGA Distributed Coordinator** | 🔴 **Anti-Pattern** | Failover during node crash causes "Ghost Transactions" (coordinator drops in-flight state and forgets rollbacks); idle sagas waste RAM. | **Temporal.io, Cadence, AWS Step Functions** |
+| **Unbounded Long-Term Message Queue** | 🔴 **Anti-Pattern** | Slow consumers cause memory buildup. When `maxmemory` is reached, Redis either evicts cache keys, crashes with OOM, or rejects all writes. | **Apache Kafka, AWS SQS, RabbitMQ** |
+| **High-Volume Ephemeral Caching** | 🟢 **Advisable** | Single-digit millisecond latency, rich eviction policies (`allkeys-lru`, `volatile-lru`), pipeline batching. | **Redis (Best-in-Class)** |
+| **Real-Time Leaderboards & Ranking** | 🟢 **Advisable** | Skiplist-backed `ZSET` provides $O(\log N)$ updates and $O(\log N + M)$ range retrieval. | **Redis (Best-in-Class)** |
+| **High-Throughput Rate Limiting** | 🟢 **Advisable** | Atomic execution via Lua scripts eliminates race conditions with constant memory overhead. | **Redis (Best-in-Class)** |
 
 ---
 
