@@ -1252,6 +1252,37 @@ sequenceDiagram
 4.  **Flushing to SSTables (Disk):** When the Memtable reaches capacity (or after a time threshold), it flushes sequentially to disk as an immutable **SSTable (Sorted String Table)**. 
 5.  **CommitLog Cleanup:** Once an SSTable is safely written to disk, its corresponding CommitLog segments are truncated.
 
+#### Does the Write Follow Two-Phase Commit (2PC)? (NO!)
+A critical question in distributed systems interviews is whether Cassandra writes use Two-Phase Commit (2PC).
+
+> **Standard Cassandra writes do NOT use 2PC. They use a 1-Phase, non-blocking quorum fan-out.**
+
+* **Why Cassandra Rejects 2PC:**
+  * **2PC is Blocking:** In 2PC, nodes acquire row/table locks during the "Prepare" phase and hold them until the coordinator sends "Commit". If the coordinator crashes or a network partition occurs, locked data becomes completely inaccessible.
+  * **2PC Requires Unanimity:** If even one node votes "No" or times out, the entire transaction aborts (zero fault tolerance).
+  * **Destroys Throughput:** Multiple network round-trips and locking barriers would reduce Cassandra's 100k+ writes/sec down to a crawl.
+* **How Cassandra's 1-Phase Write Operates:**
+  * The coordinator immediately forwards the raw mutation to all $N$ replicas in parallel with a microsecond timestamp ($T$).
+  * Replicas acquire **zero locks** and perform **no prepare phase**—they directly append to their CommitLog and insert into their Memtable.
+  * As soon as $W$ replicas reply (e.g., 2 out of 3 for `QUORUM`), the coordinator responds `Success` to the client.
+* **The "No Rollback" Gotcha on Write Timeouts:**
+  * In 2PC, a failure triggers an immediate rollback. **Cassandra NEVER rolls back a partially written write.**
+  * *Example Scenario:* A client writes at `QUORUM` ($W=2, RF=3$). Replica 1 writes successfully, but Replicas 2 and 3 time out. The coordinator returns a `WriteTimeoutException` to the client.
+  * *The Trap:* **Replica 1 still keeps the data!** If another client subsequently reads from Replica 1 at `CONSISTENCY ONE`, it will observe the new data. Furthermore, the coordinator may store a Hinted Handoff for Replicas 2 and 3, eventually propagating the write to the entire cluster.
+  * *Staff Engineer Rule:* A `WriteTimeoutException` in Cassandra does **not** mean the write did not happen; it only means the coordinator could not confirm that the requested quorum acknowledged it before the deadline.
+* **What About Conditional Writes (`IF NOT EXISTS`)?**
+  * Cassandra uses **Paxos (Lightweight Transactions / LWT)**, NOT 2PC.
+  * *Paxos vs. 2PC:* While 2PC requires 100% unanimity and blocks on coordinator failure, Paxos requires only a **majority quorum** (e.g., 2 of 3) and remains completely non-blocking and fault-tolerant even if a node crashes.
+
+| Dimension | Cassandra Standard Write | Two-Phase Commit (2PC) | Cassandra LWT (Paxos) |
+| :--- | :--- | :--- | :--- |
+| **Protocol Type** | Single-Phase Quorum Fan-Out | 2-Phase Centralized Locking | 4-Phase Consensus |
+| **Network Round Trips**| **1 RTT** (Client $\to$ Coord $\to$ Replicas) | **2 RTTs** (Prepare + Commit) | **4 RTTs** (Prepare, Propose, Accept, Commit) |
+| **Locks Acquired?** | ❌ No | ✅ Yes (blocking) | ❌ No (optimistic timestamps) |
+| **Rollback Behavior?** | ❌ Never rolls back | ✅ Full Rollback | ❌ Returns `applied: false` |
+| **Write Latency** | **$1\text{--}3\text{ ms}$** | $50\text{--}200\text{ ms}$ | $10\text{--}30\text{ ms}$ |
+| **Primary Use Case** | 99% of normal Cassandra writes | Cross-database ACID transactions | Atomic uniqueness (`IF NOT EXISTS`) |
+
 ### B. The Read Path (Multi-Tier Retrieval & Reconciliation)
 
 Because data for a single row may be split across the in-memory Memtable and multiple on-disk SSTables, reading is inherently more complex than writing.
@@ -1318,15 +1349,122 @@ flowchart LR
 
 Cassandra is fundamentally an **AP system** (Available and Partition-Tolerant), favoring high availability and low latency over immediate global consistency. However, consistency is **tunable per query**.
 
-### Consistency Levels Cheatsheet
-*   `ANY`: Write succeeds if *any* node accepts it, including a hinted handoff. (Weakest; writes only).
-*   `ONE` / `TWO` / `THREE`: Satisfied when $N$ replicas acknowledge the read/write.
-*   `QUORUM`: Satisfied when a majority of replicas across the cluster acknowledge:
-    $$\text{QUORUM} = \left\lfloor \frac{RF}{2} \right\rfloor + 1$$
-*   `LOCAL_QUORUM`: Satisfied when a majority of replicas in the **local coordinator's datacenter** acknowledge. **This is the industry standard for multi-datacenter production setups** because it prevents cross-ocean WAN latency from blocking queries.
-*   `ALL`: All $RF$ replicas must acknowledge. Turns Cassandra into a strictly consistent **CP system**; if even one replica is down or network-isolated, the query fails.
+### A. Supported Consistency Levels (Can You Use Arbitrary Numbers?)
 
-### Strong Consistency Quorum Formula
+In Cassandra, **you CANNOT pass an arbitrary number** (such as `CONSISTENCY 4` or `CONSISTENCY 7`). Doing so triggers a syntax error. Cassandra uses a **closed set of predefined keyword constants**:
+
+#### 1. Fixed Numeric Counts (`ONE`, `TWO`, `THREE`)
+* The only fixed integer keywords Cassandra supports are literal constants: `ONE`, `TWO`, and `THREE`.
+* There is no `FOUR`, `FIVE`, etc. For higher counts, use dynamic quorums or `ALL`.
+
+#### 2. Dynamic Quorum Levels (Relative Majority)
+Quorums automatically scale with your keyspace Replication Factor ($RF$):
+$$\text{QUORUM} = \left\lfloor \frac{RF}{2} \right\rfloor + 1$$
+* `QUORUM`: A strict majority across **all datacenters globally**.
+* `LOCAL_QUORUM`: A strict majority within the **coordinator's local datacenter**. (**The de facto production standard** for multi-datacenter deployments).
+* `EACH_QUORUM`: A quorum of replicas in **each and every datacenter** independently (Writes only).
+
+#### 3. Full Cluster & Single-Node Levels
+* `ALL`: Every replica across all datacenters must acknowledge. (100% consistent, but 0% fault tolerant—fails if a single node is down).
+* `LOCAL_ONE`: Exactly 1 replica in the local datacenter must respond.
+* `ANY`: Lowest possible write level. Succeeds if any node accepts a Hinted Handoff, even if all actual replicas are down. (Writes only; cannot be read).
+
+#### 4. Serial Consistency (For Paxos LWT)
+* `SERIAL`: Global Paxos consensus across all datacenters.
+* `LOCAL_SERIAL`: Paxos consensus restricted to the local datacenter.
+
+#### Complete Consistency Level Matrix
+
+| Consistency Level | Valid for Reads? | Valid for Writes? | Replicas Required | Cross-Datacenter WAN Latency? |
+| :--- | :---: | :---: | :--- | :---: |
+| **`ANY`** | ❌ No | ✅ Yes | 1 (Can be a hinted handoff on a non-replica) | No |
+| **`ONE`** | ✅ Yes | ✅ Yes | 1 replica anywhere | Possible (if coordinator picks remote replica) |
+| **`LOCAL_ONE`** | ✅ Yes | ✅ Yes | 1 replica in local DC | ❌ Never |
+| **`TWO`** | ✅ Yes | ✅ Yes | 2 replicas anywhere | Possible |
+| **`THREE`** | ✅ Yes | ✅ Yes | 3 replicas anywhere | Possible |
+| **`QUORUM`** | ✅ Yes | ✅ Yes | $\lfloor RF_{Total} / 2 \rfloor + 1$ | ⚠️ Yes (crosses WAN) |
+| **`LOCAL_QUORUM`** | ✅ Yes | ✅ Yes | $\lfloor RF_{Local} / 2 \rfloor + 1$ | ❌ Never (**Industry Default**) |
+| **`EACH_QUORUM`** | ❌ No | ✅ Yes | Quorum in each DC independently | ⚠️ Yes |
+| **`ALL`** | ✅ Yes | ✅ Yes | All $RF$ replicas in all DCs | ⚠️ Yes (0% fault tolerance) |
+| **`LOCAL_SERIAL`** | ✅ Yes (LWT) | ✅ Yes (LWT) | Local Paxos Quorum | ❌ Never |
+| **`SERIAL`** | ✅ Yes (LWT) | ✅ Yes (LWT) | Global Paxos Quorum | ⚠️ Yes |
+
+---
+
+### B. Datacenter Topology & Quorum in Action: The 5-DC Deep Dive
+
+To understand how datacenter topology and quorums interact, consider an enterprise global deployment with **5 Datacenters (DCs)**:
+`us-east` (N. Virginia), `us-west` (Oregon), `eu-west` (Frankfurt), `ap-south` (Mumbai), and `ap-northeast` (Tokyo).
+
+```sql
+-- Production Multi-Datacenter Keyspace
+CREATE KEYSPACE global_ecommerce WITH replication = {
+    'class': 'NetworkTopologyStrategy',
+    'us-east': 3,
+    'us-west': 3,
+    'eu-west': 3,
+    'ap-south': 3,
+    'ap-northeast': 3
+};
+```
+
+* **Local Replication Factor ($RF_{Local}$):** **3 replicas** per DC.
+* **Total Global Replication Factor ($RF_{Total}$):** 
+  $$RF_{Total} = 3 \times 5 = \mathbf{15\text{ physical copies of every row}}$$
+
+```mermaid
+flowchart TD
+    subgraph USEast["us-east (Local DC)"]
+        Coord["Coordinator Node"]
+        R1["Replica 1"]
+        R2["Replica 2"]
+        R3["Replica 3"]
+        Coord --- R1 & R2 & R3
+    end
+
+    subgraph RemoteDCs["4 Remote Datacenters (Across Ocean WAN)"]
+        USW["us-west (3 Replicas)"]
+        EUW["eu-west (3 Replicas)"]
+        APS["ap-south (3 Replicas)"]
+        APN["ap-northeast (3 Replicas)"]
+    end
+
+    Coord -.->|WAN 40ms| USW
+    Coord -.->|WAN 100ms| EUW
+    Coord -.->|WAN 180ms| APS
+    Coord -.->|WAN 160ms| APN
+```
+
+#### What Happens When a Client in `us-east` Executes a Query?
+
+1. **Global `QUORUM` ($\lfloor 15/2 \rfloor + 1 = \mathbf{8\text{ replicas}}$):**
+   * Even if all 3 local replicas in `us-east` reply immediately ($<2\text{ ms}$), the coordinator only has 3 acknowledgments.
+   * To reach **8**, it **must wait for at least 5 remote replicas** across trans-oceanic WAN links.
+   * **Latency:** Bottlenecked at **$120\text{--}180\text{ ms}$**.
+   * **Failure Impact:** If undersea cables are cut between the US and Europe/Asia, the query fails completely.
+2. **`LOCAL_QUORUM` ($\lfloor 3/2 \rfloor + 1 = \mathbf{2\text{ replicas}}$):**
+   * Requires only **2 out of the 3 local `us-east` replicas**.
+   * **Latency:** Local gigabit rack latency: **$1\text{--}3\text{ ms}$**.
+   * **Cross-DC Write Optimization:** The coordinator does *not* flood the WAN with 12 separate messages. It sends **one single message per remote DC** to an elected "remote coordinator" in that DC, which then fans out locally over its own LAN.
+   * **Failure Impact:** Even if **4 out of the 5 datacenters are completely down or isolated**, clients in `us-east` continue reading and writing at full speed!
+3. **`EACH_QUORUM` ($2 \times 5 = \mathbf{10\text{ replicas}}$):**
+   * Requires 2 acks in `us-east`, 2 in `us-west`, 2 in `eu-west`, 2 in `ap-south`, and 2 in `ap-northeast`. If any single DC degrades, the write fails globally.
+4. **`ALL` ($\mathbf{15\text{ replicas}}$):**
+   * All 15 replicas worldwide must respond. Zero fault tolerance.
+
+#### 5-DC Quorum Comparison Matrix
+
+| Consistency Level | Replicas Required | Where do they come from? | Typical Latency | Can survive a cross-ocean fiber cut? |
+| :--- | :---: | :--- | :---: | :---: |
+| **`LOCAL_ONE`** | **1** | Local DC only | $\sim 1\text{ ms}$ | ✅ Yes |
+| **`LOCAL_QUORUM`** | **2** | Local DC only ($\lfloor 3/2 \rfloor + 1$) | $\sim 2\text{ ms}$ | ✅ **Yes (Survives 4 dead DCs!)** |
+| **`QUORUM`** | **8** | Any 8 out of 15 globally ($\lfloor 15/2 \rfloor + 1$) | $\sim 150\text{ ms}$ | ❌ No |
+| **`EACH_QUORUM`** | **10** | 2 in each of the 5 DCs ($2 \times 5$) | $\sim 180\text{ ms}$ | ❌ No |
+| **`ALL`** | **15** | Every single replica globally | $\sim 250\text{ ms}$ | ❌ No (0% fault tolerance) |
+
+---
+
+### C. Strong Consistency Quorum Formula
 
 $$\text{Read Quorum} + \text{Write Quorum} > \text{Replication Factor} \quad (R + W > RF)$$
 
@@ -1350,10 +1488,11 @@ graph TD
     Note["Node 2 is the guaranteed overlap!<br/>Returns latest write timestamp."]
 ```
 
-*   **Example ($RF = 3$):**
-    *   $W = \text{QUORUM} (2)$
-    *   $R = \text{QUORUM} (2)$
-    *   $R + W = 4 > 3 \implies$ **Strong Consistency guaranteed.**
+*   **Single-DC Guarantee ($RF = 3$):**
+    *   $W = \text{LOCAL_QUORUM} (2)$
+    *   $R = \text{LOCAL_QUORUM} (2)$
+    *   $R + W = 4 > 3 \implies$ **Strong Consistency guaranteed within the region** at $<3\text{ ms}$ latency.
+*   **Cross-DC Guarantee:** Updates propagate asynchronously between regions. Cross-region consistency is **eventual**, resolved deterministically via Last-Write-Wins (LWW) timestamps.
 
 ---
 
