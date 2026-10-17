@@ -101,3 +101,51 @@ Do not use an asynchronous message broker in the critical path if you are design
 *   **Stock Exchanges:** Financial trading platforms require strict, immediately consistent views of trades and balances.
 
 For these systems, you must stick to synchronous database writes (and potentially Distributed Transactions if crossing microservices). Yes, you will get lower availability (if the DB is down, the system rejects the write), but every single `200 Success` guarantees absolute correctness and zero stale reads.
+
+---
+
+## 6. Distributed Transactions Across Services: The SAGA Pattern
+
+When a business operation spans multiple microservices (e.g., ordering $\to$ payment $\to$ inventory), traditional two-phase commit (2PC) hurts availability by locking databases across the network. Instead, modern systems use the **SAGA Pattern**: a sequence of local transactions where every step has a corresponding **compensating transaction** to undo changes if a downstream step fails.
+
+```mermaid
+flowchart TD
+    SAGA{Which SAGA Model?}
+    
+    SAGA -->|Orchestration: Centralized Coordinator| Orch[<b>Orchestration-based SAGA</b><br/>• Centralized Workflow Engine (Temporal, AWS Step Functions)<br/>• Explicit state machine & easy auditability<br/>• Native try/catch compensation]
+    SAGA -->|Choreography: Decentralized Event Bus| Choreo[<b>Choreography-based SAGA</b><br/>• Services emit and react to events via Kafka/RabbitMQ<br/>• Requires Transactional Outbox to prevent dual-writes<br/>• High decoupling, but complex debugging]
+```
+
+### A. Choreography with the Transactional Outbox Pattern (Kafka)
+In a choreography saga, services communicate via message brokers. However, a microservice must never perform a **dual-write** (writing to its local database and publishing to Kafka in application code), because one write can succeed while the other fails.
+
+* **The Solution: The Transactional Outbox Pattern:**
+  1. The microservice inserts its business record and an outbox event into an `outbox` table in a **single local ACID database transaction**.
+  2. A Change Data Capture (CDC) engine (such as **Debezium**) tails the database Write-Ahead Log (WAL) and publishes the event to **Apache Kafka**.
+  3. Downstream services consume from Kafka and execute their local transactions. If a step fails, a failure event is published back to Kafka to trigger compensating transactions in reverse order.
+
+```mermaid
+sequenceDiagram
+    participant Order as Order Service
+    participant DB as Order DB (with Outbox Table)
+    participant CDC as Debezium (CDC)
+    participant Kafka as Kafka Topic: 'order-events'
+    participant Pay as Payment Service
+
+    Order->>DB: 1. BEGIN TXN: INSERT order + INSERT outbox_event; COMMIT;
+    CDC-)DB: 2. Tails Database WAL
+    CDC->>Kafka: 3. Streams 'OrderCreated' Event
+    Kafka->>Pay: 4. Payment Service Consumes & Charges Card
+    alt Payment Successful
+        Pay->>Kafka: Publishes 'PaymentSucceeded'
+    else Payment Failed
+        Pay->>Kafka: Publishes 'PaymentFailed' (Triggers Compensation)
+        Kafka->>Order: Order Service Consumes & Marks Order CANCELLED
+    end
+```
+
+### B. Orchestration: The Modern Standard (Temporal.io / Cadence)
+Choreography becomes an unmaintainable "spaghetti architecture" when sagas exceed 3–4 steps or require complex branching. The modern standard is **Orchestration via Durable Execution Engines (Temporal.io / AWS Step Functions)**:
+* A central orchestrator executes the workflow as pure code (`try / catch`).
+* Every state transition is deterministically recorded in an event log.
+* If a worker crashes mid-step, another worker resumes the workflow from the exact line of code without lost state or stranded compensations.

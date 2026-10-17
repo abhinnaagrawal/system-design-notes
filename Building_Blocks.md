@@ -4301,6 +4301,54 @@ Do not use an asynchronous message broker in the critical path if you are design
 
 For these systems, you must stick to synchronous database writes (and potentially Distributed Transactions if crossing microservices). Yes, you will get lower availability (if the DB is down, the system rejects the write), but every single `200 Success` guarantees absolute correctness and zero stale reads.
 
+---
+
+## 6. Distributed Transactions Across Services: The SAGA Pattern
+
+When a business operation spans multiple microservices (e.g., ordering $\to$ payment $\to$ inventory), traditional two-phase commit (2PC) hurts availability by locking databases across the network. Instead, modern systems use the **SAGA Pattern**: a sequence of local transactions where every step has a corresponding **compensating transaction** to undo changes if a downstream step fails.
+
+```mermaid
+flowchart TD
+    SAGA{Which SAGA Model?}
+    
+    SAGA -->|Orchestration: Centralized Coordinator| Orch[<b>Orchestration-based SAGA</b><br/>• Centralized Workflow Engine (Temporal, AWS Step Functions)<br/>• Explicit state machine & easy auditability<br/>• Native try/catch compensation]
+    SAGA -->|Choreography: Decentralized Event Bus| Choreo[<b>Choreography-based SAGA</b><br/>• Services emit and react to events via Kafka/RabbitMQ<br/>• Requires Transactional Outbox to prevent dual-writes<br/>• High decoupling, but complex debugging]
+```
+
+### A. Choreography with the Transactional Outbox Pattern (Kafka)
+In a choreography saga, services communicate via message brokers. However, a microservice must never perform a **dual-write** (writing to its local database and publishing to Kafka in application code), because one write can succeed while the other fails.
+
+* **The Solution: The Transactional Outbox Pattern:**
+  1. The microservice inserts its business record and an outbox event into an `outbox` table in a **single local ACID database transaction**.
+  2. A Change Data Capture (CDC) engine (such as **Debezium**) tails the database Write-Ahead Log (WAL) and publishes the event to **Apache Kafka**.
+  3. Downstream services consume from Kafka and execute their local transactions. If a step fails, a failure event is published back to Kafka to trigger compensating transactions in reverse order.
+
+```mermaid
+sequenceDiagram
+    participant Order as Order Service
+    participant DB as Order DB (with Outbox Table)
+    participant CDC as Debezium (CDC)
+    participant Kafka as Kafka Topic: 'order-events'
+    participant Pay as Payment Service
+
+    Order->>DB: 1. BEGIN TXN: INSERT order + INSERT outbox_event; COMMIT;
+    CDC-)DB: 2. Tails Database WAL
+    CDC->>Kafka: 3. Streams 'OrderCreated' Event
+    Kafka->>Pay: 4. Payment Service Consumes & Charges Card
+    alt Payment Successful
+        Pay->>Kafka: Publishes 'PaymentSucceeded'
+    else Payment Failed
+        Pay->>Kafka: Publishes 'PaymentFailed' (Triggers Compensation)
+        Kafka->>Order: Order Service Consumes & Marks Order CANCELLED
+    end
+```
+
+### B. Orchestration: The Modern Standard (Temporal.io / Cadence)
+Choreography becomes an unmaintainable "spaghetti architecture" when sagas exceed 3–4 steps or require complex branching. The modern standard is **Orchestration via Durable Execution Engines (Temporal.io / AWS Step Functions)**:
+* A central orchestrator executes the workflow as pure code (`try / catch`).
+* Every state transition is deterministically recorded in an event log.
+* If a worker crashes mid-step, another worker resumes the workflow from the exact line of code without lost state or stranded compensations.
+
 </details>
 
 
@@ -5449,6 +5497,64 @@ flowchart TD
   * If absent $\implies$ record it in the Bloom filter, return asset, but **do not write to Redis cache**.
   * If present $\implies$ this is at least the second request! Write it to Redis cache.
 * **Result:** Slashes cache churn by **60–70%**, preserving memory exclusively for multi-access data.
+
+---
+
+### Pattern 11: SAGA Distributed Transactions — Supporting Role vs. Production Alternatives
+
+A classic senior/staff system design interview question is: *"Can we use Redis to implement a SAGA distributed transaction across microservices?"*
+
+```mermaid
+flowchart TD
+    subgraph SagaCoordinator["Saga Execution Coordinator (SEC)"]
+        Orchestrator[Workflow Engine]
+    end
+
+    subgraph RedisRoles["Redis Supporting Roles in Sagas"]
+        L["<b>1. Distributed Mutex</b><br/>SET lock:order_901 saga_id NX PX<br/>Prevents concurrent sagas from modifying same entity"]
+        T["<b>2. Step Timeout Watchdog</b><br/>ZADD saga_timeouts epoch saga_id<br/>Triggers compensation if service hangs"]
+        I["<b>3. Compensation Idempotency</b><br/>SET idempotency:compensate:order_901 1 NX<br/>Ensures compensation never runs twice"]
+        S["<b>4. Ephemeral Event Bus</b><br/>Redis Streams / PubSub<br/>Fast lightweight choreography for non-critical pipelines"]
+    end
+
+    Orchestrator --> L & T & I & S
+```
+
+#### 1. Where Redis Excels in SAGA Support
+* **Distributed Locking (Isolation Defense):** Because Sagas lack ACID isolation (intermediate states are visible), concurrent sagas can cause dirty writes. Redis prevents this via entity locks:
+  ```text
+  SET lock:account_101 <saga_id> NX PX 30000
+  ```
+* **Step Timeout Watchdogs:** If an external service hangs, a Redis Sorted Set (`ZSET`) acts as an active timeout tracker:
+  ```text
+  ZADD saga_deadlines <current_timestamp + 30s> <saga_id>
+  ```
+  A background reaper pulls expired entries via `ZRANGEBYSCORE 0 now` to trigger compensations.
+* **Idempotency Guard for Compensations:** Compensating transactions ($C_1, C_2$) **must be idempotent** under network retries. Redis stores tokens to ensure a refund or cancellation never executes twice:
+  ```text
+  SET idempotency:compensate:<step_id> "DONE" NX EX 86400
+  ```
+
+#### 2. Why Redis is NOT the Primary SAGA Engine (The Failure Modes)
+* **The "Ghost Transaction" Risk:** Redis replication is asynchronous. If the master dies before persisting an in-flight saga state, a failover drops that state. **The coordinator forgets to trigger compensating rollbacks**, permanently stranding financial ledgers or external bookings.
+* **Dormant Workflows Waste RAM:** Sagas can take hours or days (e.g., waiting for human KYC approval or bank wire clearance). Holding idle state machines in expensive RAM is uneconomical.
+* **No Built-in Durable Execution:** Redis has no built-in state-machine runtime. Developers must hand-roll retry backoffs, step reconciliations, and audit histories.
+
+#### 3. Production Alternatives for SAGA
+
+| Dimension | Redis | Temporal.io / Cadence | AWS Step Functions | Apache Kafka + Debezium | PostgreSQL / MySQL |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Primary SAGA Style** | Supporting Cache / Lock | **Orchestration** | **Orchestration** | **Choreography** | **Orchestration** |
+| **Durability** | Weak (Async AOF/Replication) | **Strictly Durable** (Event Sourcing) | **Strictly Durable** (AWS Managed) | **Strictly Durable** (Replicated Log) | **Strictly Durable** (ACID WAL) |
+| **Max Lifespan** | Seconds to Minutes | **Years (Infinite)** | **1 Year** | Days to Weeks | Months |
+| **Developer Ergonomics**| High manual boilerplate | **Code-as-Workflows (Pure Go/TS)** | Visual / JSON ASL | Event-driven listeners | Custom SQL State Engine |
+| **Compensation Logic** | Hand-rolled scripts | Built-in `try/catch` | Built-in `Catch` blocks | Reverse event triggers | Custom rollback loop |
+| **Best Used For** | Fast locks, timeouts, & dedup | **Core business workflows & payments** | AWS Serverless pipelines | High-scale event streaming | Simple monolithic transitions |
+
+> **💡 Staff Engineer Interview Rule:**
+> * For **Orchestration**, propose **Temporal.io** (or AWS Step Functions) for durable code execution and native compensation handling.
+> * For **Choreography**, propose **Apache Kafka with the Transactional Outbox Pattern (Debezium)** to guarantee atomic event publication from local microservice databases.
+> * Use **Redis** strictly as a helper for **distributed locking, step timeouts, and idempotency deduplication**.
 
 </details>
 
