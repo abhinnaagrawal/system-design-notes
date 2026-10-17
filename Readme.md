@@ -64,6 +64,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Conflict-Free Replicated Data Types (CRDTs)](./Core%20Concepts/CRDTs/)
  * [CockroachDB & Distributed SQL Architecture](./Core%20Concepts/CockroachDB/)
  * [Redis Internals & Architecture](./Core%20Concepts/Redis/)
+ * [Distributed Transactions (2PC vs. SAGA Pattern)](./Core%20Concepts/Distributed%20Transactions/)
 
 # Additonal Resources
 
@@ -169,5 +170,15 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 
 ### CockroachDB & Distributed SQL
 - [Everything you need to know about CockroachDB w/ Ben Darnell | Ep 6 (Arpit Bhayani)](https://www.youtube.com/watch?v=yhqW82Ka-gw)
+
+
+### Redis Internals & Architecture
+- [Redis Internals Masterclass • Arpit Bhayani](https://www.youtube.com/watch?v=h30k7YixrMo&list=PLsdq-3Z1EPT0eElcdOON9fdaeaQjlyXDt)
+
+
+### Distributed Transactions & Sagas
+- [Distributed Transactions Explained: 2 Phase Commit vs Saga Pattern (Hello Interview)](https://www.youtube.com/watch?v=DOFflggE_0Q)
+- [Life Beyond Distributed Transactions: An Apostate's Opinion (Pat Helland)](https://queue.acm.org/detail.cfm?id=1281891)
+
 
 
