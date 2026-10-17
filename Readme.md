@@ -63,6 +63,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Time Series Databases (Prometheus, InfluxDB, Gorilla)](./Core%20Concepts/Time%20Series%20Databases/)
  * [Conflict-Free Replicated Data Types (CRDTs)](./Core%20Concepts/CRDTs/)
  * [CockroachDB & Distributed SQL Architecture](./Core%20Concepts/CockroachDB/)
+ * [Redis Internals & Architecture](./Core%20Concepts/Redis/)
 
 # Additonal Resources
 
