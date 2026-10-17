@@ -60,6 +60,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Apache Cassandra Deep Dive](./Core%20Concepts/Cassandra/)
  * [Amazon DynamoDB Deep Dive](./Core%20Concepts/DynamoDB/)
  * [Data Structures for Big Data (Bloom Filter, Count-Min, HyperLogLog)](./Core%20Concepts/Data%20Structures%20for%20Big%20Data/)
+ * [Time Series Databases (Prometheus, InfluxDB, Gorilla)](./Core%20Concepts/Time%20Series%20Databases/)
 
 # Additonal Resources
 
@@ -147,6 +148,5 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 - [Data Structures for Big Data in Interviews - Bloom Filters, Count-Min Sketch, HyperLogLog (Hello Interview)](https://www.youtube.com/watch?v=IgyU0iFIoqM)
 
 
-
-
-
+### Time Series Databases
+- [How do Time Series Databases Work? (Hello Interview)](https://www.youtube.com/watch?v=Qd76ZmfRs_Q)
