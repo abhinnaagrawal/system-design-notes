@@ -103,6 +103,75 @@ CREATE TABLE user_messages (
 *   `user_id` is the **Partition Key** (all messages for a user live on the same physical node).
 *   `message_id` is the **Clustering Key** (sorted newest first on disk for fast reverse-chronological chat rendering).
 
+### C. Why Cassandra is Fundamentally Bad for Cross-Partition Range Scans (The Murmur3 Dilemma)
+
+A common system design interview trap is attempting to run a range query across partition keys, such as:
+```sql
+-- DANGEROUS ANTI-PATTERNS IN CASSANDRA:
+SELECT * FROM users WHERE user_id >= 100 AND user_id <= 200;
+-- OR scanning an entire table without a partition key:
+SELECT * FROM users WHERE status = 'ACTIVE' ALLOW FILTERING;
+```
+
+```mermaid
+flowchart TD
+    subgraph Logical["Logical Key Sequence"]
+        K1["user_id: 100"]
+        K2["user_id: 101"]
+        K3["user_id: 102"]
+        K1 -.-> K2 -.-> K3
+    end
+
+    subgraph HashRing["Murmur3 Token Ring (-2^63 to 2^63 - 1)"]
+        direction TB
+        N1["<b>Node 1</b><br/>Token: -7.2 * 10^18<br/>Holds user_id: 101"]
+        N2["<b>Node 2</b><br/>Token: +1.4 * 10^18<br/>Holds other keys..."]
+        N3["<b>Node 3</b><br/>Token: +5.8 * 10^18<br/>Holds user_id: 100"]
+        N4["<b>Node 4</b><br/>Token: -1.1 * 10^18<br/>Holds user_id: 102"]
+    end
+
+    K1 ==>|Murmur3 Hash| N3
+    K2 ==>|Murmur3 Hash| N1
+    K3 ==>|Murmur3 Hash| N4
+
+    Coord["<b>Coordinator Node</b><br/>Receives: WHERE user_id BETWEEN 100 AND 200"]
+    Coord ==>|Broadcast / Scatter-Gather| N1
+    Coord ==>|Broadcast / Scatter-Gather| N2
+    Coord ==>|Broadcast / Scatter-Gather| N3
+    Coord ==>|Broadcast / Scatter-Gather| N4
+```
+
+#### 1. The Mechanics: Murmur3 Pseudo-Random Dispersion
+Cassandra defaults to the `Murmur3Partitioner`. Murmur3 is an extremely fast, uniform pseudo-random hash function engineered for **maximum entropy and uniform distribution**:
+* Logical keys that are numerically or alphabetically adjacent (e.g., `user_id = 100`, `user_id = 101`, `user_id = 102`) produce wildly divergent 64-bit integer tokens.
+* As a result, consecutive rows are scattered completely randomly across distinct physical nodes and token ranges across the cluster.
+
+#### 2. The Penalty: Full-Cluster Scatter-Gather
+When an application queries a range of partition keys or scans a table without specifying an exact partition key:
+1. **Cluster-Wide Broadcast:** The coordinator node cannot perform an indexed seek. It must broadcast the query to **every single replica node in the entire cluster**.
+2. **Disk Thrashing & Network Flooding:** Every node scans its local SSTables and streams chunks of data back over the internal network to the coordinator.
+3. **Coordinator Bottleneck & OOM:** The coordinator must hold, buffer, deduplicate (via timestamps), and sort all rows in memory before returning them to the client. This frequently triggers Java Garbage Collection (GC) pauses or fatal Out-Of-Memory (`OOMKilled`) crashes.
+4. **Tail Latency Explosion ($p99$):** The response time is strictly bound by the single slowest, most overloaded node in the cluster (the straggler effect).
+
+#### 3. Intra-Partition vs. Inter-Partition Range Queries
+
+| Query Type | Example | Execution Path | Performance |
+| :--- | :--- | :--- | :--- |
+| **Intra-Partition Range Scan** <br/>*(Using Clustering Key)* | `WHERE user_id = 101 AND message_id >= X AND message_id <= Y` | Routes to **one single partition**; executes a sequential forward scan across sorted SSTable blocks. | **Single-digit milliseconds ($<2\text{ ms}$)** |
+| **Inter-Partition Range Scan** <br/>*(Across Partition Keys)* | `WHERE user_id >= 100 AND user_id <= 200` | Requires **cluster-wide scatter-gather** across all physical machines. | **Catastrophic (Timeouts / OOM)** |
+
+#### 4. Why Cassandra Abandoned `ByteOrderedPartitioner`
+Early versions of Cassandra supported `ByteOrderedPartitioner` (BOP), which preserved lexicographical ordering of partition keys so that range scans across partition keys were possible.
+
+* **Why was it deprecated?** It caused catastrophic **write hot-spotting**.
+* If partition keys are sequentially ordered (such as timestamp prefixes, sequential integer IDs, or alphabetic usernames starting with common letters), **all write traffic slams the single node holding that active range**, while the other 99 nodes sit completely idle.
+* Cassandra's core design philosophy deliberately sacrificed cross-partition range scans in favor of `Murmur3Partitioner` to guarantee perfect write balancing across massive clusters.
+
+> **💡 System Design Interview Tip:**
+> If an interviewer asks for a query pattern that requires range scans across primary entities (e.g., *"Find all users registered between May 1 and May 10"* or *"Scan orders by price range"*):
+> * **DO NOT use Cassandra** with `ALLOW FILTERING` or range scans on partition keys.
+> * Use **CockroachDB** or **Google Spanner** (which use Range Partitioning with dynamic 64MB range splitting), or index the ranges into an external search engine (**Elasticsearch**).
+
 ---
 
 ## 4. Entity-Driven vs. Query-Driven Data Modeling
