@@ -2150,53 +2150,232 @@ CockroachDB was designed to run on **commodity infrastructure** (AWS, Azure, GCP
 
 ## 7. Distributed ACID Transactions: Two-Phase Commit over Multi-Raft
 
-Unlike Cassandra (which has no 2PC, no multi-partition atomicity, and no rollback), CockroachDB provides **full ACID transactions** across arbitrary numbers of tables, keys, and ranges.
+Unlike Cassandra (which has no 2PC, no multi-partition atomicity, and no rollback mechanism), CockroachDB provides **full ACID transactions** across arbitrary numbers of tables, keys, and ranges.
 
-### The Mechanics: Write Intents & Transaction Records
+It accomplishes this **without global distributed locks**. Instead, it synthesizes three core primitives:
+1. **Multi-Raft Consensus:** Independent consensus groups per 64MB range.
+2. **Hybrid Logical Clocks (HLC):** Monotonic ordering without atomic clock hardware.
+3. **Write Intents & Transaction Records:** Staged MVCC values that point to a central transaction status record.
+
+---
+
+### A. The Write Journey (Distributed 2PC over Multi-Raft)
+
+When a client executes a multi-row or multi-range transaction:
+```sql
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE account_id = 'Alice'; -- Range 2
+UPDATE accounts SET balance = balance + 100 WHERE account_id = 'Bob';   -- Range 3
+COMMIT;
+```
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client
-    participant Gateway as Gateway Node
-    participant TxnRange as Range 1 (Holds Txn Record)
-    participant DataRangeA as Range 2 (Key A)
-    participant DataRangeB as Range 3 (Key B)
+    participant GW as Gateway Node (Coordinator)
+    participant Anchor as Range 1 (Anchor Range: Holds Txn Record)
+    participant R2 as Range 2 (Alice: Leaseholder)
+    participant R3 as Range 3 (Bob: Leaseholder)
 
-    Client->>Gateway: BEGIN TRANSACTION; UPDATE A; UPDATE B; COMMIT;
-    
-    Note over Gateway,TxnRange: Phase 1: Write Intent Staging
-    Gateway->>TxnRange: Create Transaction Record (Status: PENDING)
-    Gateway->>DataRangeA: Write Intent on Key A (Points to Txn Record on Range 1)
-    Gateway->>DataRangeB: Write Intent on Key B (Points to Txn Record on Range 1)
-    
-    Note over Gateway,TxnRange: Phase 2: Atomic Commit
-    Gateway->>TxnRange: Flip Txn Record from PENDING -> COMMITTED
-    TxnRange-->>Gateway: Ack Commit
-    Gateway-->>Client: Transaction Committed! (ACID Complete)
-    
-    Note over Gateway,DataRangeB: Background Asynchronous Resolution
-    Gateway-)DataRangeA: Resolve Intent -> Permanent MVCC Value
-    Gateway-)DataRangeB: Resolve Intent -> Permanent MVCC Value
+    Client->>GW: BEGIN & UPDATE Alice, Bob
+    Note over GW: 1. Assigns TxnID & HLC Timestamp (t1)
+
+    Note over GW,Anchor: Step 1: Create Transaction Record (Lazy/Staged)
+    GW->>Anchor: Raft Write: Create Txn Record (Status: PENDING)
+    Anchor-->>GW: Ack Record Created
+
+    Note over GW,R3: Step 2: Stage Write Intents via Raft (Phase 1)
+    GW->>R2: Stage Write Intent on Alice (Points to Txn Record)
+    Note over R2: R2 replicates Intent to Raft Quorum
+    R2-->>GW: Ack Intent Placed
+
+    GW->>R3: Stage Write Intent on Bob (Points to Txn Record)
+    Note over R3: R3 replicates Intent to Raft Quorum
+    R3-->>GW: Ack Intent Placed
+
+    Client->>GW: COMMIT
+    Note over GW,Anchor: Step 3: The Atomic Commit Switch (Phase 2)
+    GW->>Anchor: Raft Write: Flip Txn Record from PENDING -> COMMITTED
+    Anchor-->>GW: Ack Committed!
+
+    GW-->>Client: COMMIT OK (Client is Released Instantly!)
+
+    Note over GW,R3: Step 4: Asynchronous Background Intent Resolution
+    GW-)R2: Resolve Intent (Convert to permanent MVCC value)
+    GW-)R3: Resolve Intent (Convert to permanent MVCC value)
 ```
 
-1. **Transaction Record Creation:**
-   * When a transaction begins, a **Transaction Record** is written to a designated range with status **`PENDING`**.
-2. **Writing "Write Intents":**
-   * Instead of modifying data directly, the gateway node writes **Write Intents** to the target ranges via Raft consensus.
-   * A Write Intent is an in-memory MVCC value containing an inline pointer to the Transaction Record:
-     $$\text{Write Intent} = (\text{Value}, \text{Pointer to Txn Record})$$
-3. **Atomic Commit Point (Phase 2):**
-   * To commit, the coordinator sends a single write to the Transaction Record, changing its status from **`PENDING` $\to$ `COMMITTED`**.
-   * **The Atomic Switch:** The moment that single record flips to `COMMITTED`, the entire distributed transaction is committed!
-4. **Asynchronous Intent Resolution:**
-   * In the background, the coordinator tells the participating ranges to remove the pointers and convert the intents into regular permanent MVCC values.
-   * If a concurrent reader encounters an unresolved Write Intent before the background worker cleans it, the reader simply inspects the Transaction Record. If it sees `COMMITTED`, it reads the intent as valid committed data!
+#### Detailed Step-by-Step Write Lifecycle:
 
-### Full Rollback Support
-* If a transaction encounters an error, deadlock, or is aborted by the client:
-* The coordinator flips the Transaction Record status to **`ABORTED`**.
-* **Any subsequent reader that encounters a Write Intent pointing to an `ABORTED` record automatically discards the intent and rolls it back.** Zero dirty reads, 100% rollback capability!
+1. **SQL Gateway & Range Discovery:**
+   * The client connects to **any node** in the cluster (acting as the stateless **SQL Gateway / Coordinator**).
+   * The Gateway generates a unique **`TxnID`** (UUID) and assigns an initial timestamp from its local **Hybrid Logical Clock**: $T_{txn} = \text{HLC}_{coord}$.
+   * It inspects its local **Range Cache** (a 2-level B-tree index) to locate the leaseholders for Range 2 (`Alice`) and Range 3 (`Bob`).
+2. **Transaction Record Creation on the Anchor Range:**
+   * CockroachDB designates the range holding the first modified key as the **Anchor Range** (Range 1).
+   * It writes a **Transaction Record** via Raft:
+     ```text
+     Key:    /Local/TxnRecord/<TxnID>
+     Status: PENDING
+     HLC:    T_txn
+     ```
+   * The Gateway sends periodic heartbeats to this record. If the Gateway dies, other transactions can detect the stale heartbeat and abort it.
+3. **Staging "Write Intents" (Phase 1 of 2PC):**
+   * The Gateway sends commands to the **Leaseholders** of Range 2 and Range 3.
+   * The Leaseholders acquire local in-memory row latches and propose a Raft log entry: a **Write Intent**.
+   * **What is a Write Intent physically in Pebble?**
+     * It is written to disk as an MVCC value at timestamp $T_{txn}$:
+       ```text
+       Key:   /accounts/Alice@T_txn
+       Value: {balance: 900, Pointer: "TxnRecord on Range 1"}
+       ```
+     * It serves a dual purpose: (1) stages the proposed new value, and (2) acts as an inline lock warning readers that a write is in-flight.
+   * Each Leaseholder replicates this intent to its **Raft Quorum (2 out of 3 replicas)** and writes it to Pebble.
+4. **The Atomic Commit Switch (Phase 2 of 2PC):**
+   * When the client sends `COMMIT`, the Gateway sends **one single write** to the Anchor Range:
+     * Proposes a Raft write to flip `TxnRecord.Status` from **`PENDING` $\to$ `COMMITTED`**.
+   * **THE ATOMIC POINT:** As soon as that single record flip reaches Raft quorum on Range 1, **the entire distributed transaction is permanently committed!**
+   * The Gateway immediately returns `COMMIT OK` to the client. The client is unblocked without waiting for Range 2 or Range 3 to be touched.
+5. **Asynchronous Write Intent Resolution:**
+   * In the background, the Gateway sends asynchronous cleanup RPCs to Range 2 and Range 3:
+     * Strips the pointer to the `TxnRecord` from the Pebble keys.
+     * Promotes the intents to plain, permanent MVCC rows.
+     * Releases in-memory row latches.
+
+---
+
+### B. The Read Journey (0-RTT Leases & MVCC Evaluation)
+
+When a client queries:
+```sql
+SELECT balance FROM accounts WHERE account_id = 'Alice';
+```
+
+```mermaid
+flowchart TD
+    Client[Client Query] --> GW[SQL Gateway]
+    GW -->|Hash / Route| R2[Range 2 Leaseholder]
+    
+    subgraph Leaseholder["Range 2 Leaseholder (Zero Network Round-Trips)"]
+        direction TB
+        CheckLease["Is Lease Active?"] -->|Yes (0-RTT)| SeekPebble["Seek Pebble LSM at T <= T_read"]
+        
+        SeekPebble --> Hit{"Encountered Object?"}
+        
+        Hit -->|Clean MVCC Row| ReturnFast["Return Row to Gateway"]
+        
+        Hit -->|Write Intent| CheckIntent{"Inspect Intent's TxnRecord"}
+        
+        CheckIntent -->|Status: COMMITTED| ReadIntent["Treat Intent as Valid Committed Data!<br/>(Fire Async Read-Repair)"]
+        CheckIntent -->|Status: ABORTED| DropIntent["Ignore Intent & Seek Older MVCC Row"]
+        CheckIntent -->|Status: PENDING| Conflict["Concurrency Conflict!<br/>Wait in Queue or PushTxn"]
+        
+        Hit -->|Value written in Uncertainty Window| ReadRestart["Read-Restart:<br/>Bump T_read to T_value and Restart"]
+    end
+
+    ReturnFast --> GW --> Client
+    ReadIntent --> GW --> Client
+    DropIntent --> GW --> Client
+    ReadRestart -->|Transparent to Client| GW
+```
+
+#### Detailed Step-by-Step Read Lifecycle:
+
+1. **0-RTT Local Reads via the Range Leaseholder:**
+   * The query hits the Gateway, which routes the read to the **Range 2 Leaseholder**.
+   * **Does the read go through Raft consensus? NO!**
+     * Standard Raft requires contacting a quorum of followers on every read to ensure the leader wasn't partitioned.
+     * CockroachDB uses **Range Leases**: Only the Leaseholder can serve reads or propose writes for that time window.
+     * Therefore, the Leaseholder serves the read **directly out of local memory and Pebble with ZERO network round-trips (0-RTT)!**
+2. **MVCC Snapshot Seek in Pebble:**
+   * The Leaseholder queries Pebble's MemTable and Block Cache for keys with $T \le T_{read}$.
+   * **Clean Read:** If the latest value is a regular MVCC row, the Leaseholder returns it immediately ($<1\text{ ms}$).
+3. **Resolving Encountered Write Intents (Concurrency Control):**
+   * If a concurrent transaction recently wrote to `Alice`, the reader encounters a Write Intent with a pointer to that writer's `TxnRecord`.
+   * The reader inspects the `TxnRecord`:
+
+| TxnRecord Status | Reader Action | Result |
+| :--- | :--- | :--- |
+| **`COMMITTED`** | The background worker hasn't cleaned the intent yet, but the commit is official. The reader **reads the intent value as valid committed data**, returns it to the client, and fires a background job to convert it to a permanent MVCC key (**Inline Read Repair**). | **Zero dirty reads, zero blocking.** |
+| **`ABORTED`** | The writer transaction rolled back. The reader **ignores the intent**, steps backwards in Pebble to read the older MVCC version ($T < T_{intent}$), and triggers background deletion of the dead intent. | **Returns prior valid state instantly.** |
+| **`PENDING`** | The writer transaction is actively running. A read/write conflict exists. | Reader enters the **Latch Queue** to wait, or uses **`PushTxn`** to break deadlocks (higher priority pushes lower priority). |
+
+4. **The HLC Uncertainty Window & Read-Restarts:**
+   * If a value has timestamp $T_{val}$ within the node's HLC clock uncertainty window ($T_{read} < T_{val} \le T_{read} + \text{max\_offset}$):
+   * CockroachDB cannot be sure whether $T_{val}$ was committed before or after this read began in physical real time.
+   * **The Fix:** The engine triggers a transparent **Read Restart**: it bumps $T_{read} = T_{val}$ and re-evaluates the query. The application client never sees an error.
+
+---
+
+### C. The Rollback Journey (Atomic Aborts & Intent Garbage Collection)
+
+What happens if a transaction aborts? (e.g. client issues `ROLLBACK`, balance check fails, or deadlock occurs):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant GW as Gateway Node
+    participant Anchor as Range 1 (Holds Txn Record)
+    participant R2 as Range 2 (Alice: Holds Write Intent)
+    participant Reader as Concurrent Reader Node
+
+    Client->>GW: ROLLBACK (or Deadlock Abort)
+    
+    Note over GW,Anchor: Step 1: The Atomic Abort Switch
+    GW->>Anchor: Raft Write: Flip Txn Record from PENDING -> ABORTED
+    Anchor-->>GW: Ack Aborted
+    GW-->>Client: ROLLBACK OK (Client Released)
+
+    Note over R2: NOTICE: The Write Intent on Alice is STILL physically on disk!
+
+    Note over Reader,R2: Step 2: What happens if a Reader arrives right now?
+    Reader->>R2: Read Alice
+    R2-->>Reader: Encounters Write Intent (Points to Txn Record on Range 1)
+    Reader->>Anchor: Check Status of Txn Record
+    Anchor-->>Reader: Status: ABORTED!
+    Note over Reader,R2: Reader ignores Intent, reads previous MVCC row, and deletes Intent!
+
+    Note over GW,R2: Step 3: Asynchronous Background Cleanup
+    GW-)R2: Clean up dead Write Intents (Pebble Tombstones)
+```
+
+#### Detailed Step-by-Step Rollback Lifecycle:
+
+1. **The Trigger:**
+   * Can happen due to an explicit client command (`ROLLBACK;`), a serialization conflict/deadlock, or coordinator heartbeat expiration.
+2. **The Atomic Abort Switch:**
+   * The Gateway sends a single write to the Anchor Range:
+     * Flips `TxnRecord.Status` from **`PENDING` $\to$ `ABORTED`**.
+   * **THE ATOMIC ABORT POINT:** The moment this single Raft write commits on Range 1, **the entire distributed transaction is 100% rolled back globally and permanently.**
+   * The client receives `ROLLBACK OK`.
+3. **Why Orphan Write Intents Never Cause Dirty Reads (Contrast with Cassandra):**
+   * In Apache Cassandra, a failed/timed-out write leaves orphan data on disk that gets resurrected by quorum reads or read repairs because Cassandra has no rollback mechanism.
+   * In CockroachDB, after a rollback, **the Write Intents for Alice and Bob are still physically sitting on disk in Pebble!**
+   * **Why does this NOT corrupt data?**
+     * An intent is *conditional*: it only has meaning through its pointer to the `TxnRecord`.
+     * If a concurrent reader visits `Alice` 1 millisecond after the rollback:
+       1. It sees the Write Intent.
+       2. It follows the pointer to the `TxnRecord` on Range 1 and sees **`Status: ABORTED`**.
+       3. The reader **completely disregards the intent**, steps backward in the LSM-tree to the previous valid MVCC row ($T < T_{aborted}$), and serves the original pre-transaction balance!
+     * **Dirty reads are mathematically impossible.**
+4. **Asynchronous Cleanup & Compaction:**
+   * **Active Cleanup:** The Gateway asynchronously contacts Range 2 and Range 3 to remove the dead intents and write Pebble deletion tombstones.
+   * **Passive (Self-Healing) Cleanup:** If the Gateway crashes before it can clean up, the first reader that encounters the aborted intent cleans it up on the spot.
+   * **Pebble Compaction:** Pebble's background LSM compaction merges the SSTables and physically reclaims disk space.
+
+---
+
+### D. Summary Matrix: The Three Paths
+
+| Dimension | The Write Path | The Read Path | The Rollback Path |
+| :--- | :--- | :--- | :--- |
+| **Consensus Incurred** | **Multi-Raft Quorum** (on data intents + 1 on Txn Record) | **ZERO Raft Quorum** (0-RTT via Range Leaseholder) | **1 Raft Quorum** (only on the Txn Record) |
+| **Commit/Abort Point**| Flip `TxnRecord` $\to$ `COMMITTED` | N/A (Snapshot at $T \le T_{read}$) | Flip `TxnRecord` $\to$ `ABORTED` |
+| **Locking Mechanism** | Write Intents (inline locks in Pebble) | Non-blocking MVCC (Latches for pending intents) | Unlocked immediately when record flips to `ABORTED` |
+| **Downstream Cleanup**| Asynchronous intent resolution | Inline read-repair if committed intent met | Asynchronous intent deletion / reader-driven cleanup |
+| **Worst-Case Latency**| 2 Raft Round Trips (Phase 1 + Phase 2) | Sub-millisecond ($<1\text{ ms}$) local disk seek | 1 Raft Round Trip (client unblocked immediately) |
 
 ---
 
