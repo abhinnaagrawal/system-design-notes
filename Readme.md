@@ -65,6 +65,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [CockroachDB & Distributed SQL Architecture](./Core%20Concepts/CockroachDB/)
  * [Redis Internals & Architecture](./Core%20Concepts/Redis/)
  * [Distributed Transactions (2PC vs. SAGA Pattern)](./Core%20Concepts/Distributed%20Transactions/)
+ * [Vector Databases & ANN Search (HNSW, IVF, pgvector, Pinecone)](./Core%20Concepts/Vector%20Databases/)
 
 # Additonal Resources
 
@@ -179,6 +180,12 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 ### Distributed Transactions & Sagas
 - [Distributed Transactions Explained: 2 Phase Commit vs Saga Pattern (Hello Interview)](https://www.youtube.com/watch?v=DOFflggE_0Q)
 - [Life Beyond Distributed Transactions: An Apostate's Opinion (Pat Helland)](https://queue.acm.org/detail.cfm?id=1281891)
+
+
+### Vector Databases & Semantic Search
+- [Vector Databases Explained for System Design Interviews (Hello Interview)](https://www.youtube.com/watch?v=Fq73E8DQprc)
+- [Efficient and robust approximate nearest neighbor search using HNSW (Malkov & Yashunin)](https://arxiv.org/abs/1603.09320)
+
 
 
 
