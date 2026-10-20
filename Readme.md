@@ -66,6 +66,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [Redis Internals & Architecture](./Core%20Concepts/Redis/)
  * [Distributed Transactions (2PC vs. SAGA Pattern)](./Core%20Concepts/Distributed%20Transactions/)
  * [Vector Databases & ANN Search (HNSW, IVF, pgvector, Pinecone)](./Core%20Concepts/Vector%20Databases/)
+ * [Apache Spark Internals (Catalyst, AQE, Tungsten, Shuffle, Native Engines, Version Optimization Map)](./Core%20Concepts/Spark%20Internals/)
 
 # Additonal Resources
 
@@ -185,6 +186,17 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 ### Vector Databases & Semantic Search
 - [Vector Databases Explained for System Design Interviews (Hello Interview)](https://www.youtube.com/watch?v=Fq73E8DQprc)
 - [Efficient and robust approximate nearest neighbor search using HNSW (Malkov & Yashunin)](https://arxiv.org/abs/1603.09320)
+
+
+### Apache Spark Internals
+- [The Internals of Apache Spark (Jacek Laskowski)](https://books.japila.pl/apache-spark-internals)
+- [The Internals of Spark SQL (Jacek Laskowski)](https://books.japila.pl/spark-sql-internals)
+- [Resilient Distributed Datasets (NSDI '12)](https://people.csail.mit.edu/matei/papers/2012/nsdi_spark.pdf)
+- [Spark SQL: Relational Data Processing in Spark (SIGMOD '15)](https://people.csail.mit.edu/matei/papers/2015/sigmod_spark_sql.pdf)
+- [Project Tungsten: Bringing Spark Closer to Bare Metal (Databricks)](https://www.databricks.com/blog/2015/04/28/project-tungsten-bringing-spark-closer-to-bare-metal.html)
+- [Spark as a Compiler (Databricks)](https://www.databricks.com/blog/2016/05/23/apache-spark-as-a-compiler-joining-a-billion-rows-per-second-on-a-laptop.html)
+- [Adaptive Query Execution: Speeding Up Spark SQL at Runtime (Databricks)](https://www.databricks.com/blog/2020/05/29/adaptive-query-execution-speeding-up-spark-sql-at-runtime.html)
+- [Shuffle Deep Dive (Aaron Davidson)](https://www.youtube.com/watch?v=dmL0N3qfSc8)
 
 
 
