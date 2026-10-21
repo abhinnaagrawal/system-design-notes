@@ -49,6 +49,8 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
    * [Layer 05: Distributed Coordination (etcd vs ZooKeeper, Redlock vs Fencing Tokens, Snowflake)](./Layer-Playbooks/05-Distributed-Coordination.md)
    * [Layer 06: Search & OLAP Engines (ClickHouse vs Trino, Elasticsearch vs GIN, Iceberg)](./Layer-Playbooks/06-Search-and-OLAP-Engines.md)
    * [Layer 07: Compute & Orchestration (Flink vs Spark Streaming, Temporal vs Airflow)](./Layer-Playbooks/07-Compute-and-Async-Execution.md)
+   * [Layer 08: Multi-Tenant Architecture (Silo vs Pool vs Bridge, DB-per-tenant, Postgres RLS, Fair Queues)](./Layer-Playbooks/08-Multi-Tenant-Architecture.md)
+   * [Layer 09: Security, AuthN & AuthZ (OAuth2/PKCE, OIDC, Asymmetric JWKS, Zanzibar ReBAC, Envelope Encryption)](./Layer-Playbooks/09-Security-AuthN-and-AuthZ.md)
 
 ## Core Concepts
  * [WebSockets Crash Course](./Core%20Concepts/WebSockets/)

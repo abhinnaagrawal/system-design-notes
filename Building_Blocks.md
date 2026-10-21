@@ -15,6 +15,8 @@ When designing large-scale systems in Staff/Principal interviews, component choi
 * [**Layer 05: Distributed Coordination, Consensus & Identity Playbook**](./Layer-Playbooks/05-Distributed-Coordination.md) — Linearizable Consensus (etcd vs ZooKeeper vs Consul), Quorum Math ($2F + 1$), Distributed Locks (Why Redlock fails vs etcd Leases + Fencing Tokens), and Snowflake vs UUIDv7.
 * [**Layer 06: Search & OLAP Analytical Engines Playbook**](./Layer-Playbooks/06-Search-and-OLAP-Engines.md) — Row-Oriented vs Columnar Physics (I/O Projection Pruning & SIMD), Inverted Indexes (Lucene/Roaring Bitmaps), Elasticsearch vs PostgreSQL GIN, ClickHouse vs Trino vs DuckDB, and Apache Iceberg Lakehouse.
 * [**Layer 07: Compute, Stream Processing & Orchestration Playbook**](./Layer-Playbooks/07-Compute-and-Async-Execution.md) — True Streaming (Apache Flink) vs Micro-Batch (Spark Streaming), Event-Time Watermarking, Durable Execution (Temporal Sagas) vs Batch Orchestration (Apache Airflow), and Serverless vs K8s Autoscaling.
+* [**Layer 08: Multi-Tenant Architecture & Isolation Playbook**](./Layer-Playbooks/08-Multi-Tenant-Architecture.md) — Tenancy Models (Silo vs Pool vs Bridge), DB Partitioning (DB-per-tenant vs Schema vs Shared with PostgreSQL RLS), Noisy Neighbor Defense (Weighted Fair Queuing), and Tenant-Aware Caching.
+* [**Layer 09: Security, Authentication (AuthN) & Authorization (AuthZ) Playbook**](./Layer-Playbooks/09-Security-AuthN-and-AuthZ.md) — Stateful Session Cookies vs Stateless JWTs vs OAuth 2.0 PKCE / OIDC, Asymmetric Local Verification via JWKS, The Revocation Dilemma, ReBAC (Google Zanzibar / SpiceDB) with Zookies, and KMS Envelope Encryption.
 
 ---
 
