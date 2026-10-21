@@ -1,1 +1,4 @@
 .DS_Store
+transcript*.json
+transcript*.txt
+*draft*.md
