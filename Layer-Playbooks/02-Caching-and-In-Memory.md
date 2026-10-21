@@ -118,37 +118,38 @@ When `maxmemory` is reached, the cache must evict keys to make room for new writ
 
 ## 3. Head-to-Head Architectural Shootouts
 
-### Shootout 1: Redis / Valkey vs. Memcached
+### Shootout 1: Distributed Cache Contenders: Redis / Valkey vs. Memcached vs. Aerospike
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                          REDIS / VALKEY vs. MEMCACHED                       │
-├───────────────────────────────────┬─────────────────────────────────────────┤
-│           REDIS / VALKEY          │                MEMCACHED                │
-├───────────────────────────────────┼─────────────────────────────────────────┤
-│ Single-threaded command execution │ Multi-threaded worker pool              │
-│ Rich types: String, Hash, Set,    │ Opaque byte blob only (Strings)         │
-│   ZSet, Stream, Bitmap, HLL       │                                         │
-│ Optional persistence: RDB + AOF   │ Pure ephemeral memory (Zero persistence)│
-│ Max value size: 512 MB            │ Max value size: 1 MB (Default)          │
-│ Native cluster sharding (16,384)  │ Client-side consistent hashing          │
-│ Sub/Pub, Lua scripting, Streams   │ None (Simple cache protocol only)       │
-└───────────────────────────────────┴─────────────────────────────────────────┘
+│                    REDIS / VALKEY vs. MEMCACHED vs. AEROSPIKE               │
+├───────────────────┬─────────────────────┬───────────────────┬───────────────┤
+│ FEATURE           │ REDIS / VALKEY      │ MEMCACHED         │ AEROSPIKE     │
+├───────────────────┼─────────────────────┼───────────────────┼───────────────┤
+│ Concurrency Model │ Single-threaded ae  │ Multi-threaded    │ Multi-threaded│
+│                   │ command loop (+I/O) │ worker pool (Locks│ C/C++ engine  │
+│ Storage Medium    │ Pure DRAM           │ Pure DRAM (Slabs) │ RAM + NVMe SSD│
+│ Data Model        │ Rich data structures│ Opaque byte blob  │ Bin/Record KV │
+│ Multi-Core Scaling│ Requires clustering │ Linear on 1 node  │ Linear on SSDs│
+│ Cost for >5TB Data│ Very High (All RAM) │ Very High (RAM)   │ 1/5th (Flash) │
+│ Durability        │ RDB + AOF (Optional)│ None (Ephemeral)  │ Real-time WAL │
+└───────────────────┴─────────────────────┴───────────────────┴───────────────┘
 ```
 
 #### 1. Operations and Data Model
 *   **Memcached:** Treats every value as an opaque byte array. If you have an object with 50 fields and want to update one field, you must fetch the entire 1MB blob over the network, deserialize it, modify the field, serialize it, and send the full 1MB blob back.
 *   **Redis:** Understands data structures natively. You can mutate an individual field inside a Hash in-place (`HSET user:100 status active`), append to a List (`LPUSH`), compute Set intersections (`SINTER`), or update a leaderboard rank (`ZINCRBY`) directly in RAM without moving bytes over the network.
+*   **Aerospike (Hybrid Flash Cache):** While Redis and Memcached require 100% of data to sit in expensive DRAM, Aerospike keeps *only* the 64-byte primary index in RAM, streaming cached values directly from raw NVMe flash blocks using `O_DIRECT` (bypassing the OS page cache).
 
 #### 2. Durability & State Survival
 *   **Memcached:** 100% volatile. A server crash or reboot means instant, total cache loss.
-*   **Redis:** Offers configurable durability:
-    *   **RDB (Redis Database Snapshots):** Point-in-time snapshots written to disk asynchronously via `fork()` using OS Copy-on-Write (COW).
-    *   **AOF (Append-Only File):** Logs every write command sequentially. Configured via `appendfsync always` (slow, max durability), `everysec` (recommended: max 1s data loss), or `no` (delegated to OS).
+*   **Redis:** Offers configurable durability via **RDB** (point-in-time Copy-on-Write snapshots) and **AOF** (append-only write log).
+*   **Aerospike:** Enterprise-grade persistence with immediate synchronous write-ahead logging to flash, surviving crashes with zero cache warming penalty.
 
-#### 3. The Interview Verdict: When to Pick Which
-*   **Pick Memcached if:** You are building a pure, simple key-value cache layer where values are static serialized blobs, read throughput demands millions of QPS scaling across large multi-core servers, and no persistence or advanced data structures are needed.
-*   **Pick Redis / Valkey for everything else:** In 95% of modern system designs, Redis is the superior choice due to atomic operations, rich data modeling, pub/sub signaling, and native cluster topologies.
+#### 3. The Interview Verdict: Presenting the Triad
+*   **Pick Memcached if:** You are building a pure, simple key-value cache layer where values are static serialized blobs, read throughput demands millions of QPS scaling across large multi-core servers on single boxes, and no persistence or advanced data structures are needed.
+*   **Pick Aerospike if:** Your cache working set exceeds **2TB to 20TB+** (e.g., ad-tech cookies, user profile caches, real-time ML feature caches) where storing everything in pure DRAM in Redis is cost-prohibitive, but you still require strict **sub-1.5ms P99** read latency.
+*   **Pick Redis / Valkey for everything else:** In standard modern system design, Redis is the primary choice due to atomic multi-step operations, rich data types (ZSET, Hashes, Bitmaps), and pub/sub signaling.
 
 ---
 
