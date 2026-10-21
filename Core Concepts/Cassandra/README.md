@@ -623,6 +623,40 @@ flowchart LR
 *   **The Tombstone Trap:** In an append-only engine, you cannot "delete" a row in place. Deleting a row writes a **Tombstone** (a record stating "Key X was deleted at Timestamp T"). 
     *   *The Trap:* If an application frequently creates and deletes rows, reading that partition requires scanning through thousands of tombstones. If the tombstone count exceeds 100,000, Cassandra aborts the query with a `ReadFailureException` to protect node memory!
 
+### D. Storage Engine Shootout: Cassandra's Memtable (LSM-Tree) vs. DynamoDB's SSD B-Tree
+
+In distributed system design interviews, candidates are often asked: *"Both Cassandra and DynamoDB use consistent hashing for partition distribution, but how do their single-node storage engines differ, and why did Cassandra pick Memtables while DynamoDB picked B-Trees?"*
+
+```mermaid
+flowchart TD
+    subgraph Cassandra_LSM ["Cassandra: LSM-Tree Storage Engine"]
+        direction TB
+        CWrite["Write Mutation"] --> CLog["1. Append to CommitLog (Sequential)"]
+        CWrite --> CMem["2. Insert into Memtable (RAM SkipList)"]
+        CMem -- "Full" --> CFlush["3. Flush to Immutable SSTable on Disk"]
+        CFlush --> CSST["Multiple SSTables"]
+        CSST --> CComp["Background Compaction (High Disk/CPU)"]
+    end
+
+    subgraph Dynamo_BTree ["DynamoDB: SSD-Optimized B-Tree Engine"]
+        direction TB
+        DWrite["Write Mutation"] --> DPaxos["1. Multi-Paxos Consensus WAL"]
+        DPaxos --> DLeaf["2. In-Place B-Tree Leaf Page Mutation on NVMe SSD"]
+        DLeaf --> DNoComp["ZERO Compaction! Deterministic P99 Latency"]
+    end
+```
+
+#### Detailed Mechanical Comparison
+
+| Dimension | Cassandra (Memtable + SSTables) | DynamoDB (SSD B-Tree) |
+| :--- | :--- | :--- |
+| **Storage Engine Paradigm** | **Log-Structured Merge-Tree (LSM-Tree)** | **SSD-Optimized B-Tree / B+ Tree** |
+| **Write Path Physics** | 1. Append to on-disk CommitLog.<br>2. Insert into in-memory **Memtable** (SkipList).<br>• *Zero random disk I/O; saturates sequential disk bandwidth.* | 1. Multi-Paxos replication to quorum.<br>2. Mutates B-Tree leaf page **in-place on SSD**.<br>• *In-place updates bounded by partition page splits.* |
+| **Read Path Physics** | Must check Memtable + Key Cache + Bloom Filters + Multiple on-disk SSTables.<br>• *Read amplification occurs unless compaction is aggressive.* | Traverses B-Tree from root to leaf on SSD ($O(\log N)$).<br>• *Deterministic 1–3 page reads; flat P99 latency.* |
+| **Compaction Overhead** | Continuous background compaction merges SSTables, consuming heavy CPU and disk I/O. | **Zero Compaction.** Pages are updated in-place, eliminating background I/O storms completely. |
+| **Deletions** | Appends an immutable **Tombstone** marker to Memtable/SSTables. Deletions accumulate and can cause query aborts ("Tombstone Storms"). | Frees records immediately from the B-Tree leaf page. No tombstones, no read degradation after deletes. |
+| **Why the Creators Chose This** | Designed at Facebook for **dedicated bare-metal hardware** where maximizing unbound write throughput (Inbox Search) was the #1 goal. | Designed by AWS as a **multi-tenant cloud service**. Compaction storms from one tenant would cause "noisy neighbor" latency spikes for other tenants. B-Trees guarantee predictable P99 SLAs. |
+
 ---
 
 ## 8. Tunable Consistency & The CAP Theorem

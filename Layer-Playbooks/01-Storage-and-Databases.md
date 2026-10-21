@@ -201,9 +201,15 @@ $$\text{If } \mathbf{P} \text{ (Partition): } \mathbf{A} \text{ vs } \mathbf{C} 
     *   *Interview Gotcha:* Even if your table has 50,000 provisioned WCUs globally, if a celebrity user or viral post routes 1,500 writes/sec to a *single* Partition Key, DynamoDB will reject writes with a `ProvisionedThroughputExceededException` (HTTP 400). You must mitigate this via **Write Sharding** (appending a random suffix `PK#1..10` to scatter writes).
 *   **Cassandra:** Has no artificial software throttling caps. A single node accepts writes up to the physical limits of its NVMe SSD sequential write bandwidth and network interface. However, a severe hot spot can lead to excessive memory pressure in the Memtable and high JVM garbage collection pauses.
 
-#### 3. Storage Internals: LSM Compaction & Tombstone Storms
-*   **Cassandra:** When a row or column is deleted in Cassandra, it is not erased from disk immediately; the engine writes a marker called a **Tombstone** into the Memtable.
-    *   *Production Failure Mode (The Tombstone Storm):* If a query reads a range with thousands of deleted records, Cassandra must scan all tombstones from disk into memory. If the tombstone count exceeds `tombstone_failure_threshold` (default 100,000), **Cassandra aborts the query to prevent node OOM crashes**.
+#### 3. Storage Internals: SSD B-Trees (DynamoDB) vs. Memtables & LSM Compaction (Cassandra)
+*   **DynamoDB (SSD B-Tree Storage Engine):**
+    *   Within each physical 10GB storage partition, items sharing the same Partition Key are indexed and sorted by their **Sort Key (SK)** using an on-disk **B-Tree index structure** on NVMe SSDs.
+    *   *In-Place Updates:* Mutations and deletes update the B-Tree leaf pages directly (after Paxos commit). Deleting an item immediately frees the page entry without generating tombstones.
+    *   *The Multi-Tenant Cloud Justification:* AWS designed DynamoDB for multi-tenancy where thousands of customer partitions share physical nodes. An LSM engine would trigger heavy background **Compaction storms**, causing "noisy neighbor" disk I/O saturation and severe P99 latency spikes. The SSD B-Tree guarantees flat, deterministic single-digit millisecond P99s with zero background compaction overhead.
+*   **Cassandra (LSM-Tree: Memtable + SSTables):**
+    *   Cassandra's node engine is a pure **LSM-Tree** (Log-Structured Merge-Tree). Writes are appended sequentially to an on-disk `CommitLog` and inserted into an in-memory **Memtable** (SkipList sorted by clustering columns).
+    *   *Compaction & Tombstones:* Memtables periodically flush to disk as immutable **SSTables**. Updates and deletes never mutate disk in place; deleting a row writes an append-only **Tombstone** marker.
+    *   *Production Failure Mode (The Tombstone Storm):* If a query reads a range with thousands of deleted records, Cassandra must scan all tombstones from disk into memory. If the tombstone count exceeds `tombstone_failure_threshold` (default 100,000), **Cassandra aborts the query with a `ReadFailureException` to prevent node OOM crashes**.
 *   **ScyllaDB:** A drop-in C++ rewrite of Cassandra. By using the asynchronous **Seastar engine** with a **thread-per-core** architecture and direct Linux AIO, it bypasses JVM garbage collection entirely, offering 5x–10x higher throughput and flat, predictable P99 latencies.
 
 #### 4. The Interview Verdict: When to Pick Which

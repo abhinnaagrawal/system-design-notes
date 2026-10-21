@@ -342,6 +342,41 @@ flowchart TD
     *   **Eventually Consistent Read (Default):** Can be served by *any* of the 3 replicas. Extremely fast and costs half the capacity (0.5 RCU per 4KB), but may return slightly stale data if read from a follower still catching up.
     *   **Strongly Consistent Read:** Always routed to the **Paxos Leader**. Guarantees reading the most up-to-date state. Costs 1 full RCU per 4KB.
 
+### E. Storage Engine Mechanics: Why DynamoDB Uses SSD B-Trees Instead of Memtables/LSM-Trees
+
+A common misconception is assuming DynamoDB uses a Log-Structured Merge-Tree (LSM-Tree) like Apache Cassandra or Google Bigtable. Under the hood, **DynamoDB storage nodes maintain an SSD-optimized B-Tree (or B+ Tree variant) engine for each storage partition**.
+
+```mermaid
+flowchart TD
+    subgraph DynamoDB_Engine ["DynamoDB Storage Node (SSD B-Tree)"]
+        direction TB
+        subgraph Partition_BTree ["B-Tree Index per Partition (Ordered by Sort Key)"]
+            Root["B-Tree Root Node"] --> Branch1["Internal Branch Page"]
+            Root --> Branch2["Internal Branch Page"]
+            Branch1 --> Leaf1["Leaf Page [SK: 001 - 100]"]
+            Branch1 --> Leaf2["Leaf Page [SK: 101 - 200]"]
+            Branch2 --> Leaf3["Leaf Page [SK: 201 - 300]"]
+        end
+        
+        WriteOp["Incoming Item Mutation"] --> WAL["1. Paxos Consensus WAL Log"]
+        WAL --> InPlace["2. In-Place Leaf Page Mutation on NVMe SSD"]
+    end
+```
+
+#### 1. How the B-Tree Powers Sort Key Range Queries
+* Inside each physical storage partition (up to 10GB), items that share the same Partition Key (PK) are indexed and ordered by their **Sort Key (SK)** in an on-disk B-Tree structure.
+* **Point Reads (`GetItem`):** Follows standard B-Tree root-to-leaf traversal ($O(\log N)$) requiring at most 1 to 3 page reads on NVMe SSD.
+* **Range Queries (`Query` with `BETWEEN` / `begins_with`):** Traverses down the B-Tree to find the leaf page holding the starting Sort Key, then sequentially scans adjacent linked leaf pages until the range condition terminates.
+
+#### 2. The Architectural Rationale: Why AWS Avoided LSM-Trees for DynamoDB
+Why did AWS choose an in-place mutating B-Tree over an append-only LSM-Tree (Memtable + SSTables)?
+1. **The Multi-Tenant Cloud Guarantee:** DynamoDB is a shared, multi-tenant cloud service where thousands of different customer partitions reside on the same physical storage machine.
+2. **Eliminating the "Compaction Storm" (Noisy Neighbors):**
+   * In an LSM-Tree (like Cassandra), writes and deletes are appended to memory (Memtable) and flushed as immutable SSTables. To clean up old versions and tombstones, the database runs continuous background **Compaction**.
+   * Compaction is heavily CPU- and disk-I/O intensive. If Tenant A ran a massive delete job on an LSM engine, the resulting compaction storm would saturate the server's SSD I/O, **causing severe P99 latency spikes for Tenant B on the same physical host**.
+3. **Flat, Deterministic P99 Latency:** B-Trees mutate pages in-place. Because there are no background compactions merging multiple SSTables, DynamoDB can guarantee flat, predictable single-digit millisecond P99 response times for every tenant.
+4. **Instant Space Reclamation (No Tombstones):** When an item is deleted in DynamoDB, it is directly unlinked and freed from the B-Tree leaf page. In contrast to Cassandra's "tombstone accumulation," DynamoDB deletes do not degrade future read performance.
+
 ---
 
 ## 6. Capacity Planning & Cost Mechanics (RCUs & WCUs)
