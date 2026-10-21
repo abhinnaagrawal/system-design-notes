@@ -4,6 +4,19 @@ Based on the 31 system design topics in this repository (which cover the classic
 
 To master system design, you should build a strong foundational understanding of the following building blocks:
 
+## Architectural Layer Selection Playbooks (Interview Decision Guides)
+
+When designing large-scale systems in Staff/Principal interviews, component choices must be justified through **mechanical first principles** and **hardware trade-offs** (CPU, memory, disk I/O, network). Use these deep-dive decision guides:
+
+* [**Layer 01: Storage & Database Selection Playbook**](./Layer-Playbooks/01-Storage-and-Databases.md) — SQL vs NoSQL, PostgreSQL vs MySQL (Heap/MVCC vs Clustered/Undo), Distributed NewSQL (CockroachDB vs Spanner), Wide-Column (DynamoDB vs Cassandra/ScyllaDB), Time-Series, and Vector DBs.
+* [**Layer 02: Caching & In-Memory Storage Playbook**](./Layer-Playbooks/02-Caching-and-In-Memory.md) — Multi-Tier Topology (L1 Local vs L2 Distributed vs CDN), Redis/Valkey vs Memcached, Invalidation Patterns, Stampede (XFetch/Mutex), Penetration (Bloom Filters), and Avalanche (TTL Jitter).
+* [**Layer 03: Messaging, Streaming & Event-Driven Systems Playbook**](./Layer-Playbooks/03-Messaging-and-Streaming.md) — Queue vs Commit Log, Kafka vs RabbitMQ vs AWS SQS/SNS vs Pulsar, Zero-Copy & OS Page Cache, Ordering Boundaries, and Exactly-Once via Transactional Outbox + CDC.
+* [**Layer 04: Networking, Transport Protocols & API Gateway Playbook**](./Layer-Playbooks/04-Networking-and-Protocols.md) — gRPC (HTTP/2 + Protobuf) vs REST vs GraphQL, WebSockets vs Server-Sent Events (SSE), HTTP/3 QUIC, L4 vs L7 Ingress, and OS Socket Buffer tuning for 1M connections.
+* [**Layer 05: Distributed Coordination, Consensus & Identity Playbook**](./Layer-Playbooks/05-Distributed-Coordination.md) — Linearizable Consensus (etcd vs ZooKeeper vs Consul), Quorum Math ($2F + 1$), Distributed Locks (Why Redlock fails vs etcd Leases + Fencing Tokens), and Snowflake vs UUIDv7.
+* [**Layer 06: Search & OLAP Analytical Engines Playbook**](./Layer-Playbooks/06-Search-and-OLAP-Engines.md) — Row-Oriented vs Columnar Physics (I/O Projection Pruning & SIMD), Inverted Indexes (Lucene/Roaring Bitmaps), Elasticsearch vs PostgreSQL GIN, ClickHouse vs Trino vs DuckDB, and Apache Iceberg Lakehouse.
+* [**Layer 07: Compute, Stream Processing & Orchestration Playbook**](./Layer-Playbooks/07-Compute-and-Async-Execution.md) — True Streaming (Apache Flink) vs Micro-Batch (Spark Streaming), Event-Time Watermarking, Durable Execution (Temporal Sagas) vs Batch Orchestration (Apache Airflow), and Serverless vs K8s Autoscaling.
+
+---
 
 ## Core Concept Notes (Embedded)
 

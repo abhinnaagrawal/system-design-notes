@@ -41,6 +41,14 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
 
 ## Study Guides
  * [Core Building Blocks & Technologies](./Building_Blocks.md)
+ * [**Architectural Layer Selection Playbooks (Interview Decision Guides)**](./Layer-Playbooks/)
+   * [Layer 01: Storage & Database Selection (SQL vs NoSQL, PG vs MySQL, Distributed SQL, Cassandra)](./Layer-Playbooks/01-Storage-and-Databases.md)
+   * [Layer 02: Caching & In-Memory (Redis/Valkey vs Memcached, Multi-Tier, Stampede/Avalanche)](./Layer-Playbooks/02-Caching-and-In-Memory.md)
+   * [Layer 03: Messaging & Streaming (Kafka vs RabbitMQ vs SQS vs Pulsar, Outbox + CDC)](./Layer-Playbooks/03-Messaging-and-Streaming.md)
+   * [Layer 04: Networking & Protocols (gRPC vs REST vs WebSockets vs SSE, L4/L7 Ingress)](./Layer-Playbooks/04-Networking-and-Protocols.md)
+   * [Layer 05: Distributed Coordination (etcd vs ZooKeeper, Redlock vs Fencing Tokens, Snowflake)](./Layer-Playbooks/05-Distributed-Coordination.md)
+   * [Layer 06: Search & OLAP Engines (ClickHouse vs Trino, Elasticsearch vs GIN, Iceberg)](./Layer-Playbooks/06-Search-and-OLAP-Engines.md)
+   * [Layer 07: Compute & Orchestration (Flink vs Spark Streaming, Temporal vs Airflow)](./Layer-Playbooks/07-Compute-and-Async-Execution.md)
 
 ## Core Concepts
  * [WebSockets Crash Course](./Core%20Concepts/WebSockets/)
