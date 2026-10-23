@@ -262,11 +262,11 @@ There are two primary architectural models for implementing Sagas. The choice di
 
 ```mermaid
 flowchart TD
-    SAGA{Which SAGA Model to Choose?}
+    SAGA{"Which SAGA Model to Choose?"}
     
-    SAGA -->|Decentralized / Event Bus| Choreo[<b>Choreography-Based SAGA</b><br/>• Services publish/subscribe to message broker events<br/>• Best for simple workflows (2–3 steps)<br/>• Risk: Event Spaghetti at scale]
+    SAGA -->|Decentralized / Event Bus| Choreo["<b>Choreography-Based SAGA</b><br/>• Services publish/subscribe to message broker events<br/>• Best for simple workflows (2–3 steps)<br/>• Risk: Event Spaghetti at scale"]
     
-    SAGA -->|Centralized / State Machine| Orch[<b>Orchestration-Based SAGA</b><br/>• Central orchestrator drives execution step-by-step<br/>• Best for complex flows (4+ steps, branching)<br/>• Standard: Temporal.io, AWS Step Functions]
+    SAGA -->|Centralized / State Machine| Orch["<b>Orchestration-Based SAGA</b><br/>• Central orchestrator drives execution step-by-step<br/>• Best for complex flows (4+ steps, branching)<br/>• Standard: Temporal.io, AWS Step Functions"]
 ```
 
 ---

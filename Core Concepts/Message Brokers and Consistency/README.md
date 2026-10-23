@@ -110,10 +110,10 @@ When a business operation spans multiple microservices (e.g., ordering $\to$ pay
 
 ```mermaid
 flowchart TD
-    SAGA{Which SAGA Model?}
+    SAGA{"Which SAGA Model?"}
     
-    SAGA -->|Orchestration: Centralized Coordinator| Orch[<b>Orchestration-based SAGA</b><br/>• Centralized Workflow Engine (Temporal, AWS Step Functions)<br/>• Explicit state machine & easy auditability<br/>• Native try/catch compensation]
-    SAGA -->|Choreography: Decentralized Event Bus| Choreo[<b>Choreography-based SAGA</b><br/>• Services emit and react to events via Kafka/RabbitMQ<br/>• Requires Transactional Outbox to prevent dual-writes<br/>• High decoupling, but complex debugging]
+    SAGA -->|Orchestration: Centralized Coordinator| Orch["<b>Orchestration-based SAGA</b><br/>• Centralized Workflow Engine (Temporal, AWS Step Functions)<br/>• Explicit state machine & easy auditability<br/>• Native try/catch compensation"]
+    SAGA -->|Choreography: Decentralized Event Bus| Choreo["<b>Choreography-based SAGA</b><br/>• Services emit and react to events via Kafka/RabbitMQ<br/>• Requires Transactional Outbox to prevent dual-writes<br/>• High decoupling, but complex debugging"]
 ```
 
 ### A. Choreography with the Transactional Outbox Pattern (Kafka)

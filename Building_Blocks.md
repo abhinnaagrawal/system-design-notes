@@ -3590,11 +3590,11 @@ There are two primary architectural models for implementing Sagas. The choice di
 
 ```mermaid
 flowchart TD
-    SAGA{Which SAGA Model to Choose?}
+    SAGA{"Which SAGA Model to Choose?"}
     
-    SAGA -->|Decentralized / Event Bus| Choreo[<b>Choreography-Based SAGA</b><br/>• Services publish/subscribe to message broker events<br/>• Best for simple workflows (2–3 steps)<br/>• Risk: Event Spaghetti at scale]
+    SAGA -->|Decentralized / Event Bus| Choreo["<b>Choreography-Based SAGA</b><br/>• Services publish/subscribe to message broker events<br/>• Best for simple workflows (2–3 steps)<br/>• Risk: Event Spaghetti at scale"]
     
-    SAGA -->|Centralized / State Machine| Orch[<b>Orchestration-Based SAGA</b><br/>• Central orchestrator drives execution step-by-step<br/>• Best for complex flows (4+ steps, branching)<br/>• Standard: Temporal.io, AWS Step Functions]
+    SAGA -->|Centralized / State Machine| Orch["<b>Orchestration-Based SAGA</b><br/>• Central orchestrator drives execution step-by-step<br/>• Best for complex flows (4+ steps, branching)<br/>• Standard: Temporal.io, AWS Step Functions"]
 ```
 
 ---
@@ -4286,7 +4286,7 @@ $$\text{RCU (Eventually Consistent)} = \frac{\text{Reads/sec}}{2} \times \left\l
 
 ```mermaid
 flowchart LR
-    App[Application] -->|DAX Client SDK| DAX[DAX Cluster (In-Memory)]
+    App["Application"] -->|DAX Client SDK| DAX["DAX Cluster (In-Memory)"]
     DAX -->|Cache Hit (Microseconds)| App
     DAX -->|Cache Miss / Write-Through| DDB[(DynamoDB Storage)]
 ```
@@ -4331,7 +4331,7 @@ classDiagram
         +SK : String
         +Data Attributes...
     }
-    note for SingleTable "Row 1: PK=USER#101 | SK=METADATA | Name='Evan'<br/>Row 2: PK=USER#101 | SK=ORDER#901 | Total=$50<br/>Row 3: PK=USER#101 | SK=ORDER#902 | Total=$120"
+    note for SingleTable "Row 1: PK=USER#101 | SK=METADATA | Name='Evan'<br/>Row 2: PK=USER#101 | SK=ORDER#901 | Total=\$50<br/>Row 3: PK=USER#101 | SK=ORDER#902 | Total=\$120"
 ```
 
 ### Why it exists:
@@ -5016,10 +5016,10 @@ When a business operation spans multiple microservices (e.g., ordering $\to$ pay
 
 ```mermaid
 flowchart TD
-    SAGA{Which SAGA Model?}
+    SAGA{"Which SAGA Model?"}
     
-    SAGA -->|Orchestration: Centralized Coordinator| Orch[<b>Orchestration-based SAGA</b><br/>• Centralized Workflow Engine (Temporal, AWS Step Functions)<br/>• Explicit state machine & easy auditability<br/>• Native try/catch compensation]
-    SAGA -->|Choreography: Decentralized Event Bus| Choreo[<b>Choreography-based SAGA</b><br/>• Services emit and react to events via Kafka/RabbitMQ<br/>• Requires Transactional Outbox to prevent dual-writes<br/>• High decoupling, but complex debugging]
+    SAGA -->|Orchestration: Centralized Coordinator| Orch["<b>Orchestration-based SAGA</b><br/>• Centralized Workflow Engine (Temporal, AWS Step Functions)<br/>• Explicit state machine & easy auditability<br/>• Native try/catch compensation"]
+    SAGA -->|Choreography: Decentralized Event Bus| Choreo["<b>Choreography-based SAGA</b><br/>• Services emit and react to events via Kafka/RabbitMQ<br/>• Requires Transactional Outbox to prevent dual-writes<br/>• High decoupling, but complex debugging"]
 ```
 
 ### A. Choreography with the Transactional Outbox Pattern (Kafka)

@@ -423,7 +423,7 @@ $$\text{RCU (Eventually Consistent)} = \frac{\text{Reads/sec}}{2} \times \left\l
 
 ```mermaid
 flowchart LR
-    App[Application] -->|DAX Client SDK| DAX[DAX Cluster (In-Memory)]
+    App["Application"] -->|DAX Client SDK| DAX["DAX Cluster (In-Memory)"]
     DAX -->|Cache Hit (Microseconds)| App
     DAX -->|Cache Miss / Write-Through| DDB[(DynamoDB Storage)]
 ```
@@ -468,7 +468,7 @@ classDiagram
         +SK : String
         +Data Attributes...
     }
-    note for SingleTable "Row 1: PK=USER#101 | SK=METADATA | Name='Evan'<br/>Row 2: PK=USER#101 | SK=ORDER#901 | Total=$50<br/>Row 3: PK=USER#101 | SK=ORDER#902 | Total=$120"
+    note for SingleTable "Row 1: PK=USER#101 | SK=METADATA | Name='Evan'<br/>Row 2: PK=USER#101 | SK=ORDER#901 | Total=\$50<br/>Row 3: PK=USER#101 | SK=ORDER#902 | Total=\$120"
 ```
 
 ### Why it exists:
