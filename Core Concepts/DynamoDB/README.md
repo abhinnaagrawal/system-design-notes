@@ -503,7 +503,7 @@ flowchart TD
         W9 --> PartC[Partition C: 1,000 WCU]
     end
 
-    classDef hot fill:#ffcccc,stroke:#ff0000,stroke-width:3px;
+    classDef hot stroke:#ff0000,stroke-width:3px;
 ```
 
 ### Solutions for Hot Partitions

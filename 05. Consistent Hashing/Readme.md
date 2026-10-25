@@ -25,7 +25,40 @@ Consistent Hashing is the architectural backbone of modern distributed storage, 
 
 ---
 
-## 2. The Rehashing Disaster: Why Modulo Hashing Collapses Production
+## 2. The 5-Pillar Staff Assessment Rubric for Consistent Hashing
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Modulo Hashing vs Consistent Hash Ring (Ketama) vs Google Maglev O(1).     │
+│                         │ • Jump Consistent Hash for fixed storage vs Cyclical Ring for dynamic tiers. │
+│                         │ • Evaluates trade-offs between virtual node count and memory lookup bounds.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • In-Memory Binary Search ceiling lookup ($O(\log M)$ on Red-Black Tree).    │
+│    Proficiency          │ • Virtual node load variance math ($\sigma \propto \frac{1}{\sqrt{V}}$).     │
+│                         │ • Rack-aware physical node traversal for replica sets (skipping co-located). │
+│                         │ • Zero-downtime data migration streaming during node ring joins.             │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Mathematical proof of key redistribution: only $K/N$ keys remapped vs 100%.│
+│    Analytical Thinking  │ • Balances heterogeneous server capacity weights ($V_i \propto \text{RAM}_i$).│
+│                         │ • Models replication across independent failure domains (availability zones).│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Gossip protocol failure detection (Phi Accrual threshold tuning).          │
+│    Mindset              │ • Minimizes network churn during split-brain temporary network partitions.   │
+│                         │ • Graceful degradation when multiple consecutive nodes on the ring fail.     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Adapts ring topology to heterogeneous hardware without cluster restart.    │
+│    Collaboration        │ • Mitigates sudden celebrity key hotspotting via local key replication.      │
+│                         │ • Explains cache miss blast radius clearly to backend and database teams.    │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. The Rehashing Disaster: Why Modulo Hashing Collapses Production
 
 In a naive distributed caching tier with $N$ servers, keys are mapped to servers using:
 $$\text{Server Index} = \text{hash}(\text{key}) \pmod N$$

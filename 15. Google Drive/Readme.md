@@ -25,7 +25,40 @@ Designing a cloud file storage and cross-device sync platform (Google Drive, Dro
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Cloud Storage & File Sync
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Block-Level Delta Sync (Rolling Checksum) vs Full-File Re-upload.          │
+│                         │ • Client-Side Conflict Branching vs Server-Side Last-Write-Wins.             │
+│                         │ • Content-Addressable Storage (CAS) with SHA-256 chunk deduplication on S3. │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Rabin Fingerprinting for variable-size chunking (fixes byte-shift issue).  │
+│    Proficiency          │ • Strong metadata consistency via Relational ACID / Spanner distributed log. │
+│                         │ • Bidirectional sync notifications via Long Polling / WebSockets.            │
+│                         │ • Client-side embedded SQLite database for local offline sync journaling.    │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into Block Server, Metadata DB, Sync Notification, Cloud Store. │
+│    Analytical Thinking  │ • Calculates 50M DAU, 10B files, and evaluates 30-40% storage savings from   │
+│                         │   global cross-user chunk deduplication; sizes metadata QPS.                 │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Presigned S3 URLs to bypass API servers and eliminate application I/O load.│
+│    Mindset              │ • Automated S3 lifecycle management for soft-deleted files and revisions.    │
+│                         │ • OS file event monitoring (Linux inotify, macOS FSEvents, Windows ReadDir). │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Resolves simultaneous offline edits across two devices via conflicted copies│
+│    Collaboration        │ • Balances aggressive delta compression CPU overhead with network speeds.    │
+│                         │ • Communicates end-to-end encryption & zero-knowledge security to enterprise.│
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **File Upload & Download:** Support large files (up to 50 GB) with automatic pause and resume.

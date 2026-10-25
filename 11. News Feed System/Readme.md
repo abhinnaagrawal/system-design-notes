@@ -26,7 +26,40 @@ Designing a News Feed (Facebook News Feed, Twitter/X Timeline, LinkedIn Feed, In
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for News Feeds
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Fanout-on-Write (Push) vs Fanout-on-Read (Pull) vs Dynamic Hybrid Fanout.  │
+│                         │ • Caches lightweight Post IDs (Redis ZSET) vs heavy denormalized Post blobs. │
+│                         │ • Evaluates trade-offs between reverse-chronological and ML ranked feeds.    │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Cursor-based pagination using composite Base64 (timestamp + post_id).      │
+│    Proficiency          │ • Memory-capped Redis Sorted Sets via atomic `ZREMRANGEBYRANK` (top 800).    │
+│                         │ • Celebrity post isolation: completely bypasses fanout-on-write; merged on read│
+│                         │ • Handles unfollows, post deletions, and blocks via asynchronous feed purging.│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into Feed Publishing, Fanout Workers, Timeline Cache, Delivery. │
+│    Analytical Thinking  │ • Calculates fanout write amplification: 700 posts/sec * 200 followers =     │
+│                         │   140k writes/sec (peak 420k); sizes Redis cluster memory (7.68 TB RAM).     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Protects Redis from OOM crashes using strict ZSET length caps & LRU policies│
+│    Mindset              │ • Circuit breaker on ML ranker: automatically falls back to chronological.   │
+│                         │ • Lazy cache warming: only warms feeds for users active in the last 7 days.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Shields the system from viral supernodes (100M+ followers) without lag.    │
+│    Collaboration        │ • Balances instant post delivery freshness with backend infrastructure cost. │
+│                         │ • Explains ranking fairness, algorithmic transparency, and pagination SLOs.  │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Feed Publishing:** A user can publish posts (text, images, video links).
@@ -247,6 +280,13 @@ CREATE TABLE newsfeed.follows (
     PRIMARY KEY (follower_id, followee_id)
 );
 ```
+
+> [!NOTE]
+> **Why Two Post Tables (`posts` vs. `posts_by_id`)? (Query-Driven Modeling in NoSQL)**
+> In distributed databases like Cassandra/ScyllaDB, queries **must** include the partition key to avoid cluster-wide scatter-gather scans. Because relational joins don't exist, we denormalize into two tables based on query patterns:
+> 1. **`posts` (`PK: author_id, SK: post_id DESC`):** Optimized for **User Profile Timelines** (`WHERE author_id = ? LIMIT 20`). All posts for an author live on one physical node and are pre-sorted on disk, executing in a single sequential disk seek ($<2\text{ ms}$).
+> 2. **`posts_by_id` (`PK: post_id`):** Optimized for **Feed Hydration** (`WHERE post_id IN (...)`). When the feed service retrieves a list of post IDs from Redis, it looks up their contents in $O(1)$ single-node seeks without knowing the authors.
+> * **Why not a Secondary Index (`CREATE INDEX`)?** Cassandra secondary indexes are local to each node. Querying by `post_id` on the `posts` table would force a query to **every node in the cluster**, destroying P99 latency. Dual-writing both tables via Cassandra Logged Batches trades cheap disk space for predictable sub-millisecond reads.
 
 #### Redis Data Structures
 1. **User News Feed Timeline:**

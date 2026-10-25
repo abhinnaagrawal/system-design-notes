@@ -1,46 +1,87 @@
 
-# [System Design Interview - An Insider's Guide (Vol 1 and 2)](https://bytebytego.com/courses/system-design-interview)
-These notes are based on the System Design Interview books - [Vol 1 and Vol 2 2nd Ed](https://www.goodreads.com/book/show/54109255-system-design-interview-an-insider-s-guide) 
+# System Design Masterclass: Staff & Principal Engineer Edition (L6+)
 
-Check the notes here: https://pagefy.io/system-design/system-design-interview-by-alex-xu
+These comprehensive system design study notes are synthesized from **Alex Xu's System Design Interview (Volumes 1 & 2)**, **Donne Martin's `system-design-primer`** (cloned locally in parallel), **System Design Fight Club (SDFC)**, and real-world high-throughput production architectures at Google, Meta, Amazon, and Stripe.
 
-**Note:** These notes are a work in progress. 
+Every chapter has been audited, upgraded, and enriched with:
+1. **Executive Framing (Senior L5 vs. Staff L6+):** What separates an average candidate from a top-of-band Staff engineer.
+2. **5-Pillar Staff System Design Assessment Rubric:** Concrete behavioral evidence across Decision Making, Technical Proficiency, Problem Solving, Operational Mindset, and Adaptability.
+3. **Hardware & Physics-Grounded Napkin Math:** Real numbers (L1 cache vs. RAM vs. NVMe vs. WAN, zero-copy `sendfile(2)`, page cache vs. JVM heap, packet serialization).
+4. **Staff Curveball Playbooks:** Countermeasures for production incidents, partition splits, celebrity hotspots, and thundering herds.
 
+---
 
- * [Chapter 1 - Scale From Zero To Millions Of Users](./01.%20Scaling/)
- * [Chapter 2 - Back-of-the-envelope Estimation](./02.%20Back%20Of%20the%20Envelope%20Estimation/)
- * [Chapter 3 - A Framework For System Design Interviews](./03.%20System%20Design%20Framework/)
- * [Chapter 4 - Design A Rate Limiter](./04.%20Rate%20Limiter//)
- * [Chapter 5 - Design Consistent Hashing](./05.%20Consistent%20Hashing/)
- * [Chapter 6 - Design A Key-Value Store](./06.%20Key-Value%20Store/)
- * [Chapter 7 - Design A Unique ID Generator In Distributed Systems](./07.%20Unique-Id%20Generator/)
- * [Chapter 8 - Design A URL Shortener](./08.%20URL%20Shortener/)
- * [Chapter 9 - Design A Web Crawler](./09.%20Web%20Crawler/)
- * [Chapter 10 - Design A Notification System](./10.%20Notification%20System/)
- * [Chapter 11 - Design A News Feed System](./11.%20News%20Feed%20System/)
- * [Chapter 12 - Design A Chat System](./12.%20Chat%20System/)
- * [Chapter 13 - Design A Search Autocomplete System](./13.%20Search%20Autocomplete/)
- * [Chapter 14 - Design YouTube](./14.%20Youtube/)
- * [Chapter 15 - Design Google Drive](./15.%20Google%20Drive/)
- * [Chapter 16 - Proximity Service](./16.%20Proximity%20Service/)
- * [Chapter 17 - Nearby Friends](./17.%20Nearby%20Friends/)
- * [Chapter 18 - Design Google Maps](./18.%20Google%20Maps/)
- * [Chapter 19 - Distributed Message Queue](./19.%20Distributed%20Message%20Queue/)
- * [Chapter 20 - Metrics Monitoring and Alerting System](./20.%20Metrics%20Monitoring%20and%20Alerting%20System/)
- * [Chapter 21 - Ad Click Event Aggregation](./21.%20Ad%20Click%20Event%20Aggregation/)
- * [Chapter 22 - Hotel Reservation System](./22.%20Hotel%20Reservation%20System/)
- * [Chapter 23 - Distributed Email Service](./23.%20Distributed%20Email%20Service/)
- * [Chapter 24 - S3-like Object Storage](./24.%20S3-like%20Object%20Storage/)
- * [Chapter 25 - Real-time Gaming Leaderboard](./25.%20Real-time%20Gaming%20Leaderboard/)
- * [Chapter 26 - Payment System](./26.%20Payment%20System/)
- * [Chapter 27 - Digital Wallet](./27.%20%20Digital%20Wallet/)
- * [Chapter 28 - Stock Exchange](./28.%20Stock%20Exchange/)
- * [Chapter 29 - Design a Tagging Service](./29.%20Tagging%20Service/)
- * [Chapter 30 - Distributed Rate Limiter (5+ Approaches)](./30.%20Distributed%20Rate%20Limiter/)
- * [Chapter 31 - Distributed Job Scheduler (6+ Approaches)](./31.%20Distributed%20Job%20Scheduler/)
+## 🎯 The 5-Pillar Staff Assessment Rubric
+
+During Staff/Principal level evaluations, interviewers look for specific behaviors across five core pillars:
+
+| Pillar | Core Behavioral Expectation & Evidence |
+| :--- | :--- |
+| **1. Decision Making** | • **Clarifies before committing:** Probes functional bounds, SLAs, and data retention before drawing boxes.<br>• **Compares 2–3 credible alternatives:** Never pitches a single "silver bullet"; weighs trade-offs explicitly.<br>• **Names accepted architectural taxes:** Clearly states what is sacrificed (e.g., eventual consistency, memory overhead, write latency).<br>• **Revisits choices:** Dynamically adapts topology as scale or constraints shift. |
+| **2. Technical Proficiency** | • **Grounded in hardware physics:** Connects choices to OS page cache, B-tree splits, LSM compaction, network NIC limits, and CPU cache lines.<br>• **Precise data access patterns:** Avoids slogans ("use NoSQL for scale"); links relational vs. wide-column vs. LSM to query predicates.<br>• **Explains underlying mechanisms:** Explains Raft terms, RocksDB SSTable level compaction, Bloom filter bit math, and TCP window scaling when probed. |
+| **3. Problem Solving & Analytical Thinking** | • **Decomposes complexity:** Breaks monolithic architectures into isolated, decoupled failure domains.<br>• **Napkin estimation with explicit units:** Derives storage, bandwidth, and CPU slot counts cleanly (e.g., $100\text{k req/s} \times 1\text{KB} = 100\text{MB/s} \approx 800\text{Mbps}$).<br>• **Connects the whole stack:** Unifies client protocols, ingress gateways, worker tiers, caches, and storage engines. |
+| **4. Operational Mindset** | • **Proactive production realism:** Independently addresses circuit breakers, dead letter queues (DLQs), fencing tokens, idempotency keys, and graceful drains.<br>• **Zero-downtime operations:** Plans online database migrations, shadow testing modes, tombstone compaction, and backpressure.<br>• **Observability:** Identifies critical golden signals (P99 latency, queue consumer lag, error budgets, and alert storm suppression). |
+| **5. Adaptability & Collaboration** | • **Constructive curveball response:** Absorbs unexpected constraints (e.g., "traffic doubles", "fiber cut between regions") without panicking or restarting from scratch.<br>• **Executive communication:** Explains trade-offs clearly, drives technical alignment, and balances immediate MVP scope with multi-year extensibility. |
+
+---
+
+## 📚 Chapters Index
+
+### Foundation & Scale Journey
+* [Chapter 01 - Scale From Zero To Millions Of Users (Donne Martin + Alex Xu Scaling Journey)](./01.%20Scaling/)
+* [Chapter 02 - Back-of-the-Envelope Estimation (Jeff Dean Latency Numbers & Napkin Math)](./02.%20Back%20Of%20the%20Envelope%20Estimation/)
+* [Chapter 03 - A Framework For System Design Interviews (45-Minute Staff Playbook & Rubric)](./03.%20System%20Design%20Framework/)
+
+### Distributed Infrastructure & Core Services
+* [Chapter 04 - Design A Rate Limiter (Token Leasing, Atomic Lua, Fail-Open/Closed)](./04.%20Rate%20Limiter/)
+* [Chapter 05 - Design Consistent Hashing (Ketama, Maglev O(1), Virtual Node Math)](./05.%20Consistent%20Hashing/)
+* [Chapter 06 - Design A Key-Value Store (LSM-Trees, Quorums, Merkle Trees, Compaction)](./06.%20Key-Value%20Store/)
+* [Chapter 07 - Design A Unique ID Generator (UUIDv7, Snowflake, Clock Drift Defenses)](./07.%20Unique-Id%20Generator/)
+* [Chapter 08 - Design A URL Shortener (Base62, Feistel Ciphers, Decoupled Analytics)](./08.%20URL%20Shortener/)
+* [Chapter 09 - Design A Web Crawler (Mercator Queues, Bloom Filters, SimHash)](./09.%20Web%20Crawler/)
+* [Chapter 10 - Design A Notification System (Queue Isolation, APNs HTTP/2, Dead Letter Queues)](./10.%20Notification%20System/)
+
+### Real-Time & Consumer Scale Applications
+* [Chapter 11 - Design A News Feed System (Hybrid Fanout, Celebrity Bypass, Memory ZSETs)](./11.%20News%20Feed%20System/)
+* [Chapter 12 - Design A Chat System (WebSocket Fleets, Heartbeat Leases, E2EE Double Ratchet)](./12.%20Chat%20System/)
+* [Chapter 13 - Design A Search Autocomplete System (In-Memory Trie, Double Buffering Pointer Swap)](./13.%20Search%20Autocomplete/)
+* [Chapter 14 - Design YouTube (TUS Resumable Uploads, GOP DAG Transcoding, CDN Peering)](./14.%20Youtube/)
+* [Chapter 15 - Design Google Drive (Rabin Fingerprint Chunking, Content-Addressable Storage)](./15.%20Google%20Drive/)
+
+### Geospatial & Location Services
+* [Chapter 16 - Proximity Service (S2 Hilbert Curves, Geohash Bounding, Spatial Cache)](./16.%20Proximity%20Service/)
+* [Chapter 17 - Nearby Friends (Uber H3 Pub/Sub Channels, Adaptive Battery Throttling)](./17.%20Nearby%20Friends/)
+* [Chapter 18 - Design Google Maps (Contraction Hierarchies, Vector Tiles, HMM Map Matching)](./18.%20Google%20Maps/)
+
+### Streaming, Analytics & High-Throughput Engines
+* [Chapter 19 - Distributed Message Queue (Zero-Copy sendfile(2), OS Page Cache, KRaft, ISR)](./19.%20Distributed%20Message%20Queue/)
+* [Chapter 20 - Metrics Monitoring & Alerting (Gorilla TSDB Delta-of-Deltas, Push/Pull Scraping)](./20.%20Metrics%20Monitoring%20and%20Alerting%20System/)
+* [Chapter 21 - Ad Click Event Aggregation (Kappa Flink, Watermarks, ClickHouse OLAP)](./21.%20Ad%20Click%20Event%20Aggregation/)
+* [Chapter 22 - Hotel Reservation System (Room Inventory, Optimistic Locking, 10-Min Hold, Saga)](./22.%20Hotel%20Reservation%20System/)
+* [Chapter 23 - Distributed Email Service (Cassandra Wide-Column, CAS Attachments, SPF/DKIM)](./23.%20Distributed%20Email%20Service/)
+* [Chapter 24 - S3-like Object Storage (Haystack/Bitcask Append Files, Reed-Solomon Erasure Coding)](./24.%20S3-like%20Object%20Storage/)
+* [Chapter 25 - Real-time Gaming Leaderboard (Skip List ZRANK, Range Sharding, Fenwick Trees)](./25.%20Real-time%20Gaming%20Leaderboard/)
+
+### Mission-Critical Financial & Exchange Systems
+* [Chapter 26 - Payment System (Double-Entry Ledger, Multi-Tier Idempotency, 3-Way Reconciliation)](./26.%20Payment%20System/)
+* [Chapter 27 - Digital Wallet (1M+ TPS Multi-Raft State Machines, In-Memory WAL, TC/C Sagas)](./27.%20%20Digital%20Wallet/)
+* [Chapter 28 - Stock Exchange (LMAX Disruptor, Ring Buffers, Deterministic Sequencer, UDP Replay)](./28.%20Stock%20Exchange/)
+
+### Advanced Enterprise & Atlassian Architectures
+* [Chapter 29 - Design a Tagging Service (Roaring Bitmaps, GIN Indexes, Zero-Lock Tag Merges)](./29.%20Tagging%20Service/)
+* [Chapter 30 - Distributed Rate Limiter: 5+ Approaches (Sliding Window Counter, CRDTs, Token Leasing)](./30.%20Distributed%20Rate%20Limiter/)
+* [Chapter 31 - Distributed Job Scheduler: 6+ Approaches (Hierarchical Timing Wheels, Fencing Tokens, DLQ)](./31.%20Distributed%20Job%20Scheduler/)
 
 ## Study Guides
  * [Core Building Blocks & Technologies](./Building_Blocks.md)
+ * [**System Design Patterns Playbooks (HelloInterview Framework)**](./Patterns/)
+   * [Pattern 01: Real-Time Updates (SSE vs WebSockets, 2-Hop Architecture, Pub/Sub Fanout)](./Patterns/01-Real-Time-Updates.md)
+   * [Pattern 02: Dealing with Contention (Atomic Writes, OCC, Pessimistic Locking, Fencing Tokens)](./Patterns/02-Dealing-with-Contention.md)
+   * [Pattern 03: Multi-Step Processes (Sagas, Temporal Durable Execution, Idempotency, Outbox)](./Patterns/03-Multi-Step-Processes.md)
+   * [Pattern 04: Scaling Reads (Covering Indexes, Replicas, Session Pinning, SingleFlight, Invalidation)](./Patterns/04-Scaling-Reads.md)
+   * [Pattern 05: Scaling Writes (LSM-Trees, Write Buffering, Micro-Batching, Key Salting, Sharding)](./Patterns/05-Scaling-Writes.md)
+   * [Pattern 06: Handling Large Blobs (Direct Presigned URLs, Multipart Parallel Uploads, CDN)](./Patterns/06-Handling-Large-Blobs.md)
+   * [Pattern 07: Managing Long-Running Tasks (Async 202, Queue & Worker Pools, Visibility Timeouts, DLQ)](./Patterns/07-Managing-Long-Running-Tasks.md)
  * [**Architectural Layer Selection Playbooks (Interview Decision Guides)**](./Layer-Playbooks/)
    * [Layer 01: Storage & Database Selection (SQL vs NoSQL, PG vs MySQL, Distributed SQL, Cassandra)](./Layer-Playbooks/01-Storage-and-Databases.md)
    * [Layer 02: Caching & In-Memory (Redis/Valkey vs Memcached, Multi-Tier, Stampede/Avalanche)](./Layer-Playbooks/02-Caching-and-In-Memory.md)
@@ -51,6 +92,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
    * [Layer 07: Compute & Orchestration (Flink vs Spark Streaming, Temporal vs Airflow)](./Layer-Playbooks/07-Compute-and-Async-Execution.md)
    * [Layer 08: Multi-Tenant Architecture (Silo vs Pool vs Bridge, DB-per-tenant, Postgres RLS, Fair Queues)](./Layer-Playbooks/08-Multi-Tenant-Architecture.md)
    * [Layer 09: Security, AuthN & AuthZ (OAuth2/PKCE, OIDC, Asymmetric JWKS, Zanzibar ReBAC, Envelope Encryption)](./Layer-Playbooks/09-Security-AuthN-and-AuthZ.md)
+   * [Layer 10: Observability, Telemetry & SRE Reliability (OpenTelemetry, SLI/SLO/SLA, Error Budgets, Jaeger Tracing)](./Layer-Playbooks/10-Observability-Telemetry-and-Reliability.md)
 
 ## Core Concepts
  * [WebSockets Crash Course](./Core%20Concepts/WebSockets/)
@@ -75,6 +117,7 @@ Check the notes here: https://pagefy.io/system-design/system-design-interview-by
  * [CockroachDB & Distributed SQL Architecture](./Core%20Concepts/CockroachDB/)
  * [Redis Internals & Architecture](./Core%20Concepts/Redis/)
  * [Distributed Transactions (2PC vs. SAGA Pattern)](./Core%20Concepts/Distributed%20Transactions/)
+ * [Timing Mechanisms in Distributed Systems (Physical Clocks, Logical Clocks, Vector Clocks, HLC & TrueTime)](./Core%20Concepts/Timing%20Mechanisms%20in%20Distributed%20Systems/)
  * [Vector Databases & ANN Search (HNSW, IVF, pgvector, Pinecone)](./Core%20Concepts/Vector%20Databases/)
  * [Apache Spark Internals (Catalyst, AQE, Tungsten, Shuffle, Native Engines, Version Optimization Map)](./Core%20Concepts/Spark%20Internals/)
 

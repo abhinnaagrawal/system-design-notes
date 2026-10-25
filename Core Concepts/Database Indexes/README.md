@@ -45,16 +45,16 @@ Choosing the correct partition key is crucial to avoid the Scatter-Gather proble
 
 ```mermaid
 flowchart TD
-    subgraph Hash Partitioning (Inefficient for Range)
-        Q1[Query: Get all posts for User A] --> N1[Node 1]
-        Q1 --> N2[Node 2]
-        Q1 --> N3[Node 3]
-        note1(Requires querying every node and merging results)
+    subgraph HashPart ["Hash Partitioning (Inefficient for Range)"]
+        Q1["Query: Get all posts for User A"] --> N1["Node 1"]
+        Q1 --> N2["Node 2"]
+        Q1 --> N3["Node 3"]
+        note1["Requires querying every node and merging results"]
     end
     
-    subgraph Range Partitioning (Efficient for Range)
-        Q2[Query: Get all posts for User A] --> N4[Node 1]
-        note2(All posts for User A live on a single node)
+    subgraph RangePart ["Range Partitioning (Efficient for Range)"]
+        Q2["Query: Get all posts for User A"] --> N4["Node 1"]
+        note2["All posts for User A live on a single node"]
     end
 ```
 

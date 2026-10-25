@@ -1,464 +1,378 @@
-# Chapter 22: Hotel Reservation System
+# Chapter 22: Design a Hotel Reservation & Flash Booking System (Marriott / Airbnb / Booking.com)
 
-## Introduction
-In this chapter, we're designing a **hotel reservation system**, similar to Marriott International.
-
-Applicable to other types of systems as well - Airbnb, flight reservation, movie ticket booking.
-
----
-
-## Step 1: Understand the Problem and Establish Design Scope
-Before diving into designing the system, we should ask the interviewer questions to clarify the scope:
- - C: What is the scale of the system?
- - I: We're building a website for a hotel chain \w 5000 hotels and 1mil rooms
- - C: Do customers pay when they make a reservation or when they arrive at the hotel?
- - I: They pay in full when making reservations.
- - C: Do customers book hotel rooms through the website only? Do we have to support other reservation options such as phone calls?
- - I: They make bookings through the website or app only.
- - C: Can customers cancel reservations?
- - I: Yes
- - C: Other things to consider?
- - I: Yes, we allow overbooking by 10%. Hotel will sell more rooms than there actually are. Hotels do this in anticipation that clients will cancel bookings.
- - C: Since not much time, we'll focus on - show hotel-related page, hotel-room details page, reserve a room, admin panel, support overbooking.
- - I: Sounds good.
- - I: One more thing - hotel prices change all the time. Assume a hotel room's price changes every day.
- - C: OK.
-
-### **Non-functional requirements**
- - Support high concurrency - there might be a lot of customers trying to book the same hotel during peak season.
- - Moderate latency - it's ideal to have low latency when a user makes a reservation, but it's acceptable if the system takes a few seconds to process it.
-
-### **Back-of-the-envelope estimation**
- - 5000 hotels and 1mil rooms in total
- - Assume 70% of rooms are occupied and average stay duration is 3 days
- - Estimated daily reservations - 1mil * 0.7 / 3 = ~240k reservations per day
- - Reservations per second - 240k / 10^5 seconds in a day = ~3. Average reservation TPS is low.
-
-Let's estimate the QPS. If we assume that there are three steps to reach the reservation page and there is a 10% conversion rate per page,
-we can estimate that if there are 3 reservations, then there must be 30 views of reservation page and 300 views of hotel room detail page.
-
-<div style="margin-left:3rem">
-    <img src="./images/qps-estimation.png" alt="qps-estimation" width="500" />
-</div>
+**Sources & Foundational References:**
+- [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
+- [Designing Data-Intensive Applications (Martin Kleppmann)](https://dataintensive.net/)
+- [Airbnb Engineering: Unbundling the Hotel Reservation Architecture](https://medium.com/airbnb-engineering)
+- [Uber Engineering: Designing Systems for Real-Time Concurrency and Resource Contention](https://www.uber.com/blog/)
 
 ---
 
-## Step 2: Propose High-Level Design and Get Buy-In
-We'll explore - API Design, Data model, high-level design.
+## 1. Executive Interview Framing & Staff-Level Bar
 
-### **API Design**
-This API Design focuses on the core endpoints (using RESTful practices), we'll need in order to support a hotel reservation system.
-
-A fully-fledged system would require a more extensive API with support for searching for rooms based on lots of criteria, but we won't be focusing on that in this section.
-Reason is that they aren't technically challenging, so they're out of scope.
-
-**Hotel-related API**
- - `GET /v1/hotels/{id}` - get detailed info about a hotel
- - `POST /v1/hotels` - add a new hotel. Only available to ops
- - `PUT /v1/hotels/{id}` - update hotel info. Only available to ops
- - `DELETE /v1/hotels/{id}` - delete a hotel. API is only available to ops
-
-**Room-related API**
- - `GET /v1/hotels/{id}/rooms/{id}` - get detailed information about a room
- - `POST /v1/hotels/{id}/rooms` - Add a room. Only available to ops
- - `PUT /v1/hotels/{id}/rooms/{id}` - Update room info. Only available to ops
- - `DELETE /v1/hotels/{id}/rooms/{id}` - Delete a room. Only available to ops
-
-**Reservation-related API**
- - `GET /v1/reservations` - get reservation history of current user
- - `GET /v1/reservations/{id}` - get detailed info about a reservation
- - `POST /v1/reservations` - make a new reservation
- - `DELETE /v1/reservations/{id}` - cancel a reservation
-
-Here's an example request to make a reservation:
+Designing a hotel reservation or ticketing system (Marriott, Airbnb, Ticketmaster) is the quintessential test of **high-concurrency resource locking, transactional isolation, inventory time-slot modeling, and distributed consistency**. While junior and mid-level candidates jump straight to `SELECT ... FOR UPDATE` or optimistic version columns, **Staff and Principal Engineers (L6+, P60) are evaluated on their ability to solve high-contention flash booking hotspots, manage temporary cart hold TTLs (e.g., 10-minute checkout leases), design distributed Sagas with compensating actions, and enforce overbooking risk boundaries**:
 
 ```
-{
-  "startDate":"2021-04-28",
-  "endDate":"2021-04-30",
-  "hotelID":"245",
-  "roomID":"U12354673389",
-  "reservationID":"13422445"
-}
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 THE INTERVIEW SPECTRUM                                 │
+├────────────────────────────────────────┬───────────────────────────────────────────────┤
+│ L5 / Senior Engineer                   │ L6+ / Staff & Principal Engineer              │
+├────────────────────────────────────────┼───────────────────────────────────────────────┤
+│ • Basic `rooms` table with boolean flag│ • Date-range segmented inventory table        │
+│   `is_reserved` (fails date range math)│   (`room_type_inventory` with daily rows)    │
+│ • Naive pessimistic locking (`FOR UPDATE`) • Dynamic Concurrency Strategy based on      │
+│   (Causes DB thread exhaustion & deadlocks) contention: Optimistic locking for normal; │
+│ • "Just use Redis for cart holds"      │   Redis Lua atomic pre-allocation for flash   │
+│   (Ignores cache-DB reconciliation)    │ • Fencing Token & Lease TTLs for holds        │
+│ • Ignores 10-minute hold expiration    │ • Redis Key-Expiration / Delay Queue for      │
+│   and abandoned checkout cleanup       │   automatic inventory release                 │
+│ • Uncontrolled overbooking             │ • Overbooking risk modeling (Poisson/Gaussian │
+│                                        │   cancellation buffer caps e.g. 110%)         │
+│ • Distributed 2PC across microservices │ • Orchestrated Saga with state machine &      │
+│                                        │   idempotent compensating rollbacks           │
+└────────────────────────────────────────┴───────────────────────────────────────────────┘
 ```
-
-Note that the `reservationID` is an idempotency key to avoid double booking. Details explained in [concurrency section](#concurrency-issues)
-
-### **Data model**
-Before we choose what database to use, let's consider our access patterns.
-
-We need to support the following queries:
- - View detailed info about a hotel
- - Find available types of rooms given a date range
- - Record a reservation
- - Look up a reservation or past history of reservations
-
-From our estimations, we know the scale of the system is not large, but we need to prepare for traffic surges.
-
-Given this knowledge, we'll choose a relational database because:
- - Relational DBs work well with read-heavy and less write-heavy systems.
- - NoSQL databases are normally optimized for writes, but we know we won't have many as only a fraction of users who visit the site make a reservation.
- - Relational DBs provide ACID guarantees. These are important for such a system as without them, we won't be able to prevent problems such as negative balance, double charge, etc.
- - Relational DBs can easily model the data as the structure is very clear.
-
-Here is our schema design:
-
-<div style="margin-left:3rem">
-    <img src="./images/schema-design.png" alt="schema-design" width="500" />
-</div>
-
-Most fields are self-explanatory. Only field worth mentioning is the `status` field which represents the state machine of a given room:
-
-<div style="margin-left:3rem">
-    <img src="./images/status-state-machine.png" alt="status-state-machine" width="500" />
-</div>
-
-This data model works well for a system like Airbnb, but not for hotels where users don't reserve a particular room but a room type.
-They reserve a type of room and a room number is chosen at the point of reservation.
-
-This shortcoming will be addressed in the [Improved Data Model](#improved-data-model) section.
-
-### **High-level Design**
-We've chosen a microservice architecture for this design. It has gained great popularity in recent years:
-
-<div style="margin-left:3rem">
-    <img src="./images/high-level-design.png" alt="high-level-design" width="500" />
-</div>
-
- - **Users**: book a hotel room on their phone or computer
- - **Admin**: perform administrative functions such as refunding/cancelling a payment, etc
- - **CDN**: caches static resources such as JS bundles, images, videos, etc
- - **Public API Gateway**: fully-managed service which supports rate limiting, authentication, etc.
- - **Internal APIs**: only visible to authorized personnel. Usually protected by a VPN.
- - **Hotel service**: provides detailed information about hotels and rooms. Hotel and room data is static, so it can be cached aggressively.
- - **Rate service**: provides room rates for different future dates. An interesting note about this domain is that prices depend on how full a hotel is at a given day.
- - **Reservation service**: receives reservation requests and reserves hotel rooms. Also tracks room inventory as reservations are made/cancelled.
- - **Payment service**: processes payments and updates reservation statuses on success.
- - **Hotel management service**: available to authorized personnel only. Allows certain administrative functions for managing and viewing reservations, hotels, etc.
-
-Inter-service communication can be facilitated via a RPC framework, such as gRPC.
 
 ---
 
-## Step 3: Design Deep Dive
-Let's dive deeper into:
- - Improved data model
- - Concurrency issues
- - Scalability
- - Resolving data inconsistency in microservices
-
-### **Improved data model**
-As mentioned in a previous section, we need to amend our API and schema to enable reserving a type of room vs. a particular one.
-
-For the reservation API, we no longer reserve a `roomID`, but we reserve a `roomTypeID`:
+## 2. The 5-Pillar Staff Assessment Rubric for Reservations
 
 ```
-POST /v1/reservations
-{
-  "startDate":"2021-04-28",
-  "endDate":"2021-04-30",
-  "hotelID":"245",
-  "roomTypeID":"12354673389",
-  "roomCount":"3",
-  "reservationID":"13422445"
-}
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Replaces Room-Centric model with Room-Type-Centric model (hotels sell room │
+│                         │   types, not specific physical room numbers, until physical check-in).       │
+│                         │ • Evaluates Pessimistic vs Optimistic vs Redis In-Memory Pre-Allocation;      │
+│                         │   selects hybrid approach based on contention thresholds.                    │
+│                         │ • Chooses Orchestrated Saga over 2PC for cross-service checkout consistency. │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Formulates date-range overlap SQL checks without row locking deadlocks.    │
+│    Proficiency          │ • Dissects database isolation levels (`READ COMMITTED` vs `REPEATABLE READ`  │
+│                         │   vs `SERIALIZABLE`) and phantom read phenomena.                             │
+│                         │ • Implements Redis atomic Lua scripts for flash inventory deduction.         │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes architecture into Search/Discovery, Inventory Engine, & Checkout│
+│    Analytical Thinking  │ • Calculates inventory storage growth ($5,000\text{ hotels} \times 20\text{  │
+│                         │   types} \times 730\text{ days} = 73\text{M rows}$) and flash booking QPS.  │
+│                         │ • Sizes Redis memory and evaluates network I/O limits under peak surges.     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Enforces automated cart expiration using Redis Keyspace events / Kafka DLQ.│
+│    Mindset              │ • Monitors inventory drift using nightly reconciliation batch jobs.          │
+│                         │ • Implements idempotency keys on reservation checkout API.                   │
+│                         │ • Shards database cleanly by `hotel_id` to eliminate cross-shard joins.      │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Mitigates flash surges (World Cup / Taylor Swift concert hotel rush).      │
+│    Collaboration        │ • Balances business overbooking profit against walk-in relocation penalties. │
+│                         │ • Handles payment gateway drops during inventory hold release gracefully.    │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Here's the updated schema:
+---
 
-<div style="margin-left:3rem">
-    <img src="./images/updated-schema.png" alt="updated-schema" width="500" />
-</div>
+## 3. Requirements & System Scope
 
- - **room**: contains information about a room
- - **room_type_rate**: contains information about prices for a given room type
- - **reservation**: records guest reservation data
- - **room_type_inventory**: stores inventory data about hotel rooms. 
+### Functional Requirements
+1. **Hotel & Room Discovery:** Browse hotel details, room amenities, and view dynamic pricing across date ranges.
+2. **Room Type Availability Search:** Check room availability for a specified date range (`startDate` to `endDate`) and guest count.
+3. **Room Reservation & Temporary Hold:** Temporarily hold a room for **10 minutes** while the user completes payment; release back to inventory if unpaid upon expiration.
+4. **Payment & Booking Confirmation:** Process payment, finalize reservation, and generate a confirmed booking receipt.
+5. **Overbooking Management:** Support configurable overbooking (e.g., allow up to 110% bookings) to offset historical cancellation rates.
+6. **Cancellation & Refunds:** Support self-service cancellations and automatic inventory restock.
 
-Let's take a look at the `room_type_inventory` columns as that table is more interesting:
- - **hotel_id**: id of hotel
- - **room_type_id**: id of a room type
- - **date**: a single date
- - **total_inventory**: total number of rooms minus those that are temporarily taken off the inventory.
- - **total_reserved**: total number of rooms booked for given (hotel_id, room_type_id, date)
+### Non-Functional Requirements & Performance SLOs
+* **Zero Double-Bookings:** Strict consistency for room allocation. Two users can never successfully confirm the same room on overlapping dates.
+* **High Availability:** 99.99% availability for browsing and discovery.
+* **Latency SLOs:**
+  - Room search query latency: $< \mathbf{150ms}$ (p99).
+  - Reservation checkout latency: $< \mathbf{1.5s}$ (bounded by external payment gateway).
+* **Scale:** Support a global chain of **5,000 hotels**, **1 Million total rooms**, and handle traffic surges during holiday campaigns and flash events.
 
-There are alternative ways to design this table, but having one room per (hotel_id, room_type_id, date) enables easy 
-reservation management and easier queries.
+---
 
-The rows in the table are pre-populated using a daily CRON job.
-
-Sample data:
-| hotel_id | room_type_id | date       | total_inventory | total_reserved |
-|----------|--------------|------------|-----------------|----------------|
-| 211      | 1001         | 2021-06-01 | 100             | 80             |
-| 211      | 1001         | 2021-06-02 | 100             | 82             |
-| 211      | 1001         | 2021-06-03 | 100             | 86             |
-| 211      | 1001         | ...        | ...             |                |
-| 211      | 1001         | 2023-05-31 | 100             | 0              |
-| 211      | 1002         | 2021-06-01 | 200             | 16             |
-| 2210     | 101          | 2021-06-01 | 30              | 23             |
-| 2210     | 101          | 2021-06-02 | 30              | 25             |
-
-Sample SQL query to check the availability of a type of room:
+## 4. Back-of-the-Envelope Capacity Estimation
 
 ```
-SELECT date, total_inventory, total_reserved
-FROM room_type_inventory
-WHERE room_type_id = ${roomTypeId} AND hotel_id = ${hotelId}
-AND date between ${startDate} and ${endDate}
+Global Scale: 5,000 Hotels, 1,000,000 Rooms
+Average Occupancy: 70%
+Average Stay Duration: 3 Days
+Lookahead Horizon: 2 Years (730 Days)
 ```
 
-How to check availability for a specified number of rooms using that data (note that we support overbooking):
+### 4.1 Reservation QPS Math
+* **Daily Reservations:**
+  $$\text{Daily Bookings} = \frac{1,000,000 \times 0.70}{3 \text{ days}} \approx \mathbf{233,333 \text{ bookings / day}}$$
+* **Average Reservation TPS:**
+  $$\text{Average TPS} = \frac{233,333}{86,400} \approx \mathbf{2.7 \text{ bookings / sec}}$$
+* **Conversion Funnel Math:**
+  - Conversion rate from Hotel Detail Page $\to$ Room Booking $\approx 10\%$.
+  - Conversion rate from Search Page $\to$ Hotel Detail Page $\approx 10\%$.
+  - Therefore, for every 1 booking, there are 10 detail views and 100 search queries.
+* **Search & View QPS:**
+  - Detail Page QPS: $2.7 \times 10 \approx \mathbf{27 \text{ QPS}}$ (Peak 5x: $\approx 135 \text{ QPS}$).
+  - Search Query QPS: $2.7 \times 100 \approx \mathbf{270 \text{ QPS}}$ (Peak 5x: $\approx 1,350 \text{ QPS}$).
+* *Staff Takeaway:* Under normal operations, database load is very modest. The core engineering challenge occurs during **regional flash sales or peak event bookings**, where a single hotel receives 5,000 concurrent booking requests in 2 seconds for only 50 available rooms!
 
+### 4.2 Inventory Storage Math (2-Year Horizon)
+* Number of Hotels: 5,000.
+* Average Room Types per Hotel: 20 (Standard, Deluxe, Suite, Executive, etc.).
+* Days in 2-year Horizon: 730 days.
+* **Total Inventory Rows:**
+  $$5,000 \text{ hotels} \times 20 \text{ room types} \times 730 \text{ days} = \mathbf{73,000,000 \text{ rows}}$$
+* At ~100 bytes per inventory row:
+  $$73\text{M} \times 100 \text{ bytes} \approx \mathbf{7.3 \text{ GB}}$$
+* *Staff Takeaway:* The entire 2-year global room inventory occupies less than **8 GB of RAM**! It can easily fit into a single PostgreSQL instance or Redis cluster with room to spare.
+
+---
+
+## 5. High-Level Architecture & End-to-End Flow
+
+```mermaid
+flowchart TD
+    Client["User Browser / Mobile App"] -->|1. Search Availability / Book| CDN["Edge CDN (Static UI & Images)"]
+    CDN --> APIGateway["Public API Gateway<br/>• TLS Termination<br/>• Rate Limiting & Auth"]
+
+    APIGateway --> HotelService["Hotel & Room Catalog Service<br/>(Cached in Redis)"]
+    APIGateway --> SearchService["Search & Pricing Engine"]
+    APIGateway --> BookingService["Booking & Reservation Service"]
+    
+    subgraph DataStorage["Data & In-Memory Tier"]
+        BookingService <--> RedisLock["Redis Cluster<br/>• 10-Min Temporary Hold Leases<br/>• Distributed Idempotency Keys"]
+        BookingService --> ReservationDB[("PostgreSQL Cluster<br/>• Sharded by hotel_id<br/>• Master + Sync Replicas")]
+    end
+
+    BookingService --> SagaOrchestrator["Saga Orchestrator (Temporal / Step Functions)"]
+    SagaOrchestrator --> PaymentService["Payment Core Service (Stripe / PSP)"]
+    SagaOrchestrator --> NotificationService["Notification Service (Email / SMS)"]
 ```
-if (total_reserved + ${numberOfRoomsToReserve}) <= 110% * total_inventory
-```
 
-Now let's do some estimation about the storage volume.
- - We have 5000 hotels.
- - Each hotel has 20 types of rooms.
- - 5000 * 20 * 2 (years) * 365 (days) = 73mil rows
+---
 
-73 million rows is not a lot of data and a single database server can handle it.
-It makes sense, however, to setup read replication (potentially across different zones) to enable high availability.
+## 6. The Core Inventory Data Model
 
-Follow-up question - if reservation data is too large for a single database, what would you do?
- - Store only current and future reservation data. Reservation history can be moved to cold storage.
- - Database sharding - we can shard our data by `hash(hotel_id) % servers_cnt` as we always select the `hotel_id` in our queries.
+### 6.1 The Room-Type-Centric Design
+A common junior mistake is designing a `rooms` table with an `is_available` boolean. This fails because:
+1. Hotels do not assign physical room numbers (e.g., Room 402) at booking time; they assign them at physical front-desk check-in.
+2. A single boolean cannot track availability across overlapping future date ranges.
 
-### **Concurrency issues**
-Another important problem to address is double booking.
-
-There are two issues to address:
- - Same user clicks on "book" twice
- - Multiple users try to book a room at the same time
-
-Here's a visualization of the first problem:
-
-<div style="margin-left:3rem">
-    <img src="./images/double-booking-single-user.png" alt="double-booking-single-user" width="500" />
-</div>
-
-There are two approaches to solving this problem:
- - Client-side handling - front-end can disable the book button once clicked. If a user disabled javascript, however, they won't see the button becoming grayed out.
- - Idemptent API - Add an idempotency key to the API, which enables a user to execute an action once, regardless of how many times the endpoint is invoked:
-
-<div style="margin-left:3rem">
-    <img src="./images/idempotency.png" alt="idempotency" width="500" />
-</div>
-
-Here's how this flow works:
- - A reservation order is generated once you're in the process of filling in your details and making a booking. The reservation order is generated using a globally unique identifier.
- - Submit reservation 1 using the `reservation_id` generated in the previous step.
- - If "complete booking" is clicked a second time, the same `reservation_id` is sent and the backend detects that this is a duplicate reservation.
- - The duplication is avoided by making the `reservation_id` column have a unique constraint, preventing multiple records with that id being stored in the DB.
-
-<div style="margin-left:3rem">
-    <img src="./images/unique-constraint-violation.png" alt="unique-constraint-violation" width="500" />
-</div>
-
-What if there are multiple users making the same reservation?
-
-<div style="margin-left:3rem">
-    <img src="./images/double-booking-multiple-users.png" alt="double-booking-multiple-users" width="500" />
-</div>
-
- - Let's assume the transaction isolation level is not serializable
- - User 1 and 2 attempt to book the same room at the same time.
- - Transaction 1 checks if there are enough rooms - there are
- - Transaction 2 check if there are enough rooms - there are
- - Transaction 2 reserves the room and updates the inventory
- - Transaction 1 also reserves the room as it still sees there are 99 `total_reserved` rooms out of 100.
- - Both transactions successfully commit the changes
-
-This problem can be solved using some form of locking mechanism:
- - Pessimistic locking
- - Optimistic locking
- - Database constraints
-
-Here's the SQL we use to reserve a room:
+**The Staff Schema:** Track inventory as daily aggregated counts per `(hotel_id, room_type_id, date)`.
 
 ```sql
-# step 1: check room inventory
-SELECT date, total_inventory, total_reserved
-FROM room_type_inventory
-WHERE room_type_id = ${roomTypeId} AND hotel_id = ${hotelId}
-AND date between ${startDate} and ${endDate}
+-- 1. Hotel & Room Type Metadata
+CREATE TABLE hotels (
+    hotel_id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    address TEXT NOT NULL,
+    timezone VARCHAR(64) NOT NULL
+);
 
-# For every entry returned from step 1
-if((total_reserved + ${numberOfRoomsToReserve}) > 110% * total_inventory) {
-  Rollback
-}
+CREATE TABLE room_types (
+    room_type_id BIGSERIAL PRIMARY KEY,
+    hotel_id BIGINT NOT NULL REFERENCES hotels(hotel_id),
+    name VARCHAR(128) NOT NULL, -- e.g. "Deluxe King Suite"
+    base_price_cents INT NOT NULL,
+    capacity INT NOT NULL
+);
 
-# step 2: reserve rooms
-UPDATE room_type_inventory
-SET total_reserved = total_reserved + ${numberOfRoomsToReserve}
-WHERE room_type_id = ${roomTypeId}
-AND date between ${startDate} and ${endDate}
+-- 2. Daily Segmented Inventory Table (Pre-populated 2 years ahead)
+CREATE TABLE room_type_inventory (
+    hotel_id BIGINT NOT NULL,
+    room_type_id BIGINT NOT NULL,
+    date DATE NOT NULL,
+    total_inventory INT NOT NULL,  -- Physical rooms owned
+    total_reserved INT NOT NULL DEFAULT 0, -- Confirmed bookings
+    total_held INT NOT NULL DEFAULT 0,     -- Temporary 10-minute cart holds
+    PRIMARY KEY (hotel_id, room_type_id, date)
+);
 
-Commit
+-- 3. Customer Reservation Record
+CREATE TABLE reservations (
+    reservation_id UUID PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    hotel_id BIGINT NOT NULL,
+    room_type_id BIGINT NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING_PAYMENT', 'CONFIRMED', 'CANCELLED', 'EXPIRED')),
+    total_amount_cents BIGINT NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
 ```
 
-#### Option 1: Pessimistic locking
-Pessimistic locking prevents simultaneous updates by putting a lock on a record while it's being updated.
+### 6.2 Availability Verification Formula with Overbooking Buffer
+Hotels deliberately overbook because a predictable percentage of guests cancel or no-show:
+$$\mathbf{\text{Available}} = (\text{Total Inventory} \times \text{Overbook Factor}) - (\text{Total Reserved} + \text{Total Held}) \ge \text{Rooms Requested}$$
 
-This can be done in MySQL by using the `SELECT... FOR UPDATE` query, which locks the rows selected by the query until the transaction is committed.
-
-<div style="margin-left:3rem">
-    <img src="./images/pessimistic-locking.png" alt="pessimistic-locking" width="500" />
-</div>
-
-Pros:
- - Prevents applications from updating data that is being changed
- - Easy to implement and avoids conflict by serializing updates. Useful when there is heavy data contention.
-
-Cons:
- - Deadlocks may occur when multiple resources are locked.
- - This approach is not scalable - if transaction is locked for too long, this has impact on all other transactions trying to access the resource.
- - The impact is severe when the query selects a lot of resources and the transaction is long-lived.
-
-The author doesn't recommend this approach due to its scalability issues.
-
-#### Option 2: Optimistic locking
-Optimistic locking allows multiple users to attempt to update a record at the same time.
-
-There are two common ways to implement it - version numbers and timestamps. Version numbers are recommended as server clocks can be inaccurate.
-
-<div style="margin-left:3rem">
-    <img src="./images/optimistic-locking.png" alt="optimistic-locking" width="500" />
-</div>
-
- - A new `version` column is added to the database table
- - Before a user modifies a database row, the version number is read
- - When the user updates the row, the version number is increased by 1 and written back to the database
- - Database validation prevents the insert if the new version number doesn't exceed the previous one
-
-Optimistic locking is usually faster than pessimistic locking as we're not locking the database. 
-Its performance tends to degrade when concurrency is high, however, as that leads to a lot of rollbacks.
-
-Pros:
- - It prevents applications from editing stale data
- - We don't need to acquire a lock in the database
- - Preferred option when data contention is low, ie rarely are there update conflicts
-
-Cons:
- - Performance is poor when data contention is high
-
-Optimistic locking is a good option for our system as reservation QPS is not extremely high.
-
-#### Option 3: Database constraints
-This approach is very similar to optimistic locking, but the guardrails are implemented using a database constraint:
-
-```
-CONSTRAINT `check_room_count` CHECK((`total_inventory - total_reserved` >= 0))
-```
-
-<div style="margin-left:3rem">
-    <img src="./images/database-constraint.png" alt="database-constraint" width="500" />
-</div>
-
-Pros:
- - Easy to implement
- - Works well when data contention is small
-
-Cons:
- - Similar to optimistic locking, performs poorly when data contention is high
- - Database constraints cannot be easily version-controlled like application code
- - Not all databases support constraints
-
-This is another good option for a hotel reservation system due to its ease of implementation.
-
-### **Scalability**
-Usually, the load of a hotel reservation system is not high. 
-
-However, the interviewer might ask you how you'd handle a situation where the system gets adopted for a larger, popular travel site such as booking.com
-In that case, QPS can be 1000 times larger.
-
-When there is such a situation, it is important to understand where our bottlenecks are. All the services are stateless, so they can be easily scaled via replication.
-
-The database, however, is stateful and it's not as obvious how it can get scaled.
-
-One way to scale it is by implementing database sharding - we can split the data across multiple databases, where each of them contain a portion of the data.
-
-We can shard based on `hotel_id` as all queries filter based on it. 
-Assuming, QPS is 30,000, after sharding the database in 16 shards, each shard handles 1875 QPS, which is within a single MySQL cluster's load capacity.
-
-<div style="margin-left:3rem">
-    <img src="./images/database-sharding.png" alt="database-sharding" width="500" />
-</div>
-
-We can also utilize caching for room inventory and reservations via Redis. We can set TTL so that old data can expire for days which are past.
-
-<div style="margin-left:3rem">
-    <img src="./images/inventory-cache.png" alt="inventory-cache" width="500" />
-</div>
-
-The way we store an inventory is based on the `hotel_id`, `room_type_id` and `date`:
-
-```
-key: hotelID_roomTypeID_{date}
-value: the number of available rooms for the given hotel ID, room type ID and date.
-```
-
-Data consistency happens async and is managed by using a CDC streaming mechanism - database changes are read and applied to a separate system.
-Debezium is a popular option for synchronizing database changes with Redis.
-
-Using such a mechanism, there is a possibility that the cache and database are inconsistent for some time.
-This is fine in our case because the database will prevent us from making an invalid reservation.
-
-This will cause some issue on the UI as a user would have to refresh the page to see that "there are no more rooms left", 
-but that is something which can happen regardless of this issue if eg a person hesitates a lot before making a reservation.
-
-Caching pros:
- - Reduced database load
- - High performance, as Redis manages data in-memory
-
-Caching cons:
- - Maintaining data consistency between cache and DB is hard. We need to consider how the inconsistency impacts user experience.
-
-### **Data consistency among services**
-A monolithic application enables us to use a shared relational database for ensuring data consistency.
-
-In our microservice design, we chose a hybrid approach where some services are separate, 
-but the reservation and inventory APIs are handled by the same servicefor the reservation and inventory APIs.
-
-This is done because we want to leverage the relational database's ACID guarantees to ensure consistency.
-
-However, the interviewer might challenge this approach as it's not a pure microservice architecture, where each service has a dedicated database:
-
-<div style="margin-left:3rem">
-    <img src="./images/microservices-vs-monolith.png" alt="microservices-vs-monolith" width="500" />
-</div>
-
-This can lead to consistency issues. In a monolithic server, we can leverage a relational DBs transaction capabilities to implement atomic operations:
-
-<div style="margin-left:3rem">
-    <img src="./images/atomicity-monolith.png" alt="atomicity-monolith" width="500" />
-</div>
-
-It's more challenging, however, to guarantee this atomicity when the operation spans across multiple services:
-
-<div style="margin-left:3rem">
-    <img src="./images/microservice-non-atomic-operation.png" alt="microservice-non-atomic-operation" width="500" />
-</div>
-
-There are some well-known techniques to handle these data inconsistencies:
- - **Two-phase commit**: a database protocol which guarantees atomic transaction commit across multiple nodes. 
-   It's not performant, though, since a single node lag leads to all nodes blocking the operation.
- - **Saga**: a sequence of local transactions, where compensating transactions are triggered if any of the steps in a workflow fail. This is an eventually consistent approach.
-
-It's worth noting that addressing data inconsistencies across microservices is a challenging problem, which raise the system complexity.
-It is good to consider whether the cost is worth it, given our more pragmatic approach of encapsulating dependent operations within the same relational database.
+For example, with 100 rooms and a 110% overbooking factor ($1.10$):
+$$\text{Max Allowed Allocations} = 100 \times 1.10 = 110$$
 
 ---
 
-## Step 4: Wrap Up
-We presented a design for a hotel reservation system.
+## 7. High-Concurrency Reservation Mechanics & Locking Strategies
 
-These are the steps we went through:
- - Gathering requirements and doing back-of-the-envelope calculations to understand the system's scale
- - We presented the API Design, Data Model and system architecture in the high-level design
- - In the deep dive, we explored alternative database schema designs as requirements changed
- - We discussed race conditions and proposed solutions - pessimistic/optimistic locking, database constraints
- - Ways to scale the system via database sharding and caching
- - Finally we addressed how to handle data consistency issues across multiple microservices
+When 1,000 users attempt to reserve the last 5 rooms for New Year's Eve, how do we guarantee zero double-bookings?
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              LOCKING STRATEGY COMPARISON                               │
+├─────────────────────┬──────────────────┬──────────────────┬────────────────────────────┤
+│ Strategy            │ Normal Load      │ Flash Surge Load │ Staff Engineering Verdict  │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 1. Pessimistic Lock │ Safe, High       │ DISASTEROUS:     │ Avoid for public APIs;     │
+│    (`FOR UPDATE`)   │ Latency          │ DB thread pool   │ holding row locks across   │
+│                     │                  │ exhaustion, dead-│ dates causes severe        │
+│                     │                  │ locks on ranges. │ throughput collapse.       │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 2. Optimistic Lock  │ Blazing Fast,    │ High Rollbacks:  │ RECOMMENDED for normal     │
+│    (Version Column) │ Zero DB lock     │ 995 of 1,000 reqs│ traffic (< 50 QPS/hotel).  │
+│                     │ overhead         │ fail and retry,  │ Zero locking overhead.     │
+│                     │                  │ wasting CPU.     │                            │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 3. Redis In-Memory  │ Blazing Fast     │ EXCELLENT:       │ RECOMMENDED for Flash Sales│
+│    Lua Atomic Hold  │ (< 2ms)          │ Atomic check and │ and High-Contention Hotspots│
+│    (Pre-Allocation) │                  │ decrement; zero  │ (Protects DB from crash).  │
+│                     │                  │ DB contention.   │                            │
+└─────────────────────┴──────────────────┴──────────────────┴────────────────────────────┘
+```
+
+### 7.1 Option A: Optimistic Locking for Standard Traffic
+
+```sql
+-- Step 1: Query current status and version
+SELECT total_inventory, total_reserved, total_held, version 
+FROM room_type_inventory 
+WHERE hotel_id = 211 AND room_type_id = 1001 
+  AND date >= '2026-06-01' AND date < '2026-06-04';
+
+-- Step 2: Atomic update with version check and overbooking invariant
+UPDATE room_type_inventory
+SET total_held = total_held + 1,
+    version = version + 1
+WHERE hotel_id = 211 AND room_type_id = 1001
+  AND date >= '2026-06-01' AND date < '2026-06-04'
+  AND (total_reserved + total_held + 1) <= (total_inventory * 1.10)
+  AND version = :expected_version;
+```
+If rows affected $< 3$ (the 3 days of the stay), the transaction rolls back, indicating an inventory conflict or version change.
+
+### 7.2 Option B: Redis Atomic Lua Pre-Allocation for Flash Surges
+
+For high-demand properties, route inventory checks directly to Redis before touching the relational database.
+
+```lua
+-- KEYS: Array of inventory keys for each date: {'inv:211:1001:2026-06-01', 'inv:211:1001:2026-06-02', ...}
+-- ARGV[1]: rooms_requested (e.g. 1)
+-- ARGV[2]: max_allowed_capacity (e.g. 110)
+
+-- Phase 1: Check availability across ALL requested dates atomically
+for i, key in ipairs(KEYS) do
+    local current = tonumber(redis.call('GET', key) or "0")
+    if (current + tonumber(ARGV[1])) > tonumber(ARGV[2]) then
+        return 0 -- Insufficient inventory on date i; abort without changes!
+    end
+end
+
+-- Phase 2: All dates available! Deduct inventory atomically
+for i, key in ipairs(KEYS) do
+    redis.call('INCRBY', key, tonumber(ARGV[1]))
+end
+
+return 1 -- Hold successfully secured!
+```
+
+---
+
+## 8. The 10-Minute Cart Hold Lifecycle & Expiration Protocol
+
+When a user selects "Book Room", the system must hold that room for **10 minutes** so they can safely enter payment info without losing the room. If they abandon checkout, the held inventory must automatically restock.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as Guest
+    participant API as Booking Gateway
+    participant Redis as Redis (Hold Store)
+    participant DB as PostgreSQL DB
+    participant DelayQueue as Kafka / Redis Delay Queue
+    participant Saga as Saga Orchestrator
+
+    User->>API: POST /v1/reservations (Hold Request)
+    API->>Redis: Atomic Lua: Check & Increment Hold Count
+    API->>DB: INSERT reservation (status: 'PENDING_PAYMENT', expires_at: NOW() + 10m)
+    API->>DelayQueue: Schedule HoldExpirationJob (Delay: 10 minutes)
+    API-->>User: HTTP 201 Created (Token, 10:00 Timer started)
+
+    alt Happy Path: User completes payment within 10 minutes
+        User->>API: POST /v1/checkout (Submit Card)
+        API->>Saga: Execute Payment & Finalize
+        Saga->>DB: UPDATE reservation SET status = 'CONFIRMED'
+        Saga->>DB: UPDATE room_type_inventory: total_reserved += 1, total_held -= 1
+        Saga->>Redis: Transition Hold -> Confirmed
+        API-->>User: HTTP 200 OK (Booking Confirmed)
+    else Unhappy Path: User abandons cart (10 minutes elapse)
+        DelayQueue->>API: Trigger HoldExpirationJob(reservation_id)
+        API->>DB: Check status; if still 'PENDING_PAYMENT':
+        API->>DB: UPDATE reservation SET status = 'EXPIRED'
+        API->>DB: UPDATE room_type_inventory: total_held -= 1
+        API->>Redis: Decrement Hold Count (Restock room for others)
+    end
+```
+
+---
+
+## 9. Cross-Service Consistency: The Orchestrated Saga Pattern
+
+In a distributed microservice setup, reservation involves 3 stateful systems:
+1. **Inventory Service:** Locks and reserves room days.
+2. **Payment Service:** Charges credit card via external PSP.
+3. **Notification Service:** Generates booking confirmation email.
+
+Using **Two-Phase Commit (2PC)** causes blocking locks across external PSP network boundaries, creating catastrophic latency spikes. We use an **Orchestrated Saga Pattern**:
+
+```mermaid
+stateDiagram-v2
+    [*] --> RESERVATION_INITIATED
+    RESERVATION_INITIATED --> INVENTORY_HELD: Lock Room Dates
+    INVENTORY_HELD --> PAYMENT_PROCESSING: Forward to Stripe
+    
+    PAYMENT_PROCESSING --> RESERVATION_CONFIRMED: Card Charged Successfully
+    RESERVATION_CONFIRMED --> EMAIL_SENT: Dispatch Confirmation
+    EMAIL_SENT --> [*]
+
+    PAYMENT_PROCESSING --> COMPENSATING_RELEASE_INVENTORY: Payment Declined / Timeout
+    COMPENSATING_RELEASE_INVENTORY --> RESERVATION_CANCELLED: Inventory Restocked
+    RESERVATION_CANCELLED --> [*]
+```
+
+### Compensating Actions Invariant
+Every forward step in the saga must have an idempotent **Compensating Action**:
+* Forward: `HoldInventory()` $\implies$ Compensate: `ReleaseInventory()`.
+* Forward: `ChargePayment()` $\implies$ Compensate: `RefundPayment()`.
+
+---
+
+## 10. Staff-Level Interviewer Curveballs & Adaptability Playbook
+
+### Curveball 1: "A major concert is announced. 100,000 fans hit the booking page for a single 150-room hotel within 30 seconds. The database crashes. How do you survive?"
+* **Staff Answer:**
+  1. **Virtual Waiting Room (Queue-It Pattern):** Place a Cloudflare Edge Waiting Room in front of the booking endpoint. Only admit users into checkout at the exact rate the database can process ($~50 \text{ admissions / sec}$).
+  2. **In-Memory Redis Token Bucket:** Allocate 150 inventory claim tokens in Redis. The first 150 users claim a cryptographic checkout token via atomic Lua script. All subsequent requests receive an immediate, friendly *"All rooms currently held"* response without touching the primary database!
+  3. **Asynchronous Settlement:** The 150 token holders are routed to a decoupled checkout pipeline that writes to PostgreSQL sequentially.
+
+### Curveball 2: "Due to our 110% overbooking policy, 105 guests show up on Friday night for only 100 physical rooms. How does the architecture handle this operationally?"
+* **Staff Answer:**
+  1. **Algorithmic Walk-Priority Scoring:** When overbooking risk materializes at check-in time, a ranking service identifies which guests to "walk" (relocate to a partner hotel):
+     - Protect VIP / High-tier loyalty members.
+     - Select guests who booked last or booked via third-party discount aggregators.
+  2. **Automated Partner Booking API:** Automatically provision equivalent or upgraded accommodations at an affiliated sister hotel within a 2-mile radius via B2B hotel APIs.
+  3. **Financial Compensation & Retention Credit:** Auto-issue full room refund + $200 travel voucher credited directly to the guest's digital wallet to maintain brand trust.
+
+### Curveball 3: "A user's network drops midway through payment. Stripe charged their card, but your server never received the HTTP 200 callback. How do you resolve this inconsistency?"
+* **Staff Answer:**
+  1. **Stripe Webhook Listener:** The PSP fires an out-of-band `charge.succeeded` webhook to our payment gateway.
+  2. **Transactional Outbox & Idempotency Key Match:** The webhook handler matches the `idempotency_key` (which is the `reservation_id`), sees the reservation is still in `PENDING_PAYMENT`, and promotes it to `CONFIRMED`.
+  3. **Edge Case (Hold Expired before Webhook Arrived):** If the 10-minute hold expired and the room was sold to another guest, the webhook handler detects zero available inventory and **immediately triggers an automated full refund API call to Stripe**, accompanied by an apology email explaining the timeout.

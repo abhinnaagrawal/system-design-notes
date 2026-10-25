@@ -1,424 +1,268 @@
-# Chapter 20: Metrics Monitoring and Alerting System
+# Chapter 20: Design a Distributed Metrics Monitoring & Alerting System (Prometheus / Datadog / Gorilla)
 
-## Introduction
-This chapter focuses on designing a highly scalable **metrics monitoring and alerting system**, which is critical for ensuring high availability and reliability.
-
----
-
-## Step 1: Understand the Problem and Establish Design Scope
-A metrics monitoring system can mean a lot of different things - eg you don't want to design a logs aggregation system, when the interviewer is interested in infra metrics only.
-
-Let's try to understand the problem first:
- - C: Who are we building the system for? An in-house monitoring system for a big tech company or a SaaS like DataDog?
- - I: We are building for internal use only.
- - C: Which metrics do we want to collect?
- - I: Operational system metrics - CPU load, Memory, Data disk space. But also high-level metrics like requests per second. Business metrics are not in scope.
- - C: What is the scale of the infrastructure we're monitoring?
- - I: 100mil daily active users, 1000 server pools, 100 machines per pool
- - C: How long should we keep the data?
- - I: Let's assume 1y retention.
- - C: May we reduce metrics data resolution for long-term storage?
- - I: Keep newly received metrics for 7 days. Roll them up to 1m resolution for next 30 days. Further roll them up to 1h resolution after 30 days.
- - C: What are the supported alert channels?
- - I: Email, phone, PagerDuty or webhooks.
- - C: Do we need to collect logs such as error or access logs?
- - I: No
- - C: Do we need to support distributed system tracing?
- - I: No
-
-### **High-level requirements and assumptions**
-The infrastructure being monitored is large-scale:
- - 100mil DAU
- - 1000 server pools * 100 machines * ~100 metrics per machine -> ~10mil metrics
- - 1-year data retention
- - Data retention policy - raw for 7d, 1-minute resolution for 30d, 1h resolution for 1y
-
-A variety of metrics can be monitored:
- - CPU load
- - Request count
- - Memory usage
- - Message count in message queues
-
-### **Non-functional requirements**
- - **Scalability**: System should be scalable to accommodate more metrics and alerts
- - **Low latency**: System needs to have low query latency for dashboards and alerts
- - **Reliability**: System should be highly reliable to avoid missing critical alerts
- - **Flexibility**: System should be able to easily integrate new technologies in the future
-
-What requirements are out of scope?
- - **Log monitoring**: the ELK stack is very popular for this use-case
- - **Distributed system tracing**: this refers to collecting data about a request lifecycle as it flows through multiple services within the system
+**Sources & Foundational References:**
+- [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
+- [Gorilla: A Fast, Scalable, In-Memory Time Series Database (Pelkonen et al., Facebook / Meta)](https://www.vldb.org/pvldb/vol8/p1816-pelkonen.pdf)
+- [Prometheus: High-Performance Time-Series Database Architecture](https://prometheus.io/docs/prometheus/latest/storage/)
+- [Google SRE Book: Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/)
 
 ---
 
-## Step 2: Propose High-Level Design and Get Buy-In
+## 1. Executive Interview Framing & Staff-Level Bar
 
-### **Fundamentals**
-There are five core components involved in a metrics monitoring and alerting system:
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-monitoring-core-components.png" alt="metrics-monitoring-core-components" width="500" />
-</div>
-
- - **Data collection**: collect metrics data from different sources
- - **Data transmission**: transfer data from sources to the metrics monitoring system
- - **Data storage**: organize and store incoming data
- - **Alerting**: Analyze incoming data, detect anomalies and generate alerts
- - **Visualization**: Present data in graphs, charts, etc
-
-### **Data model**
-Metrics data is usually recorded as a time-series, which contains a set of values with timestamps.
-The series can be identified by name and an optional set of tags.
-
-Example 1 - What is the CPU load on production server instance i631 at 20:00?
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-example-1.png" alt="metrics-example-1" width="500" />
-</div>
-
-The data can be identified by the following table:
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-example-1-data.png" alt="metrics-example-1-data" width="500" />
-</div>
-
-The time series is identified by the metric name, labels and a single point in at a specific time.
-
-Example 2 - What is the average CPU load across all web servers in the us-west region for the last 10min?
+Designing a large-scale metrics collection and alerting pipeline (Prometheus, Datadog, Meta Gorilla, M3DB) is the definitive test of **high-throughput write ingestion, time-series compression, and operational fault resilience**. While mid-level candidates propose writing CPU numbers to MySQL or generic NoSQL databases, **Staff and Principal Engineers (L6+, P60) are evaluated on their mechanical knowledge of Gorilla delta-of-deltas compression (reducing 16 bytes to 1.37 bytes per sample), Pull vs Push collection trade-offs, label-indexed inverted indices, rollup compaction downsampling, and alert storm deduplication**:
 
 ```
-CPU.load host=webserver01,region=us-west 1613707265 50
-
-CPU.load host=webserver01,region=us-west 1613707265 62
-
-CPU.load host=webserver02,region=us-west 1613707265 43
-
-CPU.load host=webserver02,region=us-west 1613707265 53
-
-...
-
-CPU.load host=webserver01,region=us-west 1613707265 76
-
-CPU.load host=webserver01,region=us-west 1613707265 83
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 THE INTERVIEW SPECTRUM                                 │
+├────────────────────────────────────────┬───────────────────────────────────────────────┤
+│ L5 / Senior Engineer                   │ L6+ / Staff & Principal Engineer              │
+├────────────────────────────────────────┼───────────────────────────────────────────────┤
+│ • Relational DB or basic NoSQL store   │ • Specialized Time-Series DB (TSDB) engine    │
+│ • "Just write (timestamp, val) to disk"│ • Gorilla XOR delta-of-deltas compression     │
+│                                        │   (12x compression: 16 bytes -> 1.37 bytes)   │
+│ • Vague on Push vs Pull collection     │ • Scrape Pull (Prometheus + Service Discovery)│
+│                                        │   vs Push (StatsD / Pushgateway / OpenTelemetry│
+│ • Ignores massive disk storage growth  │ • Tiered Downsampling (Raw 7d -> 1m rollup    │
+│                                        │   30d -> 1h rollup 1y) via compaction worker  │
+│ • Simple threshold alert (e.g. CPU>80%)│ • Alert Storm Suppression (Grouping, Inhibit  │
+│                                        │   rules, Silence, Exponential Dampening)      │
+│ • Ignores monitoring of monitor itself │ • Meta-monitoring & Out-of-Band Heartbeats    │
+└────────────────────────────────────────┴───────────────────────────────────────────────┘
 ```
-
-This is an example data we might pull from storage to answer that question.
-The average CPU load can be calculated by averaging the values in the last column of the rows.
-
-The format shown above is called the line protocol and is used by many popular monitoring software in the market - eg Prometheus, OpenTSDB.
-
-What every time series consists of:
-
-<div style="margin-left:3rem">
-    <img src="./images/time-series-data-example.png" alt="time-series-data-example" width="500" />
-</div>
-
-A good way to visualize how data looks like:
-
-<div style="margin-left:3rem">
-    <img src="./images/time-series-data-viz.png" alt="time-series-data-viz" width="500" />
-</div>
-
- - The x axis is the time
- - the y axis is the dimension you're querying - eg metric name, tag, etc.
-
-The data access pattern is write-heavy and spiky reads as we collect a lot of metrics, but they are infrequently accessed, although in bursts when eg there are ongoing incidents.
-
-The data storage system is the heart of this design. 
- - It is not recommended to use a general-purpose database for this problem, although you could achieve good scale \w expert-level tuning.
- - Using a NoSQL database can work in theory, but it is hard to devise a scalable schema for effectively storing and querying time-series data.
-
-There are many databases, specifically tailored for storing time-series data. Many of them support custom query interfaces which allow for effective querying of time-series data.
- - OpenTSDB is a distributed time-series database, but it is based on Hadoop and HBase. If you don't have that infrastructure provisioned, it would be hard to use this tech.
- - Twitter uses MetricsDB, while Amazon offers Timestream.
- - The two most popular time-series databases are InfluxDB and Prometheus. 
- - They are designed to store large volumes of time-series data. Both of them are based on in-memory cache + on-disk storage.
-
-Example scale of InfluxDB - more than 250k writes per second when provisioned with 8 cores and 32gb RAM:
-
-<div style="margin-left:3rem">
-    <img src="./images/influxdb-scale.png" alt="influxdb-scale" width="500" />
-</div>
-
-It is not expected for you to understand the internals of a metrics database as it is niche knowledge. You might be asked only if you've mentioned it on your resume.
-
-For the purposes of the interview, it is sufficient to understand that metrics are time-series data and to be aware of popular time-series databases, like InfluxDB.
-
-One nice feature of time-series databases is the efficient aggregation and analysis of large amounts of time-series data by labels.
-InfluxDB, for example, builds indexes for each label.
-
-It is critical, however, to keep the cardinality of labels low - ie, not using too many unique labels.
-
-### **High-level Design**
-
-<div style="margin-left:3rem">
-    <img src="./images/high-level-design.png" alt="high-level-design" width="500" />
-</div>
-
- - **Metrics source**: can be application servers, SQL databases, message queues, etc.
- - **Metrics collector**: Gathers metrics data and writes to time-series database
- - **Time-series database**: stores metrics as time-series. Provides a custom query interface for analyzing large amounts of metrics.
- - **Query service**: Makes it easy to query and retrieve data from the time-series DB. Could be replaced entirely by the DB's interface if it's sufficiently powerful.
- - **Alerting system**: Sends alert notifications to various alerting destinations.
- - **Visualization system**: Shows metrics in the form of graphs/charts.
 
 ---
 
-## Step 3: Design Deep Dive
-Let's deep dive into several of the more interesting parts of the system.
-
-### **Metrics collection**
-For metrics collection, occasional data loss is not critical. It's acceptable for clients to fire and forget.
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-collection.png" alt="metrics-collection" width="500" />
-</div>
-
-There are two ways to implement metrics collection - pull or push.
-
-Here's how the pull model might look like:
-
-<div style="margin-left:3rem">
-    <img src="./images/pull-model-example.png" alt="pull-model-example" width="500" />
-</div>
-
-For this solution, the metrics collector needs to maintain an up-to-date list of services and metrics endpoints.
-We can use Zookeeper or etcd for that purpose - service discovery.
-
-Service discovery contains contains configuration rules about when and where to collect metrics from:
-
-<div style="margin-left:3rem">
-    <img src="./images/service-discovery-example.png" alt="service-discovery-example" width="500" />
-</div>
-
-Here's a detailed explanation of the metrics collection flow:
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-collection-flow.png" alt="metrics-collection-flow" width="500" />
-</div>
-
- - Metrics collector fetches configuration metadata from service discovery. This includes pulling interval, IP addresses, timeout & retry params.
- - Metrics collector pulls metrics data via a pre-defined http endpoint (eg `/metrics`). This is typically done by a client library.
- - Alternatively, the metrics collector can register a change event notification with the service discovery to be notified once the service endpoint changes.
- - Another option is for the metrics collector to periodically poll for metrics endpoint configuration changes.
-
-At our scale, a single metrics collector is not enough. There must be multiple instances. 
-However, there must also be some kind of synchronization among them so that two collectors don't collect the same metrics twice.
-
-One solution for this is to position collectors and servers on a consistent hash ring and associate a set of servers with a single collector only:
-
-<div style="margin-left:3rem">
-    <img src="./images/consistent-hash-ring.png" alt="consistent-hash-ring" width="500" />
-</div>
-
-With the push model, on the other hand, services push their metrics to the metrics collector proactively:
-
-<div style="margin-left:3rem">
-    <img src="./images/push-model-example.png" alt="push-model-example" width="500" />
-</div>
-
-In this approach, typically a collection agent is installed alongside service instances. 
-The agent collects metrics from the server and pushes them to the metrics collector.
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-collector-agent.png" alt="metrics-collector-agent" width="500" />
-</div>
-
-With this model, we can potentially aggregate metrics before sending them to the collector, which reduces the volume of data processed by the collector.
-
-On the flip side, metrics collector can reject push requests as it can't handle the load. 
-It is important, hence, to add the collector to an auto-scaling group behind a load balancer.
-
-so which one is better? There are trade-offs between both approaches and different systems use different approaches:
- - Prometheus uses a pull architecture
- - Amazon Cloud Watch and Graphite use a push architecture
-
-Here are some of the main differences between push and pull:
-|                                        | Pull                                                                                                                                                                                                    | Push                                                                                                                                                                                                                                    |
-|----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Easy debugging                         | The /metrics endpoint on application servers used for pulling metrics can be used to view metrics at any time. You can even do this on your laptop. Pull wins.                                          | If the metrics collector doesn't receive metrics, the problem might be caused by network issues.                                                                                                                                        |
-| Health check                           | If an application server doesn't respond to the pull, you can quickly figure out if an application server is down. Pull wins.                                                                           | If the metrics collector doesn't receive metrics, the problem might be caused by network issues.                                                                                                                                        |
-| Short-lived jobs                       |                                                                                                                                                                                                         | Some of the batch jobs might be short-lived and don't last long enough to be pulled. Push wins. This can be fixed by introducing push gateways for the pull model [22].                                                                 |
-| Firewall or complicated network setups | Having servers pulling metrics requires all metric endpoints to be reachable. This is potentially problematic in multiple data center setups. It might require a more elaborate network infrastructure. | If the metrics collector is set up with a load balancer and an auto-scaling group, it is possible to receive data from anywhere. Push wins.                                                                                             |
-| Performance                            | Pull methods typically use TCP.                                                                                                                                                                         | Push methods typically use UDP. This means the push method provides lower-latency transports of metrics. The counterargument here is that the effort of establishing a TCP connection is small compared to sending the metrics payload. |
-| Data authenticity                      | Application servers to collect metrics from are defined in config files in advance. Metrics gathered from those servers are guaranteed to be authentic.                                                 | Any kind of client can push metrics to the metrics collector. This can be fixed by whitelisting servers from which to accept metrics, or by requiring authentication.                                                                   |
-
-There is no clear winner. A large organization probably needs to support both. There might not be a way to install a push agent in the first place.
-
-### **Scale the metrics transmission pipeline**
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-transmission-pipeline.png" alt="metrics-transmission-pipeline" width="500" />
-</div>
-
-The metrics collector is provisioned in an auto-scaling group, regardless if we use the push or pull model.
-
-There is a chance of data loss if the time-series DB is down, however. To mitigate this, we'll provision a queuing mechanism:
-
-<div style="margin-left:3rem">
-    <img src="./images/queuing-mechanism.png" alt="queuing-mechanism" width="500" />
-</div>
-
- - Metrics collectors push metrics data into kafka
- - Consumers or stream processing services such as Apache Storm, Flink or Spark process the data and push it to the time-series DB
-
-This approach has several advantages:
- - Kafka is used as a highly-reliable and scalable distributed message platform
- - It decouples data collection and data processing from one another
- - It can prevent data loss by retaining the data in Kafka
-
-Kafka can be configured with one partition per metric name, so that consumers can aggregate data by metric names.
-To scale this, we can further partition by tags/labels and categorize/prioritize metrics to be collected first.
-
-<div style="margin-left:3rem">
-    <img src="./images/metrics-collection-kafka.png" alt="metrics-collection-kafka" width="500" />
-</div>
-
-The main downside of using Kafka for this problem is the maintenance/operation overhead.
-An alternative is to use a large-scale ingestion system like [Gorilla](https://www.vldb.org/pvldb/vol8/p1816-teller.pdf).
-It can be argued that using that would be as scalable as using Kafka for queuing.
-
-### **Where aggregations can happen**
-Metrics can be aggregated at several places. There are trade-offs between different choices:
- - **Collection agent**: client-side collection agent only supports simple aggregation logic. Eg collect a counter for 1m and send it to the metrics collector.
- - **Ingestion pipeline**: To aggregate data before writing to the DB, we need a stream processing engine like Flink. This reduces write volume, but we lose data precision as we don't store raw data.
- - **Query side**: We can aggregate data when we run queries via our visualization system. There is no data loss, but queries can be slow due to a lot of data processing.
-
-### **Query Service**
-Having a separate query service from the time-series DB decouples the visualization and alerting system from the database, which enables us to decouple the DB from clients and change it at will.
-
-We can add a Cache layer here to reduce the load to the time-series database:
-
-<div style="margin-left:3rem">
-    <img src="./images/cache-layer-query-service.png" alt="cache-layer-query-service" width="500" />
-</div>
-
-We can also avoid adding a query service altogether as most visualization and alerting systems have powerful plugins to integrate with most time-series databases.
-With a well-chosen time-series DB, we might not need to introduce our own caching layer as well.
-
-Most time-series DBs don't support SQL simply because it is ineffective for querying time-series data. Here's an example SQL query for computing an exponential moving average:
+## 2. The 5-Pillar Staff Assessment Rubric for Metrics Systems
 
 ```
-select id,
-       temp,
-       avg(temp) over (partition by group_nr order by time_read) as rolling_avg
-from (
-  select id,
-         temp,
-         time_read,
-         interval_group,
-         id - row_number() over (partition by interval_group order by time_read) as group_nr
-  from (
-    select id,
-    time_read,
-    "epoch"::timestamp + "900 seconds"::interval * (extract(epoch from time_read)::int4 / 900) as interval_group,
-    temp
-    from readings
-  ) t1
-) t2
-order by time_read;
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Pull (Scrape via Service Discovery) vs Push (Agent streaming to Ingress).  │
+│                         │ • Relational DB vs InfluxDB vs Cassandra vs Gorilla In-Memory TSDB.          │
+│                         │ • Evaluates trade-offs between storage resolution and query execution cost.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Derives Gorilla timestamp delta-of-deltas variable-length bit packing.     │
+│    Proficiency          │ • Derives Gorilla floating-point XOR value compression (leading/trailing 0s).│
+│                         │ • Explains TSDB inverted index mapping metric labels $\to$ series IDs.       │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes system into Collection, Ingestion, TSDB Storage, Alerting, UI.  │
+│    Analytical Thinking  │ • Calculates daily samples ($10\text{M metrics} / 10\text{s} = 1\text{M QPS}$│
+│                         │   $= 86.4\text{ Billion samples/day}$) and compressed storage footprint.     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Mitigates Alert Fatigue: Flap detection, alert routing trees, and grouping.│
+│    Mindset              │ • Monitors the monitoring infrastructure (dead-man switches, canary probes). │
+│                         │ • Enforces automated data lifecycle retention & rollup compaction.           │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Handles dynamic container churn (short-lived Kubernetes pods / serverless).│
+│    Collaboration        │ • Balances strict metric precision with telemetry network bandwidth costs.   │
+│                         │ • Articulates difference between Metrics, Logs, and Traces (the 3 Pillars).   │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
 ```
-
-Here's the same query in Flux - query language used in InfluxDB:
-
-```
-from(db:"telegraf")
-  |> range(start:-1h)
-  |> filter(fn: (r) => r._measurement == "foo")
-  |> exponentialMovingAverage(size:-10s)
-```
-
-### **Storage layer**
-It is important to choose the time-series database carefully.
-
-According to research published by Facebook, ~85% of queries to the operational store were for data from the past 26h.
-
-If we choose a database, which harnesses this property, it could have significant impact on system performance. InfluxDB is one such option.
-
-Regardless of the database we choose, there are some optimizations we might employ.
-
-Data encoding and compression can significantly reduce the size of data. Those features are usually built into a good time-series database.
-
-<div style="margin-left:3rem">
-    <img src="./images/double-delta-encoding.png" alt="double-delta-encoding" width="500" />
-</div>
-
-In the above example, instead of storing full timestamps, we can store timestamp deltas.
-
-Another technique we can employ is down-sampling - converting high-resolution data to low-resolution in order to reduce disk usage.
-
-We can use that for old data and make the rules configurable by data scientists, eg:
- - 7d - no down-sampling
- - 30d - down-sample to 1min
- - 1y - down-sample to 1h
-
-For example, here's a 10-second resolution metrics table:
-| metric | timestamp            | hostname | Metric_value |
-|--------|----------------------|----------|--------------|
-| cpu    | 2021-10-24T19:00:00Z | host-a   | 10           |
-| cpu    | 2021-10-24T19:00:10Z | host-a   | 16           |
-| cpu    | 2021-10-24T19:00:20Z | host-a   | 20           |
-| cpu    | 2021-10-24T19:00:30Z | host-a   | 30           |
-| cpu    | 2021-10-24T19:00:40Z | host-a   | 20           |
-| cpu    | 2021-10-24T19:00:50Z | host-a   | 30           |
-
-down-sampled to 30-second resolution:
-| metric | timestamp            | hostname | Metric_value (avg) |
-|--------|----------------------|----------|--------------------|
-| cpu    | 2021-10-24T19:00:00Z | host-a   | 19                 |
-| cpu    | 2021-10-24T19:00:30Z | host-a   | 25                 |
-
-Finally, we can also use cold storage to use old data, which is no longer used. The financial cost for cold storage is much lower.
-
-### **Alerting system**
-
-<div style="margin-left:3rem">
-    <img src="./images/alerting-system.png" alt="alerting-system" width="500" />
-</div>
-
-Configuration is loaded to cache servers. Rules are typically defined in YAML format. Here's an example:
-
-```
-- name: instance_down
-  rules:
-
-  # Alert for any instance that is unreachable for >5 minutes.
-  - alert: instance_down
-    expr: up == 0
-    for: 5m
-    labels:
-      severity: page
-```
-
-The alert manager fetches alert configurations from cache. Based on configuration rules, it also calls the query service at a predefined interval.
-If a rule is met, an alert event is created.
-
-Other responsibilities of the alert manager are:
- - Filtering, merging and deduplicating alerts. Eg if an alert of a single instance is triggered multiple times, only one alert event is generated.
- - Access control - it is important to restrict alert-management operations to certain individuals only
- - Retry - the manager ensures that the alert is propagated at least once.
-
-The alert store is a key-value database, like Cassandra, which keeps the state of all alerts. It ensures a notification is sent at least once.
-Once an alert is triggered, it is published to Kafka.
-
-Finally, alert consumers pull alerts data from Kafka and send notifications over to different channels - Email, text message, PagerDuty, webhooks.
-
-In the real-world, there are many off-the-shelf solutions for alerting systems. It is difficult to justify building your own system in-house.
-
-### **Visualization system**
-The visualization system shows metrics and alerts over a time period. Here's an dashboard built with Grafana:
-
-<div style="margin-left:3rem">
-    <img src="./images/grafana-dashboard.png" alt="grafana-dashboard" width="500" />
-</div>
-
-A high-quality visualization system is very hard to build. It is hard to justify not using an off-the-shelf solution like Grafana.
 
 ---
 
-## Step 4: Wrap up
-Here's our final design:
+## 3. Requirements & System Scope
 
-<div style="margin-left:3rem">
-    <img src="./images/final-design.png" alt="final-design" width="500" />
-</div>
+### Functional Requirements
+1. **Metrics Collection:** Ingest system-level metrics (CPU, RAM, disk, network) and application-level metrics (QPS, error rates, p99 latency) from hundreds of thousands of hosts and containers.
+2. **Time-Series Querying & Aggregation:** Support sub-second aggregation queries over flexible time windows (e.g. `rate(http_requests[5m]) by (region)`).
+3. **Alert Evaluation & Dispatch:** Evaluate alerting rules every 10–30 seconds; route triggered alerts to PagerDuty, Slack, Email, or Webhooks.
+4. **Data Downsampling & Retention:** Retain raw high-resolution metrics for 7 days, 1-minute rollups for 30 days, and 1-hour rollups for 1 year.
+5. **Dashboard Visualization:** Serve real-time dashboards (Grafana-style) with low query latency.
+
+### Non-Functional Requirements & Performance SLOs
+* **Scale:** Ingest **10 Million active metric streams**, collected every **10 seconds** ($\approx \mathbf{1 \text{ Million samples / second}}$).
+* **Write Availability:** **99.999%** uptime for write ingestion (metric drops must be near zero).
+* **Query Latency:** Dashboard panel query latency $< \mathbf{200ms}$ (p99).
+* **Alert Latency:** Alert fired within **30 seconds** of an SLO breach.
+* **Storage Efficiency:** Heavy compression ($> 10\times$) to prevent multi-petabyte disk exhaustion.
+
+---
+
+## 4. Back-of-the-Envelope Capacity Estimation
+
+```
+Total Active Metric Streams: 10 Million
+Sampling Frequency: Every 10 seconds
+Retention Window: 1 Year (Tiered)
+```
+
+### 4.1 Ingestion Throughput Math
+* **Write Samples per Second:**
+  $$\text{Write Ingestion QPS} = \frac{10,000,000 \text{ metrics}}{10 \text{ seconds}} = \mathbf{1,000,000 \text{ samples / sec}}$$
+  $$\text{Peak Write QPS (2x)} \approx \mathbf{2,000,000 \text{ samples / sec}}$$
+* **Daily Metric Samples:**
+  $$1,000,000 \text{ samples/sec} \times 86,400 \text{ seconds} \approx \mathbf{86.4 \text{ Billion samples / day}}$$
+
+### 4.2 Storage Math (Raw vs Compressed)
+* Uncompressed sample:
+  - Timestamp: 8 bytes (64-bit epoch seconds/ms)
+  - Value: 8 bytes (64-bit float)
+  - Metric Series Pointer: 8 bytes
+  - **Uncompressed Sample Size:** $\approx 24 \text{ bytes}$
+  $$\text{Daily Raw Storage} = 86.4 \times 10^9 \times 24 \text{ bytes} \approx \mathbf{2.07 \text{ TB / day}} \quad (\mathbf{755 \text{ TB / year}})$$
+* **Gorilla TSDB Compression ($12\times$ reduction):**
+  - Gorilla compresses samples down to **1.37 bytes per sample**!
+  $$\text{Daily Compressed Storage} = 86.4 \times 10^9 \times 1.37 \text{ bytes} \approx \mathbf{118.4 \text{ GB / day}}$$
+  - **7-Day Raw Working Set in RAM / Fast NVMe:**
+    $$118.4 \text{ GB/day} \times 7 \text{ days} \approx \mathbf{828 \text{ GB}}$$
+* *Staff Takeaway:* With Gorilla compression, the entire 7-day raw active metric set fits comfortably within **1 TB of RAM** across a small cluster!
+
+---
+
+## 5. End-to-End High-Level Architecture
+
+```mermaid
+flowchart TD
+    subgraph MonitoredFleet["Monitored Infrastructure (100k+ Nodes & Pods)"]
+        H1["Host 1: Node Exporter / App (:9090/metrics)"]
+        H2["Host 2: Node Exporter / App (:9090/metrics)"]
+        H3["Host 3: OpenTelemetry Agent"]
+    end
+
+    subgraph CollectionTier["Collection & Ingestion Tier"]
+        SD["Service Discovery<br/>(Kubernetes API / Consul)"] -.->|Discovers Active Endpoints| ScraperFleet
+        ScraperFleet["Scraper Fleet (Prometheus Workers)<br/>• Pulls /metrics every 10s<br/>• Consistent Hash Assignment"]
+        H1 & H2 -->|HTTP GET Scrape| ScraperFleet
+        H3 -->|Push Telemetry| PushGW["Ingress Gateway / Kafka"]
+    end
+
+    subgraph TSDBCluster["Time-Series Database (TSDB) Tier"]
+        ScraperFleet -->|Write Chunks| TSDB_Master["TSDB Head Block (In-Memory Gorilla)"]
+        PushGW --> TSDB_Master
+        TSDB_Master -->|Flush after 2h| BlockDisk["Immutable 2h Block Segments (NVMe)"]
+        
+        Compactor["Compaction & Rollup Engine"] -->|Rollup 1m & 1h| ColdStorage["Cold Storage (Amazon S3 / Parquet)"]
+        BlockDisk -.-> Compactor
+    end
+
+    subgraph AlertAndUI["Query & Alerting Tier"]
+        AlertEngine["Alert Evaluation Engine (Runs Rules every 15s)"] --> TSDB_Master
+        AlertEngine -->|Trigger Alert| AlertManager["Alertmanager<br/>• Grouping & Deduplication<br/>• Silencing & Inhibit Rules"]
+        AlertManager --> PagerDuty["PagerDuty / Slack / Webhooks"]
+
+        Grafana["Grafana Dashboards"] -->|PromQL Query| QueryProxy["Query Proxy / Read Cache"]
+        QueryProxy --> TSDB_Master
+        QueryProxy --> BlockDisk
+        QueryProxy --> ColdStorage
+    end
+```
+
+---
+
+## 6. Data Collection Mechanics: Pull vs Push Architecture
+
+The debate between **Pull (Prometheus-style)** and **Push (StatsD / Datadog-style)** is a frequent Staff interview focal point:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              PULL VS PUSH MODEL COMPARISON                             │
+├─────────────────────┬──────────────────┬──────────────────┬────────────────────────────┤
+│ Strategy            │ How it Works     │ Advantages       │ Disadvantages / Flaws      │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ Pull Model          │ Central scrapers │ • Built-in host  │ Difficult across firewalls │
+│ (Prometheus /       │ query target     │   liveness check │ / NATs; ephemeral batch   │
+│  Google Borgmon)    │ `/metrics` HTTP  │ • Scraper bounds │ jobs (lambdas) die before  │
+│                     │ endpoints.       │   system load    │ scrape occurs.             │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ Push Model          │ Agents stream    │ • Natural for    │ Target can accidentally    │
+│ (StatsD / Datadog / │ metrics out to   │   ephemeral /    │ DDoS the collector; no easy│
+│  OpenTelemetry)     │ central gateway  │   serverless jobs│ way to know if silent host │
+│                     │ via UDP / gRPC.  │ • Works past NATs│ is healthy or dead.        │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ Hybrid (SOTA)       │ Pull for servers;│ Best of both     │ Minor architectural        │
+│                     │ Pushgateway for  │ worlds.          │ complexity increase.       │
+│                     │ batch/lambdas.   │                  │                            │
+└─────────────────────┴──────────────────┴──────────────────┴────────────────────────────┘
+```
+
+---
+
+## 7. The Storage Engine Deep Dive: Meta Gorilla Compression
+
+The definitive Staff-level differentiator is explaining **Gorilla Compression** (VLDB 2015), which powers Facebook Gorilla, Prometheus TSDB, and M3DB.
+
+A metric stream is a sequence of pairs: `(t_0, v_0), (t_1, v_1), (t_2, v_2), ...`
+
+### 7.1 Timestamp Compression: Delta-of-Deltas
+Timestamps arrive at roughly constant intervals (e.g., every 10 seconds).
+* Let $t_n$ be current time, $D = t_n - t_{n-1}$ be the delta ($10\text{s}$).
+* Calculate the **Delta-of-Deltas**:
+  $$D' = (t_n - t_{n-1}) - (t_{n-1} - t_{n-2})$$
+* **Bit-Packing Rules:**
+  - If $D' = 0$ (clock arrived exactly on schedule): Store a single bit **`0`**!
+  - If $-63 \le D' \le 64$: Store bits `10` followed by 7 bits of $D'$.
+  - If $-255 \le D' \le 256$: Store bits `110` followed by 9 bits of $D'$.
+  - If $-2047 \le D' \le 2048$: Store bits `1110` followed by 12 bits of $D'$.
+  - Otherwise: Store bits `1111` followed by full 32-bit $D'$.
+* **Result:** **96% of timestamps compress to a single `0` bit!**
+
+### 7.2 Value Compression: Floating-Point XOR Bit-Packing
+Most metric values (e.g. CPU load: $50.12\% \to 50.14\%$) change very little between samples. When XORed, their IEEE 754 representations share many identical prefix (leading) and suffix (trailing) bits:
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                        GORILLA FLOATING-POINT XOR MECHANICS                            │
+├────────────────────────────────────────────────────────────────────────────────────────┤
+│ 1. Compute XOR with previous float: X = v_n XOR v_{n-1}                                │
+│ 2. If X == 0 (Value is identical): Store single bit `0`.                               │
+│ 3. If X != 0: Store single bit `1`:                                                    │
+│    • Case A: If X has the SAME leading and trailing zeros as previous XOR:            │
+│      - Store bit `0`.                                                                  │
+│      - Store only the meaningful bits (length = 64 - leading - trailing).              │
+│    • Case B: If leading/trailing zeros changed:                                        │
+│      - Store bit `1`.                                                                  │
+│      - Store 5 bits (leading zero count) + 6 bits (meaningful length) + meaningful bits│
+│ 4. Result: Compresses 64-bit IEEE floats down to an average of 1.37 BYTES (11 bits)!  │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 8. Alerting Pipeline & Alert Storm Deduplication
+
+The hardest operational challenge in metrics monitoring is **Alert Fatigue**. When a core database switch fails, 500 dependent microservices throw connection errors, firing 10,000 alerts to on-call engineers within 60 seconds (**The Alert Storm**).
+
+```mermaid
+flowchart TD
+    RawAlerts["500 Incoming Alerts<br/>'DBConnectionRefused' across 50 Services"] --> AlertManager["Alertmanager Routing Engine"]
+
+    subgraph DeduplicationPipeline["Alert Storm Mitigation Pipeline"]
+        AlertManager --> Grouping["1. Grouping Engine<br/>Group by: (cluster_id, incident_type)<br/>group_wait: 30s"]
+        Grouping --> Inhibit["2. Inhibit Rules<br/>If 'DatabaseClusterDown' is firing,<br/>MUTE all 'ServiceConnectionError' alerts!"]
+        Inhibit --> Silencing["3. Silencing & Flap Dampening<br/>Suppress flapping alerts alternating OK <-> ALERT"]
+    end
+
+    Silencing --> SingleNotification["Single Consolidated PagerDuty Incident:<br/>'Production DB-01 Outage impacting 50 Services'"]
+```
+
+### The 4 Pillars of Alert Suppression
+1. **Grouping (`group_wait = 30s`, `group_interval = 5m`):** Buffers alerts for 30 seconds to combine related alerts into a single unified notification.
+2. **Inhibition Rules:** A rule that mutes a set of alerts if another high-priority alert is already active (e.g., if `NodeNetworkDown` is active, suppress `ServiceUnreachable` for all containers on that node).
+3. **Flap Detection & Dampening:** If a metric oscillates across the alert threshold repeatedly, the alert manager locks it into "suppressed" state until it stays stable for 15 minutes.
+4. **Dead-Man Switch (Canary):** An alert that is configured to fire continuously 24/7. An external monitoring service expects this ping; if the ping stops, it proves the **monitoring system itself has crashed**!
+
+---
+
+## 9. Staff-Level Interviewer Curveballs & Adaptability Playbook
+
+### Curveball 1: "A developer introduces a metric label with high cardinality (e.g. `http_requests_total{user_id="123456"}`). The TSDB crashes within 2 hours. What happened and how do you prevent it?"
+* **Wrong Answer:** "We just buy more RAM."
+* **Staff Answer:**
+  1. **Identify the Root Cause:** The **High Cardinality Explosion**. In a TSDB, every unique combination of key-value labels creates a brand-new time-series entry with its own in-memory inverted index posting list. With 10M users, 10M new time series are created, consuming tens of gigabytes of RAM instantly.
+  2. **Ingress Label Filtering & Cardinality Guardrails:** Configure the scraper / ingestion gateway to reject or drop labels known to have unbounded cardinality (`user_id`, `request_id`, `jwt_token`).
+  3. **Cluster Hard Quotas:** Impose a hard cap (`max_series_per_metric = 10,000`). If a metric exceeds this threshold, the ingestion pipeline drops new label sets and fires a P2 alert to the offending team.
+
+### Curveball 2: "How do you monitor the monitoring system itself without circular dependencies?"
+* **Staff Answer:**
+  1. **Out-of-Band Dead-Man Snitch:** The internal Prometheus cluster sends an out-of-band HTTPS ping every 60 seconds to an independent external SaaS provider (e.g., Dead Man's Snitch / Healthchecks.io). If the external service misses two consecutive heartbeats, it pages on-call via cellular SMS.
+  2. **Dual-Region Cross-Monitoring:** Deploy two completely independent monitoring stacks in US-East and EU-West. The US stack monitors the EU stack's health endpoint, and vice-versa.
+
+### Curveball 3: "A major network partition isolates the TSDB cluster from the scraper fleet for 2 hours. How does the system handle recovery?"
+* **Staff Answer:**
+  1. **Scraper Local Buffering:** Scraper agents maintain a local ring buffer in memory (or NVMe SQLite WAL) holding the last 2 hours of collected samples.
+  2. **Backpressure & Controlled Ingestion Catchup:** When the network heals, scrapers stream buffered historical samples to the TSDB in batches with low priority, while prioritizing real-time live samples to prevent alerting blind spots.

@@ -75,8 +75,8 @@ flowchart LR
     PaySvc -.-> AccSvc[Accounting Service]
     AccSvc -->|3. Never Reached| AccDB[(Ledger DB)]
 
-    classDef fail fill:#ffebee,stroke:#c62828,stroke-width:2px;
-    classDef succ fill:#e8f8f5,stroke:#27ae60,stroke-width:2px;
+    classDef fail stroke:#c62828,stroke-width:2px;
+    classDef succ stroke:#27ae60,stroke-width:2px;
     class InvDB,AccDB fail;
     class PayDB succ;
 ```
@@ -239,8 +239,8 @@ flowchart LR
         C2 --> C1
     end
 
-    classDef txn fill:#e8f8f5,stroke:#27ae60,stroke-width:2px;
-    classDef comp fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    classDef txn stroke:#27ae60,stroke-width:2px;
+    classDef comp stroke:#c62828,stroke-width:2px;
     class T1,T2,T3 txn;
     class C1,C2 comp;
 ```

@@ -25,7 +25,40 @@ Designing a planetary-scale video platform like YouTube or Netflix is the ultima
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Video Streaming
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Chunked Resumable Upload (TUS / S3 Multipart) vs Monolithic HTTP POST.     │
+│                         │ • Adaptive Bitrate Streaming (HLS / MPEG-DASH) vs Static MP4 download.       │
+│                         │ • Multi-Tier CDN with Direct ISP Edge Peering (IXP/GGC) vs Generic Public CDN│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Distributed DAG Transcoding with Group of Pictures (GOP) parallel splitting│
+│    Proficiency          │ • Video codecs (H.264/AVC, H.265/HEVC, AV1) & multi-resolution ladder sizing.│
+│                         │ • Content-Addressable Storage (CAS) for duplicate video blob detection.      │
+│                         │ • Asynchronous view count aggregation with Kafka -> Flink bot filtering.     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into Upload Ingress, Transcoding DAG, Storage, CDN, Player.     │
+│    Analytical Thinking  │ • Calculates 500 hrs/min upload ingress (600 Gbps) & 1B watch hrs/day egress │
+│                         │   bandwidth (3 Tbps); sizes multi-exabyte hot/warm/cold storage tiers.       │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Multi-CDN dynamic traffic steering based on real-time client buffer health.│
+│    Mindset              │ • Preserves Time-to-First-Frame ($< 800\text{ms}$) and rebuffering ($< 0.5\%$).│
+│                         │ • Automated S3 lifecycle tiering from NVMe SSD to Glacier Deep Archive.      │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Handles viral livestream surges (millions of concurrent viewers) seamlessly│
+│    Collaboration        │ • Balances high compute cost of 4K/8K transcoding with creator tier status.  │
+│                         │ • Communicates copyright detection (Content ID) processing SLAs to creators. │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Video Ingestion:** Users can reliably upload high-resolution videos (up to 4K/8K, 50 GB) even over unstable mobile network connections.

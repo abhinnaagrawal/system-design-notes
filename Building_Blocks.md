@@ -80,8 +80,8 @@ When Node A and Node B want to sync, they execute a precise recursive network pr
 
 ```mermaid
 flowchart TD
-    classDef mismatch fill:#ffcccc,stroke:#ff0000,stroke-width:2px;
-    classDef match fill:#ccffcc,stroke:#00aa00,stroke-width:1px;
+    classDef mismatch stroke:#ff0000,stroke-width:2px;
+    classDef match stroke:#00aa00,stroke-width:2px;
 
     Root["Root Hash: Hash(H1 + H2) (MISMATCH)"]:::mismatch
     H1["Hash 1: Hash(H3 + H4) (MATCH)"]:::match
@@ -357,21 +357,21 @@ flowchart TD
         C1["Client types letter"] -->|Network Roundtrip| Serv["Central Server / Leader"]
         Serv -->|Wait for Ack / Consensus| DB[(Database)]
         DB -->|Ack Response| C1
-        style Serv fill:#ffdddd,stroke:#ff0000
+        style Serv stroke:#ff0000,stroke-width:2px
     end
 
     subgraph LWW["2. Naive Eventual Consistency (Last-Write-Wins)"]
         L1["Node A updates cart: Adds Apple"] --> Storage[(Database)]
         L2["Node B updates cart: Adds Banana"] --> Storage
         Storage --> Drop["🔥 Timestamp conflict: Node A's write discarded! Data lost!"]
-        style Drop fill:#ffcccc,stroke:#cc0000
+        style Drop stroke:#cc0000,stroke-width:2px
     end
 
     subgraph CRDT["3. Conflict-Free Replicated Data Types (CRDTs)"]
         CR1["Client A writes locally (0ms)"] --> Sync["Gossip / Sync Protocol"]
         CR2["Client B writes locally (0ms)"] --> Sync
         Sync --> Converge["⚡ Deterministic Mathematical Merge: Both Apple & Banana preserved!"]
-        style Converge fill:#ddffdd,stroke:#00aa00
+        style Converge stroke:#00aa00,stroke-width:2px
     end
 ```
 
@@ -539,7 +539,15 @@ Allows both increments and decrements.
 * ❌ **The Fatal Flaw:** Once an element is removed ($e \in R$), **it can never be added back**. Future adds will see $e \in R$ and consider it deleted forever.
 
 #### C. OR-Set (Observed-Remove Set) — *The Production Standard*
-The OR-Set solves the 2P-Set flaw by assigning a **unique tag (UUID or Lamport timestamp)** to every add operation.
+The OR-Set solves the 2P-Set flaw by assigning a **unique tag (UUID or Lamport timestamp)** to every add operation, allowing elements to be added, removed, and re-added indefinitely.
+
+> [!TIP]
+> **The Intuition: Why is it called "Observed-Remove"?**
+> Think of items as written on **sticky notes with unique serial numbers**:
+> * When you add `"Milk"`, you post a note: `("Milk", #101)`.
+> * When you remove `"Milk"`, you do not delete the abstract concept of Milk; you **only pull down the notes you currently observe on your replica** (you delete `#101`).
+> * If a peer concurrently added `"Milk"` with note `#102` on their replica, your removal operation *could not observe `#102`*. When replicas sync, note `#102` survives!
+> * This provides **Add-Wins (AWORSet)** semantics: concurrent adds naturally defeat removals without needing physical timestamps or central locks.
 
 ```mermaid
 sequenceDiagram
@@ -568,6 +576,7 @@ sequenceDiagram
 
 * **Add Operation:** Adding element $e$ creates a new pair $(e, u)$ where $u$ is a globally unique tag.
 * **Remove Operation:** Removing element $e$ searches the local replica for all existing pairs $(e, u)$ currently present and moves them to a tombstone set.
+* **Membership Rule:** An element $e$ is in the set if at least one of its pairs $(e, u) \in A$ has not been added to $R$. Re-adding $e$ always works because it receives a brand new tag $u_{\text{new}} \notin R$.
 * **Merge Rule:**
   $$A_{merged} = (A_1 \cup A_2) \setminus (R_1 \cup R_2)$$
 * **Add-Wins Semantics:** If Replica A removes "Milk" (deleting `tag_1`) while Replica B concurrently adds "Milk" (creating `tag_2`), the merged state retains `(Milk, tag_2)`. **The concurrent addition naturally wins over removal** without relying on arbitrary clocks!
@@ -595,7 +604,7 @@ flowchart TD
         OT_B["User B: insert('!', pos=4)"] --> OT_S
         OT_S --> OT_Trans["Transform indices based on concurrent ops:<br/>User B's pos 4 shifted to pos 5!"]
         OT_Trans --> OT_Cons["Requires Single Central Sequencing Server!"]
-        style OT_Cons fill:#ffeeee,stroke:#dd0000
+        style OT_Cons stroke:#dd0000,stroke-width:2px
     end
 
     subgraph TextCRDT["Text CRDTs (Automerge, Yjs)"]
@@ -603,7 +612,7 @@ flowchart TD
         CR_B["User B: insert('!') after ID_O"] --> CR_Net
         CR_Net --> CR_Id["Every character has an IMMUTABLE Unique ID.<br/>No index transformation required!"]
         CR_Id --> CR_P2P["Works Peer-to-Peer & Fully Offline!"]
-        style CR_P2P fill:#eeffee,stroke:#00aa00
+        style CR_P2P stroke:#00aa00,stroke-width:2px
     end
 ```
 
@@ -749,20 +758,131 @@ flowchart TD
 
 ---
 
-## 6. Real-World Production Implementations
+## 6. Fractional Indexing (Collaborative Ordering & Drag-and-Drop)
+
+In collaborative applications (Trello/Jira Kanban boards, Notion blocks, Figma layer trees, text document lines), items must maintain a **strict user-defined sequential order**. 
+
+How do you allow multiple users to insert, reorder, or drag-and-drop items concurrently without locking the table or rewriting the entire list?
+
+### A. The Integer Array Reindexing Dilemma (The Anti-Pattern)
+The naive approach assigns integer positions to items in a database:
+
+```
+Item A (pos = 0)
+Item B (pos = 1)
+Item C (pos = 2)
+Item D (pos = 3)
+```
+
+**The Disaster:** If a user drags **Item D** between **Item A** and **Item B**:
+* Item D becomes `pos = 1`.
+* Every subsequent item must be shifted down: Item B becomes `pos = 2`, Item C becomes `pos = 3`.
+* In a list of $10,000$ items, moving one card forces **$O(N)$ database updates**, massive write amplification, lock contention, and impossible merge conflicts if two users drag cards at the same time!
+
+---
+
+### B. The Fractional Indexing Solution
+Instead of discrete integers, assign each item a **continuous key from a dense ordered domain** (like floating-point numbers or lexicographical strings between $0$ and $1$):
+
+```
+Initial List:
+Item A  ──>  rank = 0.2
+Item B  ──>  rank = 0.5
+Item C  ──>  rank = 0.8
+```
+
+To insert an item between **Item A** ($0.2$) and **Item B** ($0.5$), simply compute the **midpoint**:
+$$p_{\text{new}} = \frac{p_A + p_B}{2} = \frac{0.2 + 0.5}{2} = \mathbf{0.35}$$
+
+* **Write Complexity:** Exactly **1 row updated** ($O(1)$ write)!
+* Sibling cards ($A, B, C$) are completely untouched.
+* Concurrent users dragging different cards update disjoint rows with zero lock conflicts.
+
+---
+
+### C. The Floating-Point Underflow Trap (Why Pure Floats Fail)
+In production, you **cannot use standard 64-bit IEEE 754 floating-point numbers**. 
+
+A standard 64-bit float has only **53 bits of mantissa precision**. If a user repeatedly drags cards to the top of a column (or repeatedly inserts characters at the start of a document):
+$$0.5 \to 0.25 \to 0.125 \to 0.0625 \dots$$
+After approximately **53 insertions**, the machine runs out of binary precision. The midpoint rounds to the boundary:
+$$\frac{0.0 + 10^{-16}}{2} \to 0.0 \quad \implies \mathbf{\text{COLLISION / CRASH!}}$$
+
+---
+
+### D. The Production Standard: Lexicographical String Indexing (Figma / Trello)
+Real-world systems (including **Figma's open-source `fractional-indexing` library** and **Trello**) use **variable-length ASCII strings** sorted alphabetically:
+
+```
+Initial List:
+Card 1  ──>  "a"
+Card 2  ──>  "b"
+Card 3  ──>  "c"
+```
+
+1. **Insert between `"a"` and `"b"`:** Generate the alphabetical midpoint $\implies$ **`"am"`**.
+2. **Insert between `"a"` and `"am"`:** Generate the midpoint $\implies$ **`"ag"`**.
+3. **Insert between `"a"` and `"ag"`:** Generate the midpoint $\implies$ **`"ad"`**.
+4. **Strings can grow to arbitrary length:** Unlike fixed 64-bit floats, strings can add characters dynamically, **never running out of precision**!
+
+```
+┌────────────────────────────────────────────────────────┐
+│   Alphabetical Ordering (Lexicographical String Ranks) │
+├────────────────────────────────────────────────────────┤
+│  "a"  <  "ad"  <  "ag"  <  "am"  <  "b"  <  "c"       │
+└────────────────────────────────────────────────────────┘
+```
+
+#### Handling Concurrent Collisions in CRDTs:
+What if Alice and Bob both drag a card between `"a"` and `"b"` at the exact same millisecond? Both generate `"am"`.
+* **Resolution:** Append a unique client identifier as a tie-breaker:
+  $$\text{Alice: } ("am", \text{client\_1}) \quad \text{vs.} \quad \text{Bob: } ("am", \text{client\_2})$$
+* Because `"client_1" < "client_2"`, all nodes deterministically sort Alice's card before Bob's card with zero communication!
+
+---
+
+## 7. The Production State of the Art (SOTA) vs. Academic Theory
+
+Academic literature is full of dozens of CRDT variants (WOOT, Treedoc, Logoot, 2P-Set). In real-world software engineering, the industry has consolidated around **three dominant SOTA paradigms**:
+
+### 1. Collaborative Rich Text & Documents: Yjs & Automerge
+* **The Academic Blunder:** Early academic CRDTs attached individual tree pointers and 64-byte metadata nodes to *every single typed letter*. A 100 KB document blew up into **10 MB of RAM** ($100\times$ bloat).
+* **The Modern SOTA:**
+  * **[Yjs](https://github.com/yjs/yjs) (YATA algorithm)** and **[Automerge](https://github.com/automerge/automerge) (Rust-backed Fugue algorithm)**.
+  * Rather than storing individual character nodes, they group consecutive keystrokes into **contiguous chunked arrays** (Struct Arrays) and compress edit histories using **Run-Length Encoded (RLE) columnar binary formats** (similar to Git packfiles or Apache Parquet).
+  * **Result:** Memory overhead dropped from $100\times$ down to **$\approx 1.2\times$**, syncing in microseconds.
+  * **Adopters:** **Apple Notes, JupyterLab, Affine, Anytype**.
+
+### 2. Multi-Region Active-Active Databases: Redis Enterprise & Riak KV
+* Distributed databases implement CRDTs as native database data structures to allow writes in all regions without distributed locks:
+  * **Strings (`SET`, `GET`):** Uses **LWW-Register** (Last-Write-Wins with NTP synchronization).
+  * **Sets (`SADD`, `SREM`):** Uses **Add-Wins OR-Set** (with unique internal UUID tags).
+  * **Counters (`INCR`, `DECR`):** Uses **PN-Counters** (partitioned by datacenter vectors).
+  * **Hashes (`HSET`):** Uses **Observed-Remove Map (OR-Map)** where each field is an independent register.
+
+### 3. The Pragmatic Hybrid: Figma's Scene Graph
+* Figma famously **does not use a pure peer-to-peer academic CRDT**.
+* **Figma's Architecture:**
+  * Uses a **Centralized WebSocket Server** that acts as an authoritative sequencer (ordering messages sequentially).
+  * Inside documents, individual 2D visual elements are modeled as **CRDT-inspired Last-Write-Wins property trees**.
+  * If Designer A changes a rectangle's `color` while Designer B moves its `x, y` position, both updates apply to different properties in the scene graph without conflicts or data loss.
+
+---
+
+## 8. Real-World Production Implementations
 
 | Technology / System | Use Case | CRDT Architecture |
 | :--- | :--- | :--- |
-| **Figma** | Real-time collaborative design canvas | Custom CRDT for scene graphs, color palettes, and property trees. |
+| **Figma** | Real-time collaborative design canvas | Central sequencer + CRDT-inspired LWW property trees + Fractional Indexing. |
 | **Apple Notes** | Offline note-taking synced across iOS/macOS | Uses CRDTs for rich text, checklist merges, and sketch layers. |
-| **Redis Enterprise** | Multi-region Active-Active geo-distribution | CRDT-based Redis Hashes, Sets, Sorted Sets, and Counters. |
-| **Automerge** | Open-source Local-First JSON / Text library | RGA text sequences, Lamport timestamps, columnar binary encoding. |
-| **Yjs** | High-performance shared types for web editors | Struct-based sequence CRDT, powering JupyterLab and Monaco Editor. |
+| **Redis Enterprise** | Multi-region Active-Active geo-distribution | CRDT-based Redis Hashes, Sets (AWORSet), and Counters (PN-Counter). |
+| **Automerge** | Open-source Local-First JSON / Text library | Fugue / RGA text sequences, Lamport timestamps, columnar binary encoding. |
+| **Yjs** | High-performance shared types for web editors | Struct-based sequence CRDT (YATA), powering JupyterLab and Monaco Editor. |
 | **Riak KV** | Distributed NoSQL key-value store | Built-in OR-Set, PN-Counter, and LWW-Register data types. |
 
 ---
 
-## 7. System Design Interview Playbook & Traps
+## 9. System Design Interview Playbook & Traps
 
 ### When to Propose CRDTs in an Interview
 
@@ -774,14 +894,18 @@ flowchart TD
     Req -->|Simple Uncorrelated Writes, Caching| Path3["<b>Use Last-Write-Wins (LWW)</b><br/>(Redis, Cassandra standard columns)"]
 ```
 
-#### Choose CRDTs when:
-1. The problem involves **collaborative editing, document synchronization, or live canvas tools** (Google Docs, Figma, Miro, Notion).
-2. The system must support **offline mobile clients** that sync changes seamlessly when regaining network connectivity.
-3. Multi-datacenter **active-active replication** where cross-region network latency cannot block local write throughput.
+#### The Staff Engineer Scenario Mapping Matrix:
+
+| Interview Scenario | State of the Art (SOTA) Recommendation | What to Propose in the Interview | The Critical Trap to Avoid |
+| :--- | :--- | :--- | :--- |
+| **Collaborative Document (Google Docs vs Notion)** | **OT** (Server-Centric) or **Chunked Sequence CRDT** (Local-First) | *"For web apps with stable connections, use **OT** with a central sequencer (Google Docs). For offline-first / mobile apps, use modern **chunked sequence CRDTs like Yjs/Automerge** with columnar run-length compression."* | Proposing academic per-character CRDTs that blow up memory by $100\times$. |
+| **Shopping Cart / Shared Checklist (Apple Notes)** | **Add-Wins OR-Set** | *"Use an **Observed-Remove Set (OR-Set)** with unique UUID tags per addition so items can be deleted and re-added offline without clock skew."* | Proposing a 2P-Set (deleted items can never be re-added). |
+| **Live Likes / Video Views (YouTube/TikTok)** | **PN-Counter** (Partitioned by Datacenter) | *"Each datacenter maintains its own local counter vector `[US: 50, EU: 30]`. Merging is a simple pairwise $\max()$ and $\text{sum}()$."* | **Never use PN-Counters for bank account balances or inventory!** CRDTs cannot enforce negative invariants ($balance \ge 0$). |
+| **Reordering a List (Trello / Jira Kanban)** | **Fractional Indexing** | *"Assign items lexicographical string positions. Moving an item calculates an alphabetical midpoint (e.g. between `'a'` and `'b'` $\to$ `'am'`), requiring **exactly 1 row write** with zero sibling shifts."* | Shifting integer array indices, causing $O(N)$ database updates and lock contention. |
 
 ---
 
-### The 4 Major Interview Traps
+### The 5 Major Interview Traps
 
 #### 1. The Financial Balance Trap (Counters vs. Bank Accounts)
 * **The Candidate Mistake:** *"I will use a PN-Counter CRDT to track a user's bank account balance across multiple regions."*
@@ -799,6 +923,10 @@ flowchart TD
 #### 4. The Tree Move Cycle Trap
 * **The Candidate Mistake:** Assuming moving a file/folder in a collaborative filesystem is a simple pointer update.
 * **The Staff Engineer Rule:** Explain the **Move Problem**: concurrent moves can introduce circular references ($A \subset B \subset A$), disconnecting subtrees from the root. Explain cycle detection and Lamport total ordering.
+
+#### 5. The Integer Array Reindexing Trap
+* **The Candidate Mistake:** Proposing integer position columns (`pos = 1, 2, 3...`) for collaborative lists or drag-and-drop boards.
+* **The Staff Engineer Rule:** Point out that reordering a single item requires shifting all subsequent rows ($O(N)$ database writes and write amplification). Propose **Fractional Indexing** with lexicographical strings to achieve $O(1)$ single-row updates.
 
 </details>
 
@@ -911,7 +1039,7 @@ flowchart TD
         C3[Client 3] --> API
         API -- "Cache Miss (TTL expired)" --> Cache[(Redis)]
         API -- "100k Concurrent Heavy Queries" --> DB[(Database)]
-        style DB fill:#ffcccc,stroke:#ff0000
+        style DB stroke:#ff0000,stroke-width:2px
     end
 ```
 
@@ -1709,7 +1837,7 @@ graph TD
     R["Read (R = QUORUM = 2)"] -->|Reads from| N2
     R -->|Reads from| N3
 
-    style N2 fill:#d4edda,stroke:#28a745,stroke-width:3px;
+    style N2 stroke:#28a745,stroke-width:3px;
     Note["Node 2 is the guaranteed overlap!<br/>Returns latest write timestamp."]
 ```
 
@@ -2657,7 +2785,7 @@ flowchart TD
         H_Router -->|Scatter| H_Node2
         H_Router -->|Scatter| H_Node3
         
-        style H_Router fill:#ffcccc,stroke:#ff0000
+        style H_Router stroke:#ff0000,stroke-width:2px
     end
 
     subgraph "Range Partitioning (Preserved Locality)"
@@ -2671,7 +2799,7 @@ flowchart TD
         R_Query --> R_Router
         R_Router -->|Targeted Query| R_Node1
         
-        style R_Router fill:#ccffcc,stroke:#00cc00
+        style R_Router stroke:#00cc00,stroke-width:2px
     end
 ```
 
@@ -2750,20 +2878,20 @@ A CDN places "Edge Servers" (also called Points of Presence or PoPs) in hundreds
 3.  **Delivery:** The user downloads the image directly from the server in their own city, drastically cutting load times.
 
 ```mermaid
-flowchart TD
-    User([User in Tokyo])
-    Edge[CDN Edge Server Tokyo]
-    Origin[(Origin Server NY)]
+sequenceDiagram
+    autonumber
+    actor User as User in Tokyo
+    participant Edge as CDN Edge Server (Tokyo)
+    participant Origin as Origin Server (NY)
 
-    User -- "1. Request image.jpg" --> Edge
-    Edge -- "2. Check Cache" --> Edge
-    
+    User->>Edge: Request image.jpg
+    Edge->>Edge: Check Cache
     alt Cache Miss
-        Edge -- "3. Fetch from Origin" --> Origin
-        Origin -- "4. Return image.jpg" --> Edge
-        Edge -- "5. Cache it & Serve User" --> User
+        Edge->>Origin: Fetch from Origin
+        Origin-->>Edge: Return image.jpg
+        Edge-->>User: Cache it & Serve User
     else Cache Hit
-        Edge -- "3. Serve instantly from Cache" --> User
+        Edge-->>User: Serve instantly from Cache
     end
 ```
 
@@ -2912,7 +3040,7 @@ For a given number of expected items $n$ and desired false positive probability 
 
 > [!TIP]
 > **Staff Engineer Rule of Thumb for Interviews:**
-> *   Allocating **$10$ bits per item** ($m/n = 10$) with **$k = 7$ hash functions** yields a **$\sim 1\%$ false positive rate**.
+> *   Allocating **$10$ bits per item** ($m/n = 10$) with **$k = 7$ hash functions** yields a **~1% false positive rate** ($\epsilon \approx 0.01$, or 1 in 120 items).
 > *   $1$ billion items $\times 10\text{ bits} = 10\text{ billion bits} \approx \mathbf{1.19\text{ GB RAM}}$ (compared to 1 TB for a raw HashSet!).
 
 ### D. System Design Production Use Cases
@@ -3010,9 +3138,81 @@ flowchart LR
     *   Otherwise: discard.
 4.  **Result:** Bounded $O(K)$ heap memory and $O(1)$ constant sketch memory, servicing live Top-K queries without memory leaks.
 
-### E. Other Production Use Cases
+### E. Counter Sizing, 4-Bit Packing & The Decay Mechanism (TinyLFU)
+
+In system design interviews, candidates often wonder: *what data type should the counters be, and what happens when counters saturate over time?*
+
+#### 1. Counter Sizing: Standard (32-bit) vs. Packed (4-bit)
+* **Standard Count-Min Sketch (32-bit / 64-bit int):**
+  * Used for unbounded streaming systems (Apache Flink, DDoS packet logging, Twitter hashtag analytics).
+  * Declared as a 2D array of standard integers: `matrix[d][w]` using `uint32` (counts up to **4.29 billion** without overflow).
+* **TinyLFU Cache Admission (4-bit counters, max count $= 15$):**
+  * Used in high-performance in-memory caches like **Caffeine Cache** (Window TinyLFU).
+  * **Why only 4 bits ($2^4 - 1 = 15$)?** An eviction policy only needs **relative recent frequency** (*"Is item A accessed more recently than victim item B?"*). An item accessed 15 times recently is already hot; knowing whether it was accessed 15 times or 50,000 times does not change the cache admission decision.
+  * **Memory optimization:** Two 4-bit counters are packed into a single 8-bit `uint8` byte (`byte & 0x0F` for the lower nibble, and `byte >> 4` for the upper nibble), cutting the sketch memory footprint in half.
+
+```
+1 Byte (8 bits) in Memory:
+┌──────────────────────┬──────────────────────┐
+│ Counter 1 (Upper 4b) │ Counter 2 (Lower 4b) │
+│ Range: 0 to 15       │ Range: 0 to 15       │
+└──────────────────────┴──────────────────────┘
+```
+
+#### 2. The Saturation Problem & The Decay (Aging / Halving) Mechanism
+* **The Problem:** A standard Count-Min Sketch only increments. Over time, two major failure modes occur:
+  1. Counters saturate at their maximum value (especially 4-bit counters stuck at 15).
+  2. **The "Stale Viral Post" Problem:** An item that went viral last Monday permanently keeps high counter values, preventing new breaking news items from ever overtaking it.
+* **The Solution (The Halving Trick):**
+  * Maintain a global counter $S$ tracking the total number of additions since the last reset.
+  * When $S$ reaches a threshold sample size $W$ (e.g., $W = 10 \times \text{cache size}$ or every $N$ seconds):
+    * Iterate through the entire $d \times w$ matrix and **divide every counter by 2** using a bitwise right-shift:
+      $$\text{sketch}[i][j] = \text{sketch}[i][j] \gg 1$$
+    * Reset the sample counter: $S \leftarrow S / 2$ (or $0$).
+* **The Mechanical Effect:**
+  * An item with count 14 drops to 7. An item with count 2 drops to 1. An item with count 1 drops to 0.
+  * Historical noise and obsolete traffic spikes decay exponentially ($1/2, 1/4, 1/8 \dots$).
+  * Fresh items can now easily accumulate new counts and surpass decaying old favorites!
+
+#### 3. Sample Code Declaration (Decaying Count-Min Sketch)
+```python
+class DecayingCountMinSketch:
+    def __init__(self, depth=5, width=2048, reset_threshold=10000):
+        self.d = depth
+        self.w = width
+        # 2D matrix of counters (e.g. 5 rows x 2048 columns)
+        self.table = [[0] * self.w for _ in range(self.d)]
+        self.seeds = [10007 * i for i in range(self.d)]
+        self.sample_size = 0
+        self.reset_threshold = reset_threshold  # Threshold W to trigger decay
+
+    def add(self, key: str, count: int = 1):
+        self.sample_size += count
+        for i in range(self.d):
+            col = hash_function(key, self.seeds[i]) % self.w
+            # Cap at 15 if using 4-bit counters, or let it grow if using standard uint32
+            self.table[i][col] = min(self.table[i][col] + count, 15)
+        
+        # Periodic Decay / Halving step
+        if self.sample_size >= self.reset_threshold:
+            self._decay()
+
+    def _decay(self):
+        """Halve all counters in the sketch to age out historical items."""
+        for i in range(self.d):
+            for j in range(self.w):
+                self.table[i][j] >>= 1  # Right shift by 1 = integer divide by 2
+        self.sample_size //= 2
+
+    def estimate(self, key: str) -> int:
+        return min(self.table[i][hash_function(key, self.seeds[i]) % self.w] for i in range(self.d))
+```
+
+---
+
+### F. Other Production Use Cases
 1.  **DDoS & Network Security:** Tracking packets per source IP address in network switches with hardware-limited TCAM memory.
-2.  **Caffeine Cache (Window TinyLFU):** Uses a 4-bit Count-Min Sketch to estimate the historical frequency of cache entries, admitting newly requested items only if their frequency exceeds the victim item being evicted.
+2.  **Caffeine Cache (Window TinyLFU):** Uses the decaying 4-bit Count-Min Sketch above to estimate the historical frequency of cache entries, admitting newly requested items only if their frequency exceeds the victim item being evicted.
 
 ---
 
@@ -3233,16 +3433,16 @@ Choosing the correct partition key is crucial to avoid the Scatter-Gather proble
 
 ```mermaid
 flowchart TD
-    subgraph Hash Partitioning (Inefficient for Range)
-        Q1[Query: Get all posts for User A] --> N1[Node 1]
-        Q1 --> N2[Node 2]
-        Q1 --> N3[Node 3]
-        note1(Requires querying every node and merging results)
+    subgraph HashPart ["Hash Partitioning (Inefficient for Range)"]
+        Q1["Query: Get all posts for User A"] --> N1["Node 1"]
+        Q1 --> N2["Node 2"]
+        Q1 --> N3["Node 3"]
+        note1["Requires querying every node and merging results"]
     end
     
-    subgraph Range Partitioning (Efficient for Range)
-        Q2[Query: Get all posts for User A] --> N4[Node 1]
-        note2(All posts for User A live on a single node)
+    subgraph RangePart ["Range Partitioning (Efficient for Range)"]
+        Q2["Query: Get all posts for User A"] --> N4["Node 1"]
+        note2["All posts for User A live on a single node"]
     end
 ```
 
@@ -3403,8 +3603,8 @@ flowchart LR
     PaySvc -.-> AccSvc[Accounting Service]
     AccSvc -->|3. Never Reached| AccDB[(Ledger DB)]
 
-    classDef fail fill:#ffebee,stroke:#c62828,stroke-width:2px;
-    classDef succ fill:#e8f8f5,stroke:#27ae60,stroke-width:2px;
+    classDef fail stroke:#c62828,stroke-width:2px;
+    classDef succ stroke:#27ae60,stroke-width:2px;
     class InvDB,AccDB fail;
     class PayDB succ;
 ```
@@ -3567,8 +3767,8 @@ flowchart LR
         C2 --> C1
     end
 
-    classDef txn fill:#e8f8f5,stroke:#27ae60,stroke-width:2px;
-    classDef comp fill:#ffebee,stroke:#c62828,stroke-width:2px;
+    classDef txn stroke:#27ae60,stroke-width:2px;
+    classDef comp stroke:#c62828,stroke-width:2px;
     class T1,T2,T3 txn;
     class C1,C2 comp;
 ```
@@ -4366,7 +4566,7 @@ flowchart TD
         W9 --> PartC[Partition C: 1,000 WCU]
     end
 
-    classDef hot fill:#ffcccc,stroke:#ff0000,stroke-width:3px;
+    classDef hot stroke:#ff0000,stroke-width:3px;
 ```
 
 ### Solutions for Hot Partitions
@@ -4557,8 +4757,8 @@ graph TD
     A -->|Handling shapes & disk pages| D["1984: R-Tree<br/>(Antonin Guttman)"]
     D -->|Overlap minimization heuristic| E["1990: R*-Tree<br/>(Beckmann et al.)"]
 
-    classDef legacy fill:#f9f9f9,stroke:#999,stroke-width:1px;
-    classDef prod fill:#d4edda,stroke:#28a745,stroke-width:2px;
+    classDef legacy stroke:#999,stroke-width:1px;
+    classDef prod stroke:#28a745,stroke-width:2px;
     class A,B legacy;
     class C,D,E prod;
 ```
@@ -4692,8 +4892,9 @@ GeoHash operates by recursively halving latitude and longitude intervals into bi
 4. **Base32 Encoding:** Group the resulting bit sequence into 5-bit chunks. Each 5-bit integer ($0\text{--}31$) maps to a character in a 32-character alphabet (`0-9`, `b-z`, omitting `a, i, l, o` to avoid visual confusion).
 
 ```
-Example: Latitude 40.7128, Longitude -74.0060 (New York City)
-Binary Interleaved Bits: 01101 10111 00101 11010 ...
+Example: Latitude 40.7484, Longitude -73.9857 (Midtown NYC / Empire State)
+Binary Interleaved Bits: 01100 10111 00101 10111 11010 ...
+Base32 Chunks:           12    23    5     23    26
 Base32 String:           d     r     5     r     u   ... -> "dr5ru"
 ```
 
@@ -6546,15 +6747,15 @@ While often used interchangeably, there is a strict mechanical difference.
 
 ```mermaid
 flowchart TD
-    subgraph Partitioning (Single Machine)
+    subgraph PartSingle ["Partitioning (Single Machine)"]
         DB_P[(Single Database)]
-        T1[Table: Orders 2023]
-        T2[Table: Orders 2024]
+        T1["Table: Orders 2023"]
+        T2["Table: Orders 2024"]
         DB_P --- T1
         DB_P --- T2
     end
     
-    subgraph Sharding (Multiple Machines)
+    subgraph ShardMulti ["Sharding (Multiple Machines)"]
         App[Application]
         DB_S1[(Shard 1)]
         DB_S2[(Shard 2)]
@@ -6590,8 +6791,8 @@ graph LR
         B2[created_at \n All writes hit latest shard!]:::bad
     end
     
-    classDef good fill:#d4edda,stroke:#28a745,stroke-width:2px;
-    classDef bad fill:#f8d7da,stroke:#dc3545,stroke-width:2px;
+    classDef good stroke:#28a745,stroke-width:2px;
+    classDef bad stroke:#dc3545,stroke-width:2px;
 ```
 
 1.  **High Cardinality:** Millions of unique values.
@@ -6647,7 +6848,7 @@ flowchart TD
     Traffic2[Justin Bieber \n Millions of followers] --> S2[(Shard 2 \n 🔥 MELTDOWN 🔥)]:::hot
     Traffic3[Normal User] --> S3[(Shard 3)]
     
-    classDef hot fill:#ffcccc,stroke:#ff0000,stroke-width:4px;
+    classDef hot stroke:#ff0000,stroke-width:3px;
 ```
 
 If Justin Bieber is on Shard 2, millions of fans will instantly overwhelm that single shard's CPU and network bandwidth.

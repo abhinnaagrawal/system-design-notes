@@ -24,7 +24,40 @@ Designing a distributed unique ID generator is a foundational interview topic th
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Unique ID Generators
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • UUIDv4 vs UUIDv7 (RFC 9562) vs Snowflake vs Centralized Ticket DB vs etcd. │
+│                         │ • 64-bit integer (BigInt) vs 128-bit string based on storage & network cost. │
+│                         │ • Evaluates trade-offs between coordination overhead and sequence ordering.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • B+ Tree index page-split penalties caused by non-sequential UUIDv4 inserts.│
+│    Proficiency          │ • Snowflake bit layout (1 sign + 41 time ms + 10 worker ID + 12 sequence).   │
+│                         │ • Sequence overflow spin-wait loop handling bursts $> 4,096 \text{ IDs/ms}$. │
+│                         │ • Clock drift defense: detects NTP backward time steps and pauses/slews.     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Derives bit allocation lifespans: $2^{41} \approx 69\text{ years}$,         │
+│    Analytical Thinking  │   $2^{10} = 1,024\text{ workers}$, $2^{12} = 4.096\text{M IDs/sec per node}$.│
+│                         │ • Quantifies storage tax: 8 bytes vs 16 bytes over 10 Billion DB rows.       │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Dynamic worker ID lease management in etcd/ZooKeeper for ephemeral pods.   │
+│    Mindset              │ • Monitors NTP synchronization offset via adjtimex / chrony.                 │
+│                         │ • Enforces zero cross-node network dependencies on the critical write path.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Adapts to cloud VM live-migration clock jumps without duplicate IDs.      │
+│    Collaboration        │ • Balances strict sequence monotonic ordering with multi-region independence.│
+│                         │ • Explains primary key indexing physics clearly to application developers.   │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Global Uniqueness:** No two entities generated across any datacenter or node can ever have the same ID.

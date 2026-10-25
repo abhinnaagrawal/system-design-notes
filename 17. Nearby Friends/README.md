@@ -27,7 +27,41 @@ While a junior engineer proposes basic Redis Pub/Sub per user, **Staff and Princ
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Nearby Friends & Real-Time Geolocation
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Stateful WebSocket Connection Manager vs HTTP Polling for location updates. │
+│                         │ • Peer-to-Peer Fanout (Publishing to friends' Pub/Sub) vs Spatial Cell Pub/Sub│
+│                         │ • Redis Geospatial Cluster vs Cassandra for live ephemeral coordinates.      │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Dynamic Geohash / Uber H3 hexagonal cell subscription channels.            │
+│    Proficiency          │ • Client battery preservation: Adaptive GPS duty cycle & accelerometer stationary│
+│                         │   detection (throttles pings from 10s to 5m when device is stationary).      │
+│                         │ • Privacy fuzzing: Gaussian spatial perturbation preventing stalking/triangulation│
+│                         │ • Ephemeral location expiry via Redis key TTLs (prunes offline friends).     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into WebSocket Gateway, Routing Bus, Redis Spatial Cache, PubSub.│
+│    Analytical Thinking  │ • Calculates 100M DAU, 10M concurrent active users, 333,000 location pings/sec│
+│                         │   and sizes Redis Pub/Sub memory footprint and network bandwidth bounds.     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Mitigates WebSocket reconnection storms on server deploy via random jitter. │
+│    Mindset              │ • Monitors packet loss and location update delivery lag.                     │
+│                         │ • Enforces privacy compliance: GDPR right-to-be-forgotten spatial wiping.    │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Adapts to cellular dead zones (tunnel/subway) via cached last-known positions│
+│    Collaboration        │ • Balances real-time friend proximity accuracy with strict user privacy laws.│
+│                         │ • Explains battery consumption and location permission UX clearly to product.│
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Real-Time Nearby Friends Discovery:** Users can view active friends within a 5-mile (configurable) radius on a map or list.

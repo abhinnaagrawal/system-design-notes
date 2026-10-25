@@ -266,10 +266,11 @@ flowchart TD
 #### Trap 1: *"How do you immediately revoke an access token if a user's phone is stolen, given that JWTs are stateless?"*
 *   **The Trap:** Probing whether you recognize that pure statelessness makes instantaneous revocation impossible without a stateful component.
 *   **The High-Scoring Response:**
-    > *"Stateless access tokens cannot be revoked by themselves until their expiration timestamp (`exp`). To defend against stolen devices:
-    > 1. We keep access token lifespans strictly bounded to **10 to 15 minutes**, limiting the exposure window.
-    > 2. When a user reports a stolen phone, the Auth server revokes the user's **Refresh Token** in the database, preventing the attacker from refreshing the session once the 15 minutes expire.
-    > 3. For immediate zero-second kill-switches, we write the `user_id` to an in-memory **Redis Revocation Blocklist** with a 15-minute TTL. Our API Gateway checks this Redis cache before proxying requests; if blacklisted, it rejects the JWT immediately."*
+    > *"Stateless access tokens cannot be revoked by themselves until their expiration timestamp (`exp`) because services verify cryptographic signatures locally. In production, we solve this across three progressive layers:
+    > 1. **Bounded Exposure Window (Default):** We keep access token lifespans strictly bounded to **10 to 15 minutes**. When a user logs out, the Auth server revokes the user's **Refresh Token** in the database. When the 15-minute access token expires, the client can no longer refresh.
+    > 2. **Instant Zero-Second Kill-Switch (Redis JTI Denylist):** Every JWT carries a unique token ID (`jti`). For emergency stolen-phone revocations, we write the token's `jti` to an in-memory **Redis Denylist** with a TTL set strictly to the token's *remaining lifespan*. Once the token naturally expires, Redis auto-evicts the key to prevent memory leaks. The API Gateway rejects any blacklisted `jti` immediately.
+    > 3. **Instant 'Log Out All Devices' (`token_version` Counter):** We store an integer `token_version` on the `users` table and embed it in the JWT payload. Incrementing `token_version = token_version + 1` (and updating Redis) invalidates all previously issued tokens across all phones, tablets, and sessions in a single write!
+    > 4. **Edge Gateway Isolation:** To keep backend microservices 100% fast and stateless, only the **Edge API Gateway** performs the Redis denylist check; once verified at the edge, the Gateway passes sanitized internal identity headers down the service mesh."*
 
 #### Trap 2: *"Why is symmetric HMAC (HS256) dangerous for microservice JWT verification compared to asymmetric RSA/ECDSA (RS256/ES256)?"*
 *   **The Trap:** Testing your knowledge of secret distribution across distributed architectures.

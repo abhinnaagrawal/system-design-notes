@@ -67,20 +67,20 @@ A CDN places "Edge Servers" (also called Points of Presence or PoPs) in hundreds
 3.  **Delivery:** The user downloads the image directly from the server in their own city, drastically cutting load times.
 
 ```mermaid
-flowchart TD
-    User([User in Tokyo])
-    Edge[CDN Edge Server Tokyo]
-    Origin[(Origin Server NY)]
+sequenceDiagram
+    autonumber
+    actor User as User in Tokyo
+    participant Edge as CDN Edge Server (Tokyo)
+    participant Origin as Origin Server (NY)
 
-    User -- "1. Request image.jpg" --> Edge
-    Edge -- "2. Check Cache" --> Edge
-    
+    User->>Edge: Request image.jpg
+    Edge->>Edge: Check Cache
     alt Cache Miss
-        Edge -- "3. Fetch from Origin" --> Origin
-        Origin -- "4. Return image.jpg" --> Edge
-        Edge -- "5. Cache it & Serve User" --> User
+        Edge->>Origin: Fetch from Origin
+        Origin-->>Edge: Return image.jpg
+        Edge-->>User: Cache it & Serve User
     else Cache Hit
-        Edge -- "3. Serve instantly from Cache" --> User
+        Edge-->>User: Serve instantly from Cache
     end
 ```
 

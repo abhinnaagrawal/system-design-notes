@@ -26,7 +26,40 @@ Designing a distributed, masterless Key-Value store (Amazon DynamoDB, Apache Cas
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Distributed Key-Value Stores
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Leaderless Dynamo (Cassandra/DynamoDB) vs Single-Leader vs Raft Consensus. │
+│                         │ • LSM-Tree (High-write sequential append) vs B+ Tree (High-read in-place).   │
+│                         │ • AP vs CP configuration tuned via Quorum read/write numbers ($N, W, R$).    │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Pigeonhole Principle proof of Quorum Consistency ($W + R > N$).            │
+│    Proficiency          │ • LSM-Tree write path (WAL -> Memtable -> Bloom Filter -> SSTable).          │
+│                         │ • Compaction strategy analysis: Size-Tiered (writes) vs Leveled (reads).     │
+│                         │ • Sloppy Quorums, Hinted Handoff, and Merkle-Tree Anti-Entropy repair.       │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes architecture into Coordinator, Hash Ring, Engine, Replication.  │
+│    Analytical Thinking  │ • Calculates RUM Conjecture bounds (Read vs Update vs Memory overhead).      │
+│                         │ • Derives IOPS and write amplification under heavy concurrent load.          │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Mitigates compaction I/O write storms via rate limiting & separate disks.  │
+│    Mindset              │ • Manages tombstone deletion accumulation and gc_grace_seconds bounds.       │
+│                         │ • Monitors Phi Accrual failure detection thresholds across datacenter links. │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Responds to network partitions by switching from Strong Quorum to AP mode. │
+│    Collaboration        │ • Balances strict immediate consistency against p99 latency SLA targets.     │
+│                         │ • Explains eventual consistency causal anomalies transparently to developers.│
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Core Operations:**

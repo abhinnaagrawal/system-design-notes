@@ -98,7 +98,55 @@ To mitigate the inability to revoke stateless JWTs, modern systems use a dual-to
   * **Client-side:** Refresh tokens *must* be stored securely (e.g., `HttpOnly` cookies or secure mobile enclaves).
   * **Server-side:** Refresh tokens *must* be stored in the database so they can be revoked (e.g., if a user clicks "Log out of all devices", or is banned).
 
-### 4. API Keys (Machine-to-Machine)
+### 4. Production Patterns for Token Revocation (The Stateless JWT Dilemma)
+
+> **The Core Problem:** Because a JWT is signed and stateless, any microservice can verify its signature locally without calling a database. If a user logs out, gets banned, or reports a stolen phone, **the client can keep sending the old valid signature**, and servers will continue accepting it until the expiration time.
+
+In production engineering and system design interviews, this is solved using four distinct patterns:
+
+#### A. Pattern 1: Bounded Window via Refresh Token Revocation (Standard 80/20)
+* **How it works:** Set Access Token lifespans strictly to **5 to 15 minutes**. When a user logs out, the Auth Server deletes their **Refresh Token** in the database.
+* **The Guarantee:** The compromised Access Token can only be used for whatever time remains on its 15-minute clock. Once that expires, the client is forced to present the Refresh Token, which is rejected.
+* **Trade-off:** 100% stateless performance for normal requests; creates an acceptable 5–15 minute exposure window.
+
+#### B. Pattern 2: Redis JTI Denylist with TTL Auto-Eviction (Instant Zero-Second Revocation)
+* **How it works:** Every JWT includes a unique identifier claim: `"jti": "<uuid>"`.
+* **Revocation Flow:**
+  1. When a user reports a stolen device or clicks "Log Out", write the token's `jti` to an in-memory Redis set:
+     ```bash
+     SET blacklist:<jti> "revoked" EX <remaining_seconds_until_exp>
+     ```
+  2. **The Auto-Eviction Trick:** Set the Redis TTL (`EX`) strictly to the **remaining lifespan of the token**. Once the token hits its natural expiration time, Redis automatically purges the key, preventing memory leaks!
+  3. The API Gateway checks `EXISTS blacklist:<jti>`. If found, it throws `401 Unauthorized`.
+
+#### C. Pattern 3: The `token_version` Counter (Instant "Log Out All Devices")
+* **How it works:** Add an integer column `token_version INT DEFAULT 1` to the `users` table.
+* Embed `"token_version": 1` inside every issued JWT.
+* **Revocation Flow:**
+  1. When a user changes their password or clicks "Log Out Everywhere":
+     ```sql
+     UPDATE users SET token_version = token_version + 1 WHERE id = 'user_123';
+     ```
+  2. Cache `user:123:token_version = 2` in Redis.
+  3. When verifying a token, compare `token.token_version == user.current_token_version`. Any token bearing version `1` is instantly rejected!
+  4. **Benefit:** One single write invalidates hundreds of tokens across all laptops, tablets, and phones simultaneously.
+
+#### D. Pattern 4: Hybrid Edge Gateway (Stateful at Edge, Stateless in Mesh)
+* In large microservice architectures, you don't want every internal service making Redis queries on every RPC hop.
+* **The Solution:**
+  1. **Edge API Gateway (Stateful):** Verifies the JWT signature AND checks the Redis denylist / user version.
+  2. **Internal Service Mesh (Stateless):** Once validated at the edge, the Gateway strips the raw JWT and forwards requests to downstream microservices with verified internal identity headers (`X-User-Id: 123`) or mints an ultra-short-lived (60-second) internal mTLS token.
+
+#### E. How Stateless Expiration Actually Works (`exp` claim)
+* **Does the server store the expiration date?** **No.**
+* The timestamp is encoded directly inside the JWT payload: `"exp": 1730000600`.
+* The server verifies the cryptographic signature (proving the client didn't edit the timestamp), and simply compares the claim against its **own system clock**:
+  $$\text{if } \text{server\_clock}() > \text{payload}["\text{exp}"] \implies \text{401 Token Expired}$$
+* Zero database calls, zero memory overhead.
+
+---
+
+### 5. API Keys (Machine-to-Machine)
 If JWTs are so scalable, why do services like AWS or Stripe issue opaque "API Keys"?
 * **Use Case:** JWTs are for humans (web/mobile apps). API Keys are for scripts, backend services, or developers.
 * **Request Flow:** Client sends the API Key in an `x-api-key` header. The server performs a database or Redis lookup to verify who the key belongs to.

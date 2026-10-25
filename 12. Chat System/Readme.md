@@ -26,7 +26,40 @@ Designing a large-scale real-time chat application (WhatsApp, Slack, Discord, Fa
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Real-Time Chat
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • WebSockets vs Server-Sent Events (SSE) vs Long Polling for 2-way traffic.   │
+│                         │ • Cassandra/ScyllaDB Wide-Column vs Relational SQL for message history.       │
+│                         │ • Message Fanout Model: Recipient Queues (small) vs Pub/Sub Channel (large).  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Ephemeral Presence Tracking using Redis heartbeat leases with short TTLs.   │
+│    Proficiency          │ • Monotonic sequence IDs per conversation thread for strict message ordering. │
+│                         │ • End-to-End Encryption (E2EE Signal Protocol Double Ratchet) architecture.  │
+│                         │ • Multi-device synchronization via `last_sync_seq_id` cursors.               │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into Gateway, Session Manager, Message Router, History, Push.   │
+│    Analytical Thinking  │ • Calculates 500M DAU, 10B msgs/day, 50M concurrent WebSocket connections,    │
+│                         │   and gateway RAM footprint (50M * 10KB = 500 GB RAM).                       │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Mitigates reconnect thundering herds on gateway restarts via random jitter. │
+│    Mindset              │ • Monitors message delivery receipts (Sent, Delivered, Read ACK pipeline).   │
+│                         │ • Seamless fallback to Push Notifications (APNs/FCM) for offline users.      │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Adapts to client network switches (WiFi to 5G) without losing message state.│
+│    Collaboration        │ • Balances high-frequency typing indicators with mobile battery constraints. │
+│                         │ • Communicates message retention policies and data privacy compliance.       │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **1-on-1 Real-Time Messaging:** Ultra-low latency two-way text communication.

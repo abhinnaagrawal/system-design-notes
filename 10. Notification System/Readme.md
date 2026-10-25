@@ -25,7 +25,40 @@ Designing a scalable notification system (like Amazon SNS/SES, Courier, or Twili
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Notification Systems
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Third-Party Gateways (APNs/FCM/Twilio/SendGrid) vs In-House Carriers.       │
+│                         │ • Priority Queue Segregation (P0 Transactional OTP vs P1 Marketing Bulk).    │
+│                         │ • Synchronous Dispatch vs Asynchronous Distributed Queues with DLQs.         │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Distributed deduplication via event hash (`user_id + template_id + data`) │
+│    Proficiency          │   stored in Redis with short TTL.                                            │
+│                         │ • Persistent HTTP/2 connection pooling with APNs to avoid TLS handshake churn│
+│                         │ • User opt-out preference matrices & local timezone quiet hour calculation.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into API Gateway, Fanout Router, Priority Queues, Dispatchers.  │
+│    Analytical Thinking  │ • Calculates 10M notifications/day (peak 10,000 QPS) & handles 1:1,000,000   │
+│                         │   fanout amplification during breaking news broadcasts.                      │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Mitigates vendor outages via dynamic fallback circuits (Twilio -> Sinch).  │
+│    Mindset              │ • Dead Letter Queue (DLQ) processing for expired/invalid APNs device tokens. │
+│                         │ • Rate-limiting & frequency capping to prevent notification fatigue.         │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Shields critical OTP security codes from marketing campaign queue jams.    │
+│    Collaboration        │ • Balances high-cost SMS delivery against low-cost Push notification fallback│
+│                         │ • Communicates delivery SLAs and bounce rate metrics clearly to leadership.  │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Multi-Channel Delivery:** Support iOS Push (APNs), Android Push (FCM), SMS (Twilio/Sinch), Email (SendGrid/Amazon SES), and In-App WebSockets.

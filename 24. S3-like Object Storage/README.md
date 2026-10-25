@@ -1,447 +1,312 @@
-# Chapter 24: S3-like Object Storage
+# Chapter 24: Design a Distributed S3-Compatible Object Storage System (Amazon S3 / Ceph / MinIO)
 
-## Introduction
-
-In this chapter, we'll be designing an **object storage** service, similar to **Amazon S3**.
-
-Storage systems fall into three broad categories:
-- **Block storage**
-- **File storage**
-- **Object storage**
-
-**Block storage** are devices, which came out in 1960s. HDDs and SSDs are such examples.
-These devices are typically physically attached to a server, although they can also be network-attached via high-speed network protocols.
-Servers can format the raw blocks and use them as a file system or it can hand control of them to servers directly.
-
-**File storage** is built on top of block storage. It provides a higher level of abstraction, making it easier to manage folders and files.
-
-**Object storage** sacrifices performance for high durability, vast scale and low cost.
-It targets "cold" data and is mainly used for archival and backup.
-There is no hierarchical directory structure, all data is stored as objects in a flat structure.
-It is relatively slow compared to other storage types. Most cloud providers have an object storage offering - Amazon S3, Google GCS, etc.
-
-<div style="margin-left:3rem">
-    <img src="./images/storage-comparison.png" alt="storage-comparison" width="500" />
-</div>
-
-|                 | Block Storage                    | File Storage                            | Object Storage                 |
-|-----------------|----------------------------------|-----------------------------------------|--------------------------------|
-| Mutable Content | Y                                | Y                                       | N (has object versioning）     |
-| Cost            | High                             | Medium to high                          | Low                            |
-| Performance     | Medium to high, very high        | Medium to high                          | Low to medium                  |
-| Consistency     | Strong consistency               | Strong consistency                      | Strong consistency [5]         |
-| Data access     | SAS/iSCSI/FC                     | Standard file access, CIFS/SMB, and NFS | RESTful API                    |
-| Scalability     | Medium scalability               | High scalability                        | Vast scalability               |
-| Good for        | Virtual machines (VM), databases | General-purpose file system access      | Binary data, unstructured data |
-
-Some terminology, related to object storage:
-- **Bucket** - logical container for objects. Name is globally unique.
-- **Object** - An individual piece of data, stored in a bucket. Contains object data and metadata.
-- **Versioning** - A feature keeping multiple variants of an object in the same bucket.
-- **Uniform Resource Identifier (URI)** - each resource is uniquely identified by a URI.
-- **Service-level Agreement (SLA)** - contract between service provider and client.
-
-Amazon S3 Standard-Infrequent Access storage class SLAs:
-- Durability of 99.999999999% across multiple Availability Zones
-- Data is resilient in the event of entire Availability Zone being destroyed
-- Designed for 99.9% availability
+**Sources & Foundational References:**
+- [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
+- [Finding a needle in Haystack: Facebook's photo storage (Beaver et al.)](https://www.usenix.org/legacy/event/osdi10/tech/full_papers/Beaver.pdf)
+- [Ceph: A Scalable, High-Performance Distributed File System (Weil et al.)](https://www.usenix.org/legacy/event/osdi06/tech/full_papers/weil/weil.pdf)
+- [Backblaze: Erasure Coding vs 3x Replication Durability Mathematics](https://github.com/Backblaze/erasure-coding-durability)
 
 ---
 
-## Step 1: Understand the Problem and Establish Design Scope
+## 1. Executive Interview Framing & Staff-Level Bar
 
-- C: Which features should be included?
-- I: Bucket creation, Object upload/download, versioning, Listing objects in a bucket
-- C: What is the typical data size?
-- I: We need to store both massive objects and small objects efficiently
-- C: How much data do we store in a year?
-- I: 100 petabytes
-- C: Can we assume 6 nines of data durbility (99.9999%) and service availability of 4 nines (99.99%)?
-- I: Yes, sounds reasonable
+Designing an S3-compatible distributed object storage platform (Amazon S3, Ceph RADOS, MinIO, Google Cloud Storage) is the ultimate test of **low-level filesystem mechanics, storage tier economics, data durability mathematics, and hardware I/O physics**. While mid-level candidates propose writing files directly to local directories and relying on standard 3x replication, **Staff and Principal Engineers (L6+, P60) are evaluated on their mechanical knowledge of the small-file POSIX inode exhaustion bottleneck (Facebook Haystack / Bitcask append-only container files), Reed-Solomon Erasure Coding ($8+4$ parity math), placement groups using Paxos/Raft consensus, read-after-write strong consistency, and asynchronous background compaction scrubbing**:
 
-### **Non-functional requirements**
-
-- **100 PB of data**
-- **6 nines of data durability**
-- **4 nines of service availability**
-- Storage efficiency. Reduce storage cost while maintaining high reliability and performance
-
-### **Back-of-the-envelope estimation**
-
-Object storage is likely to have bottlenecks in disk capacity or IO per second (IOPS).
-
-Assumptions:
-- we have 20% small (less than 1mb), 60% mid-size (1-64mb) and 20% large objects (greater than 64mb),
-- One hard disk (SATA, 7200rpm) is capable of doing 100-150 random seeks per second (100-150 IOPS)
-
-Given the assumptions, we can estimate the total number of objects the system can persist.
-- Let's use median size per object type to simplify calculation - 0.5mb for small, 32mb for medium, 200mb for large.
-- Given 100PB of storage (10^11 MB) and 40% of storage usage results in 0.68bil objects
-- If we assume metadata is 1kb, then we need 0.68tb space to store metadata info
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 THE INTERVIEW SPECTRUM                                 │
+├─────────────────────────┬──────────────────────────────────────────────────────────────┤
+│ L5 / Senior Engineer    │ L6+ / Staff & Principal Engineer                             │
+├─────────────────────────┼──────────────────────────────────────────────────────────────┤
+│ • Stores 1 file per     │ • Haystack / Bitcask container file pattern: Appends         │
+│   object on local disk  │   millions of small objects into large multi-GB append-only  │
+│   (POSIX inode crash)   │   files; indexes byte offsets in local RocksDB/SQLite RAM    │
+│ • Simple 3x replication │ • Reed-Solomon Erasure Coding ($8+4$): Delivers 11 Nines of  │
+│   (200% storage tax)    │   durability with only 50% storage overhead (massive savings)│
+│ • Ignores silent disk   │ • Continuous Bit-Rot Scrubbing: Background verification      │
+│   data corruption       │   using CRC32 / SHA-256 with parity reconstruction           │
+│ • Eventual consistency  │ • Read-After-Write Strong Consistency: Synchronous primary   │
+│   described vaguely     │   quorum write acknowledgment across failure domains         │
+│ • Basic HTTP PUT upload │ • S3 Multipart Upload State Machine with parallel chunking,  │
+│                         │   ETag validation, and orphan part garbage collection        │
+└─────────────────────────┴──────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Step 2: Propose High-Level Design and Get Buy-In
-
-Let's explore some interesting properties of object storage before diving into the design:
-- **Object immutability** - objects in object storage are immutable (not the case in other storage systems). We may delete them or replace them, but no update.
-- **Key-value store** - an object URI is its key and we can get its contents by making an HTTP call
-- **Write once, read many times** - data access pattern is writing once and reading many times. According to some Linkedin research, 95% of operations are reads
-- Support both small and large objects
-
-Design philosophy of object storage is similar to UNIX - when we save a file, it creates the filename in a data structure, called inode and file data is stored in different disk locations.
-The inode contains a list of file block pointers, which point to different locations on disk.
-
-When accessing a file, we first fetch its metadata from the inode, prior to fetching the file contents.
-
-Object storage works similarly - metadata store is used for file information, but contents are stored on disk:
-
-<div style="margin-left:3rem">
-    <img src="./images/object-store-vs-unix.png" alt="object-store-vs-unix" width="500" />
-</div>
-
-By separating metadata from file contents, we can scale the different stores independently:
-
-<div style="margin-left:3rem">
-    <img src="./images/bucket-and-object.png" alt="bucket-and-object" width="500" />
-</div>
-
-### **High-level design**
-
-<div style="margin-left:3rem">
-    <img src="./images/high-level-design.png" alt="high-level-design" width="500" />
-</div>
-
-- **Load balancer** - distributes API requests across service replicas
-- **API service** - Stateless server, orchestrating calls to metadata and object store, as well as IAM service.
-- **Identity and access management (IAM)** - central place for auth, authz, access control.
-- **Data store** - stores and retrieves actual data. Operations are based on object ID (UUID).
-- **Metadata store** - stores object metadata
-
-### **Uploading an object**
-
-<div style="margin-left:3rem">
-    <img src="./images/uploading-object.png" alt="uploading-object" width="500" />
-</div>
-
-- Create a bucket named "bucket-to-share" via HTTP PUT request
-- API service calls IAM to ensure user is authorized and has write permissions
-- API service calls metadata store to create a bucket entry. Once created, success response is returned.
-- After bucket is created, HTTP PUT is sent to create an object named "script.txt"
-- API service verifies user identity and ensures user has write permissions
-- Once validation passes, object payload is sent via HTTP PUT to the data store. Data store persists it and returns a UUID.
-- API service calls metadata store to create a new entry with object_id, bucket_id and bucket_name, among other metadata.
-
-Example object upload request:
+## 2. The 5-Pillar Staff Assessment Rubric for Object Storage
 
 ```
-PUT /bucket-to-share/script.txt HTTP/1.1
-Host: foo.s3example.org
-Date: Sun, 12 Sept 2021 17:51:00 GMT
-Authorization: authorization string
-Content-Type: text/plain
-Content-Length: 4567
-x-amz-meta-author: Alex
-
-[4567 bytes of object data]
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Storage Paradigm: Block vs File vs Object Storage tradeoffs.               │
+│                         │ • Durability Engine: 3x Replication vs Erasure Coding ($8+4$ Reed-Solomon). │
+│                         │ • Architecture: Decouples Metadata Store (DB) from Blob Data Store (Disks).  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Explains POSIX inode exhaustion & disk seek bottleneck on small files.     │
+│    Proficiency          │ • Derives Erasure Coding parity matrix math ($M$ failures tolerated with     │
+│                         │   $N+M$ encoding over Galois Fields $GF(2^8)$).                              │
+│                         │ • Implements Content-Addressable Storage (CAS) with SHA-256 deduplication.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes system into API Gateway, Placement Service, Data Nodes, Metadata│
+│    Analytical Thinking  │ • Calculates hardware requirements for 100 PB storage, 0.68 Billion objects, │
+│                         │   and SATA HDD IOPS limits (100 IOPS random vs 150 MB/s sequential).         │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Mitigates Silent Data Corruption (Bit Rot) via background data scrubbing.  │
+│    Mindset              │ • Designs compaction workers to reclaim disk space from tombstoned objects.  │
+│                         │ • Enforces multi-AZ failure domain isolation (Cross-Rack, Cross-Switch).    │
+│                         │ • Implements S3 lifecycle policies (Transitioning hot to cold S3 Glacier).   │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Handles sudden loss of an entire datacenter rack during peak traffic.      │
+│    Collaboration        │ • Balances computational CPU cost of erasure coding with cloud storage spend.│
+│                         │ • Explains durability SLAs (11 Nines) mathematically to enterprise customers.│
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### **Downloading an object**
-
-Buckets have no directory hierarchy, buy we can create a logical hierarchy by concatenating bucket name and object name to simulate a folder structure.
-
-Example GET request for fetching an object:
-
-```
-GET /bucket-to-share/script.txt HTTP/1.1
-Host: foo.s3example.org
-Date: Sun, 12 Sept 2021 18:30:01 GMT
-Authorization: authorization string
-```
-
-<div style="margin-left:3rem">
-    <img src="./images/download-object.png" alt="download-object" width="500" />
-</div>
-
-- Client sends an HTTP GET request to the load balancer, ie `GET /bucket-to-share/script.txt`
-- API service queries IAM to verify the user has correct permissions to read the bucket
-- Once validated, UUID of object is retrieved from metadata store
-- Object payload is retrieved from data store based on UUID and returned to the client
 
 ---
 
-// sprint 1
-
-## Step 3: Design Deep Dive
-
-### **Data store**
-
-Here's how the API service interacts with the data store:
-
-<div style="margin-left:3rem">
-    <img src="./images/data-store-interactions.png" alt="data-store-interactions" width="500" />
-</div>
-
-The data store's main components:
-
-<div style="margin-left:3rem">
-    <img src="./images/data-store-main-components.png" alt="data-store-main-components" width="500" />
-</div>
-
-The data routing service provides a RESTful or gRPC API to access the data node cluster.
-It is a stateless service, which scales by adding more servers.
-
-It's main responsibilities are:
-- querying the placement service to get the best data node to store data
-- reading data from data nodes and returning it to the API service
-- Writing data to data nodes
-
-The placement service determines which data nodes should store an object.
-It maintains a virtual cluster map, which determines the physical topology of a cluster.
-
-<div style="margin-left:3rem">
-    <img src="./images/virtual-cluster-map.png" alt="virtual-cluster-map" width="500" />
-</div>
-
-The service also sends heartbeats to all data nodes to determine if they should be removed from the virtual cluster.
-
-Since this is a critical service, it is recommended to maintain a cluster of 5 or 7 replicas, synchronized via Paxos or Raft consensus algorithms.
-Eg a 7 node cluster can tolerate 3 nodes failing.
-
-Data nodes store the actual object data.
-Reliability and durability is ensured by replicating data to multiple data nodes.
-
-Each data node has a daemon running, which sends heartbeats to the placement service.
-
-The heartbeat includes:
-- How many disk drives (HDD or SSD) does the data node manage?
-- How much data is stored on each drive?
-
-#### Data persistence flow
-
-<div style="margin-left:3rem">
-    <img src="./images/data-persistence-flow.png" alt="data-persistence-flow" width="500" />
-</div>
-
-- API service forwards the object data to data store
-- Data routing service sends the data to the primary data node
-- Primary data node saves the data locally and replicates it to two secondary data nodes. Response is sent after successful replication.
-- The UUID of the object is returned to the API service.
-
-Caveats:
-- Given an object UUID, it's replication group is deterministically chosen by using consistent hashing
-- In step 4, the primary data node replicates the object data before returning a response. This favors strong consistency over higher latency.
-
-<div style="margin-left:3rem">
-    <img src="./images/consistency-vs-latency.png" alt="consistency-vs-latency" width="500" />
-</div>
-
-#### How data is organized
-
-One simple approach to managing data is to store each object in a separate file.
-
-This works, but is not performant with many small files in a file system:
-- Data blocks on HDD are wasted, because every file uses the whole block size. Typical block size is 4kb.
-- Many files means many inodes. Operating systems don't deal well with too many inodes and there is also a max inode limit.
-
-These issues can be addressed by merging many small files into bigger ones via a write-ahead log (WAL). Once the file reaches its capacity (typically a few GB), a new file is created:
-
-<div style="margin-left:3rem">
-    <img src="./images/wal-optimization.png" alt="wal-optimization" width="500" />
-</div>
-
-The downside of this approach is that write access to the file needs to be serialized. Multiple cores accessing the same file must wait for each other.
-To fix this, we can confine files to specific cores to avoid lock contention.
-
-#### Object lookup
-
-To support storing multiple objects in the same file, we need to maintain a table, which tells the data node:
-- `object_id`
-- `filename` where object is stored
-- `file_offset` where object starts
-- `object_size`
-
-We can deploy this table in a file-based db like RocksDB or a traditional relational database.
-Since the access pattern is low write+high read, a relational database works better.
-
-How should we deploy it?
-We could deploy the db and scale it separately in a cluster, accessed by all data nodes.
-
-Downsides:
-- we'd need to aggressively scale the cluster to serve all requests
-- there's additional network latency between data node and db cluster
-
-An alternative is to take advantage of the fact that data nodes are only interested to data related to them,
-so we can deploy the relational db within the data node itself.
-
-SQLite is a good option as it's a lightweight file-based relational database.
-
-#### Updated data persistence flow
-
-<div style="margin-left:3rem">
-    <img src="./images/updated-data-persistence-flow.png" alt="updated-data-persistence-flow" width="500" />
-</div>
-
-- API Service sends a request to save a new object
-- Data node service appends the new object at the end of a file, named "/data/c"
-- A new record for the object is inserted into the object mapping table
-
-#### Durability
-
-Data durability is an important requirement in our design. In order to achieve 6 nines of durability, every failure case needs to be properly examined.
-
-First problem to address is hardware failures. We can achieve that by replicating data nodes to minimize probability of failure.
-But in addition to that, we also ought to replicate across different failure domains (cross-rack, cross-dc, separate networks, etc).
-A critical event can cause multiple hardware failures within the same domain:
-
-<div style="margin-left:3rem">
-    <img src="./images/failure-domain-isolation.png" alt="failure-domain-isolation" width="500" />
-</div>
-
-Assuming annual failure rate of a typical HDD is 0.81%, making three copies gives us 6 nines of durability.
-
-Replicating the data nodes like that grants us the durability we want, but we could also leverage erasure coding to reduce storage costs.
-
-Erasure coding enables us to use parity bits, which allow us to reconstruct lost bits in the event of a failure:
-
-<div style="margin-left:3rem">
-    <img src="./images/erasure-coding.png" alt="erasure-coding" width="500" />
-</div>
-
-Imagine those bits are data nodes. If two of them go down, they can be recovered using the remaining four ones.
-
-There are different erasure coding schemes. In our case, we could use 8+4 erasure coding, split across different failure domains to maximize reliability:
-
-<div style="margin-left:3rem">
-    <img src="./images/erasure-coding-across-failure-domains.png" alt="erasure-coding-across-failure-domains" width="500" />
-</div>
-
-Erasure coding enables us to achieve a much lower storage cost (50% improvement) at the expense of access speed due to the data routing service having to collect data from multiple locations:
-
-<div style="margin-left:3rem">
-    <img src="./images/erasure-coding-vs-replication.png" alt="erasure-coding-vs-replication" width="500" />
-</div>
-
-Other caveats:
-- Replication requires 200% storage overhead (in case of 3 replicas) vs. 50% via erasure coding
-- Erasure coding [gives us 11 nines of durability](https://github.com/Backblaze/erasure-coding-durability) vs 6 nines via replication
-- Erasure coding requires more computation to calculate and store parities
-
-In sum, replication is more useful for latency-sensitive applications, whereas erasure coding is attractive for storage cost efficiency and durability.
-Erasure coding is also much harder to implement.
-
-#### Correctness verification
-
-If a disk fails entirely, then the failure is easy to detect. This is less straightforward in the event part of the disk memory gets corrupted.
-
-To detect this, we can use checksums - a hash of the file contents, which can be used to verify the file's integrity.
-
-In our case, we'll store checksums for each file and each object:
-
-<div style="margin-left:3rem">
-    <img src="./images/checksums-for-correctness.png" alt="checksums-for-correctness" width="500" />
-</div>
-
-In the case of erasure coding (8+4), we'll need to fetch each of the 8 pieces of data separately and verify each of their checksums.
-
-// sprint 2
-
-### **Metadata data model**
-
-Table schemas:
-
-<div style="margin-left:3rem">
-    <img src="./images/metadata-data-model.png" alt="metadata-data-model" width="500" />
-</div>
-
-Queries we need to support:
-- Find an object ID by name
-- Insert/delete object based on name
-- List objects in a bucket sharing the same prefix
-
-There is usually a limit on the number of buckets a user can create, hence, the size of the buckets table is small and can fit into a single db server.
-But we still need to scale the server for read throughput.
-
-The object table will probably not fit into a single database server, though. Hence, we can scale the table via sharding:
-- Sharding by bucket_id will lead to hotspot issues as a bucket can have billions of objects
-- Sharding by bucket_id makes the load more evenly distributed, but our queries will be slow
-- We choose sharding by `hash(bucket_name, object_name)` since most queries are based on the object/bucket name.
-
-Even with this sharding scheme, though, listing objects in a bucket will be slow.
-
-### **Listing objects in a bucket**
-
-In a single database, listing an object based on its prefix (looks like a directory) works like this:
-
-```
-SELECT * FROM object WHERE bucket_id = "123" AND object_name LIKE `abc/%`
-```
-
-This is challenging to fulfill when the database is sharded. To achieve it, we can run the query on every shard and aggregate the results in-memory.
-This makes pagination challenging though, since different shards contain a different result size and we need to maintain separate limit/offset for each.
-
-We can leverage the fact that typically object stores are not optimized for listing objects, so we can sacrifice listing performance.
-We can also create a denormalized table for listing objects, sharded by bucket ID.
-That would make our listing query sufficiently fast as it's isolated to a single database instance.
-
-### **Object versioning**
-
-Versioning works by having another `object_version` column which is of type TIMEUUID, enabling us to sort records based on it.
-
-Each new version produces a new `object_id`:
-
-<div style="margin-left:3rem">
-    <img src="./images/object-versioning.png" alt="object-versioning" width="500" />
-</div>
-
-Deleting an object creates a new version with a special `object_id` indicating that the object was deleted. Queries for it return 404:
-
-<div style="margin-left:3rem">
-    <img src="./images/deleting-versioned-object.png" alt="deleting-versioned-object" width="500" />
-</div>
-
-### **Optimizing uploads of large files**
-
-Uploading large files can be optimized by using multipart uploads - splitting a big file into several chunks, uploaded independently:
-
-<div style="margin-left:3rem">
-    <img src="./images/multipart-upload.png" alt="multipart-upload" width="500" />
-</div>
-
-- Client calls service to initiate a multipart upload
-- Data store returns an upload ID which uniquely identifies the upload
-- Client splits the large file into several chunks, uploaded independently using the upload id
-- When a chunk is uploaded, the data store returns an etag, which is a md5 checksum, identifying that upload chunk
-- After all parts are uploaded, client sends a complete multipart upload request, which includes upload_id, part numbers and all etags
-- Data store reassembles the object from its parts. The process can take a few minutes. After that, success response is returned to the client.
-
-Old parts, which are no longer useful can be removed at this point. We can introduce a garbage collector to deal with it.
-
-### **Garbage collection**
-
-Garbage collection is the process of reclaiming storage space, which is no longer used. There are a few ways data becomes garbage:
-- **lazy object deletion** - object is marked as deleted without actually getting deleted
-- **orphan data** - eg an upload failed mid-flight and old parts need to be deleted
-- **corrupted data** - data which failed checksum verification
-
-The garbage collector is also responsible for reclaiming unused space in replicas.
-With replication, data is deleted from both primaries and replicas. With erasure coding (8+4), data is deleted from all 12 nodes.
-
-To facilitate the deletion, we'll use a process called compaction:
-- Garbage collector copies objects which are not deleted from "data/b" to "data/d"
-- `object_mapping` table is updated once copying is complete using a database transaction
-- To avoid making too many small files, compaction is done on files which grow beyond a certain threshold
-
-<div style="margin-left:3rem">
-    <img src="./images/compaction.png" alt="compaction" width="500" />
-</div>
+## 3. Requirements & System Scope
+
+### Functional Requirements
+1. **Bucket Management:** Create, delete, list, and configure access policies for globally unique buckets.
+2. **Object Upload & Download:** Upload and download immutable binary objects ranging from 1 KB (small avatars) to 50 GB (large video files) via S3-compatible REST APIs.
+3. **Object Versioning:** Support tracking multiple versions of an object under the same key with undelete capabilities.
+4. **Bucket Object Listing:** List objects in a bucket sharing a common prefix (e.g., `photos/2026/`) with cursor-based pagination.
+5. **Multipart Upload:** Resumable, parallel chunk uploads for objects exceeding 100 MB.
+
+### Non-Functional Requirements & Durability SLOs
+* **Scale:** Store **100 Petabytes of data** and support **0.68 Billion objects**.
+* **Data Durability:** **11 Nines (99.999999999%)** durability (annual probability of losing an object is $10^{-11}$).
+* **Service Availability:** **99.99% (4 Nines)** availability for read and write API endpoints.
+* **Storage Cost Efficiency:** Minimize hardware storage overhead while maintaining high read throughput.
+* **Consistency Model:** **Strong Read-After-Write Consistency** for `PUT` and `DELETE` requests.
 
 ---
 
-## Step 4: Wrap Up
+## 4. Back-of-the-Envelope Capacity Estimation
 
-Things we covered:
-- Designing an S3-like object storage
-- Comparing differences between object, block and file storages
-- Covered uploading, downloading, listing, versioning of objects in a bucket
-- Deep dived in the design - data store and metadata store, replication and erasure coding, multipart uploads, sharding
+```
+Total Storage Target: 100 Petabytes (100 * 10^15 Bytes)
+Object Distribution:
+  - Small Objects (< 1 MB, average 0.5 MB): 20% of storage
+  - Medium Objects (1-64 MB, average 32 MB): 60% of storage
+  - Large Objects (> 64 MB, average 200 MB): 20% of storage
+Hardware Spec: 12 TB 7200 RPM Enterprise SATA HDDs
+```
+
+### 4.1 Total Object Count Math
+* **Small Objects ($20\% = 20 \text{ PB}$):**
+  $$\text{Count}_{\text{small}} = \frac{20 \times 10^{15} \text{ bytes}}{0.5 \times 10^6 \text{ bytes}} = \mathbf{40 \text{ Billion small objects}}$$
+* **Medium Objects ($60\% = 60 \text{ PB}$):**
+  $$\text{Count}_{\text{medium}} = \frac{60 \times 10^{15} \text{ bytes}}{32 \times 10^6 \text{ bytes}} \approx \mathbf{1.875 \text{ Billion medium objects}}$$
+* **Large Objects ($20\% = 20 \text{ PB}$):**
+  $$\text{Count}_{\text{large}} = \frac{20 \times 10^{15} \text{ bytes}}{200 \times 10^6 \text{ bytes}} = \mathbf{100 \text{ Million large objects}}$$
+* **Total Objects in Metadata Catalog:** $\approx \mathbf{42 \text{ Billion objects}}$!
+  - At 1 KB of metadata per object (name, ETag, version, size, placement pointers):
+  $$\text{Metadata Storage} = 42 \times 10^9 \times 1 \text{ KB} \approx \mathbf{42 \text{ Terabytes}}$$
+
+### 4.2 Storage Efficiency: 3x Replication vs Erasure Coding
+* **Option A: 3x Replication (Replication Factor = 3):**
+  - Requires $100 \text{ PB} \times 3 = \mathbf{300 \text{ PB of raw disks}}$ ($200\%$ storage overhead).
+  - Annual disk cost is prohibitive.
+* **Option B: Reed-Solomon Erasure Coding ($8+4$):**
+  - 8 data chunks + 4 parity chunks.
+  - Storage overhead: $\frac{12}{8} = 1.5\times$ ($\mathbf{50\% \text{ overhead}}$).
+  - Requires only **150 PB of raw disks** (saving **150 PB of physical hardware**)!
+  - Delivers **11 Nines of durability**, tolerating the simultaneous failure of any 4 drives across different racks!
+
+---
+
+## 5. End-to-End High-Level Architecture
+
+```mermaid
+flowchart TD
+    Client["Client Application / SDK"] -->|1. S3 REST API (PUT/GET)| LB["Global Load Balancer"]
+    LB --> APIService["Stateless API Service Fleet<br/>• AuthN / IAM Validation<br/>• S3 REST Compatibility<br/>• Multipart Orchestration"]
+
+    subgraph MetadataTier["Metadata Tier"]
+        APIService <-->|2. Bucket & Object Metadata| MetadataDB[("Metadata DB Cluster<br/>(CockroachDB / Sharded MySQL)<br/>• bucket_id, object_name, version<br/>• Data placement pointers")]
+    end
+
+    subgraph PlacementControl["Cluster Topology & Consensus"]
+        PlacementService["Placement Service (Raft Consensus Quorum)<br/>• Monitors Data Node Heartbeats<br/>• Virtual Cluster Map & Failure Domains<br/>• Dispatches Replication & EC Plans"]
+    end
+
+    subgraph DataStorageTier["Blob Data Storage Tier"]
+        APIService <-->|3. Stream Chunks| DataRouting["Data Routing Service"]
+        PlacementService -.->|Broadcast Cluster Map| DataRouting
+        
+        DataRouting <--> Node1["Data Node 1 (Rack A)"]
+        DataRouting <--> Node2["Data Node 2 (Rack B)"]
+        DataRouting <--> Node3["Data Node 3 (Rack C)"]
+        DataRouting <--> Node4["Data Node 4 (Rack D)"]
+    end
+```
+
+---
+
+## 6. The Storage Engine Deep Dive: The Small File Problem (Haystack / Bitcask)
+
+A classic Principal Engineer interview trap: *"Why not save each uploaded object as an individual file on the data node filesystem (e.g., `/data/bucket/my_photo.jpg`)?"*
+
+### 6.1 The POSIX File System Collapse
+1. **Inode Exhaustion:** A standard Linux ext4 filesystem has a fixed number of inodes allocated at format time. Storing 40 Billion individual files exhausts inodes, crashing the filesystem even when petabytes of free disk space remain!
+2. **Random I/O Thrashing:** To read an individual file, the OS must:
+   - Read the directory inode.
+   - Read directory block pointers.
+   - Seek to the file inode.
+   - Seek to the actual data block.
+   Each seek requires mechanical disk head movement ($\approx 10\text{ms}$). A SATA drive capped at 100 IOPS can only serve **100 small file reads per second**!
+
+### 6.2 The SOTA Solution: Append-Only Container Files
+Instead of writing 1 file per object, use the **Facebook Haystack / Bitcask Pattern**:
+* The Data Node creates large, sequential, append-only container files (e.g. `/data/container_042.dat`, size: 32 GB).
+* Every new object is appended sequentially to the active container file.
+* A lightweight local embedded database (RocksDB or SQLite) maps:
+  $$\mathbf{\text{Object UUID}} \implies (\text{container\_id}, \text{file\_offset}, \text{object\_size})$$
+
+```mermaid
+flowchart LR
+    subgraph ContainerFile["Sequential 32 GB Container File (/data/container_042.dat)"]
+        O1["Object 1 (Offset 0, 500 KB)"] --> O2["Object 2 (Offset 512000, 1.2 MB)"]
+        O2 --> O3["Object 3 (Offset 1770496, 300 KB)"]
+        O3 --> Append["Next Append Position -> Sequential Disk Write!"]
+    end
+
+    subgraph RocksDBIndex["Local In-Memory Key Directory (RocksDB)"]
+        K1["UUID_1 -> Pos: 0, Size: 500KB"]
+        K2["UUID_2 -> Pos: 512000, Size: 1.2MB"]
+        K3["UUID_3 -> Pos: 1770496, Size: 300KB"]
+    end
+
+    RocksDBIndex -.-> ContainerFile
+```
+
+* **Read Operation:** Lookup `(file_offset, size)` in memory-mapped RocksDB ($< 0.1\text{ms}$), then execute a single direct disk seek (`fseek` + `pread`).
+* **Write Operation:** Pure sequential append. Achieves **150 MB/sec continuous write throughput per drive**, eliminating inode bloat completely!
+
+---
+
+## 7. Durability Engine: Reed-Solomon Erasure Coding ($8+4$)
+
+How does erasure coding achieve 11 nines of durability with only 50% overhead?
+
+```mermaid
+flowchart TD
+    RawObject["Original 8 MB Object Payload"] --> Splitter["Split into 8 Data Blocks (D1 to D8, 1 MB each)"]
+    Splitter --> FEC["Reed-Solomon FEC Encoder (Vandermonde Matrix in GF(2^8))"]
+    
+    FEC --> DataBlocks["8 Data Blocks: [D1, D2, D3, D4, D5, D6, D7, D8]"]
+    FEC --> ParityBlocks["4 Parity Blocks: [P1, P2, P3, P4]"]
+
+    DataBlocks & ParityBlocks --> Distribute["Distribute 12 Blocks across 12 Independent Racks / AZs"]
+```
+
+### 7.1 Mathematical Recovery Guarantee
+* We encode $K = 8$ data blocks into $K + M = 12$ total blocks (where $M = 4$ parity blocks).
+* **The Fundamental Theorem of Erasure Coding:** **Any $K$ blocks out of the $K + M$ blocks are mathematically sufficient to reconstruct the entire original object!**
+* If 4 hard drives, 4 servers, or even 4 complete datacenter racks catch fire simultaneously, the remaining 8 blocks invert the matrix and reconstruct the missing data with zero byte loss!
+
+### 7.2 Durability Comparison Matrix
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              DURABILITY & COST COMPARISON                              │
+├─────────────────────┬──────────────────┬──────────────────┬────────────────────────────┤
+│ Strategy            │ Durability       │ Storage Overhead │ Recovery Cost / Complexity │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 3x Replication      │ 6 Nines (99.9999%│ 200%             │ Trivial: Copy raw file from│
+│                     │ annual safety)   │ (100PB -> 300PB) │ any surviving replica node.│
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ Erasure Coding      │ 11 Nines         │ 50%              │ Higher CPU overhead:       │
+│ (8+4 Reed-Solomon)  │ (99.999999999%)  │ (100PB -> 150PB) │ Must fetch 8 blocks across │
+│                     │                  │                  │ network & run matrix math. │
+└─────────────────────┴──────────────────┴──────────────────┴────────────────────────────┘
+```
+
+---
+
+## 8. S3 Multipart Upload State Machine & Garbage Collection
+
+For large files ($> 100 \text{ MB}$ to $50 \text{ GB}$), uploading over a single HTTP connection is fragile: a momentary network glitch at 99% forces the user to restart from byte zero.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as User Client
+    participant API as S3 API Gateway
+    participant Meta as Metadata DB
+    participant Data as Data Routing & Nodes
+    participant GC as Garbage Collector
+
+    Client->>API: POST /bucket/large_video.mp4?uploads (Initiate)
+    API->>Meta: INSERT multipart_upload (status: 'IN_PROGRESS', upload_id)
+    API-->>Client: Return UploadId = "upload_9042"
+
+    par Parallel Uploads
+        Client->>API: PUT /bucket/large_video.mp4?partNumber=1&uploadId=9042 (Chunk 1: 10MB)
+        API->>Data: Store Chunk 1
+        Data-->>API: ETag = "md5_part1"
+        API-->>Client: HTTP 200 OK (ETag: "md5_part1")
+    and
+        Client->>API: PUT /bucket/large_video.mp4?partNumber=2&uploadId=9042 (Chunk 2: 10MB)
+        API->>Data: Store Chunk 2
+        Data-->>API: ETag = "md5_part2"
+        API-->>Client: HTTP 200 OK (ETag: "md5_part2")
+    end
+
+    Client->>API: POST /bucket/large_video.mp4?uploadId=9042 (Complete: [ETag1, ETag2...])
+    API->>Meta: Atomic TX: Verify parts, assemble manifest, promote to live object
+    API-->>Client: HTTP 200 OK (Object Created!)
+
+    alt Abandoned Upload (Client dies midway)
+        Note over GC: Background S3 Lifecycle Rule
+        GC->>Meta: Scan multipart_uploads WHERE status = 'IN_PROGRESS' AND created_at < NOW() - 7d
+        GC->>Data: Delete orphaned uncommitted part chunks
+        GC->>Meta: Mark upload 'EXPIRED'
+    end
+```
+
+---
+
+## 9. Silent Data Corruption (Bit Rot) & Compaction
+
+Hard drives occasionally suffer from **Bit Rot** (cosmic rays, magnetic degradation, or firmware bugs flip a bit silently without reporting an OS read error).
+
+### 9.1 Continuous Background Data Scrubbing
+1. A low-priority background scrubber daemon continuously scans data blocks on all data nodes.
+2. It recomputes the **CRC32C / SHA-256 checksum** of each stored chunk and compares it to the checksum recorded at write time.
+3. If a mismatch is detected, the scrubber alerts the Placement Service, downloads the remaining healthy Erasure Coding blocks from peer nodes, reconstructs the pristine block, and overwrites the corrupted drive sector.
+
+### 9.2 Container File Compaction (Garbage Collection)
+Because objects are immutable, updating or deleting an object simply appends a **Tombstone record** to the metadata catalog. The data chunk inside the 32 GB container file becomes dead space.
+* When dead space in a container exceeds **30%**:
+  - The compaction worker reads live objects from `container_042.dat`.
+  - Sequentially writes them into a fresh compacted file: `container_042_compacted.dat`.
+  - Atomically updates the RocksDB offset pointers.
+  - Deletes the old container file, reclaiming gigabytes of disk space!
+
+---
+
+## 10. Staff-Level Interviewer Curveballs & Adaptability Playbook
+
+### Curveball 1: "An entire datacenter rack containing 40 storage servers suddenly loses power. Clients are actively reading objects. What happens to read latency, and does the system panic?"
+* **Staff Answer:**
+  1. **Zero Data Loss via Failure Domain Placement:** Our Placement Service ensures that the 12 blocks of any Erasure Coded object ($8+4$) are distributed across **12 distinct racks**. Losing 1 rack knocks out at most **1 block per object**.
+  2. **Degraded Read Mode (Zero Reconstruct Overhead):** Because $K=8$ blocks are required, and 11 blocks are still online, the Data Routing service simply reads the surviving 8 data blocks directly. **No reconstruction math is executed**, keeping read latency fast!
+  3. **Reconstruction Rate Limiter:** The system does **not** immediately initiate emergency parity rebuilds (which would saturate network bandwidth with petabytes of traffic). It initiates a 15-minute grace timer. If the rack power returns, the blocks rejoin instantly. If the rack is dead permanently, throttled background rebuild workers restore parity over hours.
+
+### Curveball 2: "AWS S3 historically offered eventual consistency for overwrites, but switched to strong consistency in 2020. How would you design strong read-after-write consistency in your object store?"
+* **Staff Answer:**
+  1. **Atomic Metadata Promotion:** An object upload is never considered successful when data hits disk. The API service only returns HTTP `200 OK` after the metadata record is committed to a **distributed ACID metadata store (CockroachDB / Google Spanner)** using Raft consensus.
+  2. **Synchronous Quorum Invalidation:** Read requests for an object key are directed to the metadata leader, which guarantees reading the committed version timestamp before fetching blob bytes from storage nodes.
+
+### Curveball 3: "A customer bucket receives 50,000 requests per second targeting objects sharing the exact same prefix (`photos/2026/01/01/img_*.jpg`). The metadata shard crashes. How do you scale prefix access?"
+* **Staff Answer:**
+  1. **Identify the Partition Hotspot:** Sharding metadata strictly by prefix causes all 50,000 requests to hammer a single metadata database shard.
+  2. **Internal Hash Salting (S3 Prefix Auto-Partitioning):**
+     - Internally partition metadata by `hash(bucket_id + object_key) % num_shards`, distributing objects uniformly across all database nodes.
+     - For prefix-listing queries (`LIST bucket prefix="photos/"`), maintain an asynchronous secondary index or separate denormalized listing table.

@@ -25,7 +25,41 @@ Designing a web crawler (Googlebot, Bingbot, Internet Archive) is the definitive
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Web Crawlers
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Mercator Dual-Tier Frontier (Priority vs Politeness) vs Single FIFO Queue. │
+│                         │ • SimHash (Locality-Sensitive Hashing) vs MD5 for near-duplicate detection.  │
+│                         │ • Localized async DNS resolver cache fleet vs standard OS synchronous DNS.   │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Derives Bloom Filter RAM sizing formula ($N=5\text{B}, p=0.01\% \implies   │
+│    Proficiency          │   12\text{ GB RAM}$).                                                        │
+│                         │ • 64-bit SimHash Hamming distance calculation for near-duplicate web pages.  │
+│                         │ • Host-affinity consistent hashing ensuring strict single-worker politeness. │
+│                         │ • Non-blocking asynchronous I/O (epoll/kqueue) fetching thousands of sockets.│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into URL Frontier, DNS Resolver, HTML Fetcher, Parser, Deduper. │
+│    Analytical Thinking  │ • Calculates 1B pages/month throughput ($\approx 386\text{ pages/sec}$, peak │
+│                         │   $1,200\text{ QPS}$), network ingress (1.54 - 4.8 Gbps), and 6 PB storage.  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Spider trap defenses: Caps URL path depth, parameter counts, & regex loops.│
+│    Mindset              │ • Strictly honors `robots.txt` caching and per-domain `Crawl-delay` tokens.  │
+│                         │ • Checkpoints Frontier state to RocksDB to enable instant crash recovery.    │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Dynamically slows crawl rates when target servers return HTTP 429 or 503.  │
+│    Collaboration        │ • Balances aggressive search freshness with public internet politeness.      │
+│                         │ • Identifies crawler identity via transparent User-Agent headers.            │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **HTML & Metadata Crawling:** Fetch web pages, parse HTML, extract clean text, and discover outbound links.

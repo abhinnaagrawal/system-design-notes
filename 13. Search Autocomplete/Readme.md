@@ -26,7 +26,40 @@ Typeahead / Autocomplete is a core feature in Google, Amazon, YouTube, and Jira.
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Search Autocomplete
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • In-Memory Precomputed Top-K Trie vs DB `LIKE` queries vs Elasticsearch.     │
+│                         │ • Batch Offline Trie Build vs Real-Time Streaming Ingestion.                 │
+│                         │ • Evaluates trade-offs between global search popularity and personalized history│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Trie node structure storing Top-K precomputed suggestions ($O(L)$ query).   │
+│    Proficiency          │ • Double Buffering & Atomic Pointer Swapping in RAM for zero-lock updates.   │
+│                         │ • Count-Min Sketch / Sliding Window Flink for tracking real-time trends.     │
+│                         │ • Client debouncing (300ms), abort controllers, and prefix LRU caching.      │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into Data Collection, Trie Build, Trie Cache, & Query Service.  │
+│    Analytical Thinking  │ • Calculates 2 Billion queries/day (peak 70,000 QPS) and sizes Trie in RAM   │
+│                         │   ($\approx 30\text{ GB}$) using prefix hashing for uniform shard balance.   │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Trie snapshotting to S3 and fast cold-start in-memory rehydration.         │
+│    Mindset              │ • Immediate suppression filter for offensive/blacklisted keywords.           │
+│                         │ • Graceful degradation: falls back to empty suggestions if Trie times out.   │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Captures breaking viral news queries within 5 minutes without rebuilding.  │
+│    Collaboration        │ • Balances strict sub-15ms server latency with client network bandwidth cost.│
+│                         │ • Explains autocomplete ranking transparency and quality metrics to product. │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Prefix Matching:** Return relevant suggestions based on the user's input prefix.

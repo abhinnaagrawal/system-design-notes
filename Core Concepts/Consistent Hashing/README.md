@@ -169,7 +169,7 @@ flowchart TD
         H_Router -->|Scatter| H_Node2
         H_Router -->|Scatter| H_Node3
         
-        style H_Router fill:#ffcccc,stroke:#ff0000
+        style H_Router stroke:#ff0000,stroke-width:2px
     end
 
     subgraph "Range Partitioning (Preserved Locality)"
@@ -183,6 +183,6 @@ flowchart TD
         R_Query --> R_Router
         R_Router -->|Targeted Query| R_Node1
         
-        style R_Router fill:#ccffcc,stroke:#00cc00
+        style R_Router stroke:#00cc00,stroke-width:2px
     end
 ```

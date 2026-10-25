@@ -25,7 +25,40 @@ Designing a Proximity Service (Yelp, Google Places, TripAdvisor) requires indexi
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Proximity Services
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Google S2 Geometry (64-bit Hilbert) vs Geohash vs PostGIS vs Quadtree.     │
+│                         │ • In-Memory Spatial Cache (Redis Geospatial) vs Read-Only Spatial DB.        │
+│                         │ • Evaluates trade-offs between fixed geohash precision and boundary overlaps.│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • S2 spherical Hilbert curve projection yielding 1D integer range B-tree scans│
+│    Proficiency          │ • Geohash 8-neighbor lookup algorithm mitigating boundary clipping errors.   │
+│                         │ • Read-heavy architecture: caches top POIs per spatial cell in Redis.        │
+│                         │ • Separation of spatial index (`business_id, s2_cell_id`) from rich metadata.│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes into Spatial Query Service, Business CRUD, CDN, & Search Index. │
+│    Analytical Thinking  │ • Calculates 100M DAU, 200M businesses, and sizes spatial index ($< 10\text{ │
+│                         │   GB RAM}$) to fit entirely in memory; calculates search QPS.                │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Mitigates dense city center hotspots (Manhattan vs Montana density skew).  │
+│    Mindset              │ • Monitors p99 spatial query latency ($< 50\text{ms}$) under peak meal hours. │
+│                         │ • Read replicas across availability zones to handle read-heavy traffic.      │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Adapts search radius dynamically if POI density in cell is below threshold. │
+│    Collaboration        │ • Balances spatial accuracy with mobile battery/network bandwidth usage.     │
+│                         │ • Explains spatial query mechanics transparently to frontend and mobile teams│
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Nearby POI Search:** Return nearby businesses given user coordinates `(latitude, longitude)`, search radius (e.g. 500m to 20km), and optional category filters (e.g. "Sushi", "Gas Station").

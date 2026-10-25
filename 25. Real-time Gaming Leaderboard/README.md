@@ -1,450 +1,286 @@
-# Chapter 25: Real-time Gaming Leaderboard
+# Chapter 25: Design a Real-Time Gaming Leaderboard & Global Sales Rank (Redis ZSET, Skip Lists, Fenwick Trees)
 
-## Introduction
-
-We are going to design a **leaderboard** for an online mobile game:
-
-<div style="margin-left:3rem">
-    <img src="./images/leaderboard.png" alt="leaderboard" width="500" />
-</div>
+**Sources & Foundational References:**
+- [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
+- [The System Design Primer: Design Amazon's Sales Rank by Category (Donne Martin)](https://github.com/donnemartin/system-design-primer/blob/master/solutions/system_design/sales_rank/README.md)
+- [Redis Documentation: Under the Hood of Sorted Sets (Skip List & Dict)](https://redis.io/docs/data-types/sorted-sets/)
+- [A Skip List Cookbook (William Pugh)](https://drum.lib.umd.edu/handle/1903/542)
 
 ---
 
-## Step 1: Understand the Problem and Establish Design Scope
+## 1. Executive Interview Framing & Staff-Level Bar
 
-- C: How is the score calculated for the leaderboard?
-- I: User gets a point whenever they win a match.
-- C: Are all players included in the leaderboard?
-- I: Yes
-- C: Is there a time segment, associated with the leaderboard?
-- I: Each month, a new tournament starts which starts a new leaderboard.
-- C: Can we assume we only care about top 10 users?
-- I: We want to display top 10 users, along with position of specific user. If time permits, we can discuss showing users around particular user in the leaderboard.
-- C: How many users are in a tournament?
-- I: 5mil DAU and 25mil MAU
-- C: How many matches are played on average during a tournament?
-- I: Each player plays 10 matches per day on average
-- C: How do we determine the rank if two players have the same score?
-- I: Their rank is the same in that case. If time permits, we can discuss breaking ties.
-- C: Does the leaderboard need to be real-time?
-- I: Yes, we want to present real-time results or as close as possible to real-time. It is not okay to present batched result history.
-
-### **Functional requirements**
-
-- Display top 10 players on leaderboard
-- Show a user's specific rank
-- Display users which are four places above and below given user (bonus)
-
-### **Non-functional requirements**
-
-- Real-time updates on scores
-- Score update is reflected on the leaderboard in real-time
-- General scalability, availability, reliability
-
-### **Back-of-the-envelope estimation**
-
-With 50mil DAU, if the game has an even distribution of players during a 24h period, we'd have an average of 50 users per second.
-However, since distribution is typically uneven, we can estimate that the peak online users would be 250 users per second.
-
-QPS for users scoring a point - given 10 games per day on average, 50 users/s * 10 = 500 QPS. Peak QPS = 2500.
-
-QPS for fetching the top 10 leaderboard - assuming users open that once a day on average, QPS is 50.
-
----
-
-## Step 2: Propose High-Level Design and Get Buy-In
-
-### **API Design**
-
-The first API we need is one to update a user's score:
+Designing a high-throughput, low-latency leaderboard (gaming tournaments, Amazon sales ranks, LeetCode contest rankings) is the classic interview test of **specialized in-memory data structures, sharding tradeoffs, and streaming vs batch aggregation**. While mid-level candidates state "just put scores in a Redis ZSET," **Staff and Principal Engineers (L6+, P60) are evaluated on their mathematical mastery of Skip List pointer levels, tie-breaking score bit-encoding, score-range sharding with $O(1)$ keyspace aggregation, Fenwick Tree / Segment Tree alternatives for 100M+ users, and MapReduce / Spark batch ranking pipelines**:
 
 ```
-POST /v1/scores
-```
-
-This API takes two params - `user_id` and `points` scored for winning a game.
-
-This API should only be accessible to game servers, not end clients.
-
-Next one is for getting the top 10 players of the leaderboard:
-
-```
-GET /v1/scores
-```
-
-Example response:
-
-```
-{
-  "data": [
-    {
-      "user_id": "user_id1",
-      "user_name": "alice",
-      "rank": 1,
-      "score": 12543
-    },
-    {
-      "user_id": "user_id2",
-      "user_name": "bob",
-      "rank": 2,
-      "score": 11500
-    }
-  ],
-  ...
-  "total": 10
-}
-```
-
-You can also get the score of a particular user:
-
-```
-GET /v1/scores/{:user_id}
-```
-
-Example response:
-
-```
-{
-    "user_info": {
-        "user_id": "user5",
-        "score": 1000,
-        "rank": 6,
-    }
-}
-```
-
-### **High-level architecture**
-
-<div style="margin-left:3rem">
-    <img src="./images/high-level-architecture.png" alt="high-level-architecture" width="500" />
-</div>
-
-- When a player wins a game, client sends a request to the game service
-- Game service validates if win is valid and calls the leaderboard service to update the player's score
-- Leaderboard service updates the user's score in the leaderboard store
-- Player makes a call to leaderboard service to fetch leaderboard data, eg top 10 players and given player's rank
-
-An alternative design which was considered is the client updating their score directly within the leaderboard service:
-
-<div style="margin-left:3rem">
-    <img src="./images/alternative-design.png" alt="alternative-design" width="500" />
-</div>
-
-This option is not secure as it's susceptible to man-in-the-middle attacks. Players can put a proxy and change their score as they please.
-
-One additional caveat is that for games, where the game logic is managed by the server, cliets don't need to call the server explicitly to record their win.
-Servers do it automatically for them based on the game logic.
-
-One additional consideration is whether we should put a message queue between the game server and the leaderboard service. This would be useful if other services are interested in game results, but that is not an explicit requirement in the interview so far, hence it's not included in the design:
-
-<div style="margin-left:3rem">
-    <img src="./images/message-queue-based-comm.png" alt="message-queue-based-comm" width="500" />
-</div>
-
-### **Data models**
-
-Let's discuss the options we have for storing leaderboard data - relational DBs, Redis, NoSQL.
-
-The NoSQL solution is discussed in the deep dive section.
-
-#### Relational database solution
-
-If the scale doesn't matter and we don't have that many users, a relational DB serves our quite well.
-
-We can start from a simple leaderboard table, one for each month (personal note - this doesn't make sense. You can just add a `month` column and avoid the headache of maintaining new tables each month):
-
-<div style="margin-left:3rem">
-    <img src="./images/leaderboard-table.png" alt="leaderboard-table" width="500" />
-</div>
-
-There is additional data to include in there, but that is irrelevant to the queries we'd run, so it's omitted.
-
-What happens when a user wins a point?
-
-<div style="margin-left:3rem">
-    <img src="./images/user-wins-point.png" alt="user-wins-point" width="500" />
-</div>
-
-If a user doesn't exist in the table yet, we need to insert them first:
-
-```
-INSERT INTO leaderboard (user_id, score) VALUES ('mary1934', 1);
-```
-
-On subsequent calls, we'd just update their score:
-
-```
-UPDATE leaderboard set score=score + 1 where user_id='mary1934';
-```
-
-How do we find the top players of a leaderboard?
-
-<div style="margin-left:3rem">
-    <img src="./images/find-leaderboard-position.png" alt="find-leaderboard-position" width="500" />
-</div>
-
-We can run the following query:
-
-```
-SELECT (@rownum := @rownum + 1) AS rank, user_id, score
-FROM leaderboard
-ORDER BY score DESC;
-```
-
-This is not performant though as it makes a table scan to order all records in the database table.
-
-We can optimize it by adding an index on `score` and using the `LIMIT` operation to avoid scanning everything:
-
-```
-SELECT (@rownum := @rownum + 1) AS rank, user_id, score
-FROM leaderboard
-ORDER BY score DESC
-LIMIT 10;
-```
-
-This approach, however, doesn't scale well if the user is not at the top of the leaderboard and you'd want to locate their rank.
-
-#### Redis solution
-
-We want to find a solution, which works well even for millions of players without having to fallback on complex database queries.
-
-Redis is an in-memory data store, which is fast as it works in-memory and has a suitable data structure to serve our needs - sorted set.
-
-A sorted set is a data structure similar to sets in programming languages, which allows you to keep a data structure sorted by a given criteria.
-Internally, it is implemented using a hash-map to maintain mapping between key (user_id) and value (score) and a skip list which maps scores to users in sorted order:
-
-<div style="margin-left:3rem">
-    <img src="./images/sorted-set.png" alt="sorted-set" width="500" />
-</div>
-
-How does a skip list work?
-- It is a linked list which allows for fast search
-- It consists of a sorted linked list and multi-level indexes
-
-<div style="margin-left:3rem">
-    <img src="./images/skip-list.png" alt="skip-list" width="500" />
-</div>
-
-This structure enables us to quickly search for specific values when the data set is large enough.
-In the example below (64 nodes), it requires traversing 62 nodes in a base linked list to find the given value and 11 nodes in the skip-list case:
-
-<div style="margin-left:3rem">
-    <img src="./images/skip-list-performance.png" alt="skip-list-performance" width="500" />
-</div>
-
-Sorted sets are more performant than relational databases as the data is kept sorted at all times at the price of O(logN) add and find operation.
-
-In contract, here's an example nested query we need to run to find the rank of a given user in a relational DB:
-
-```
-SELECT *,(SELECT COUNT(*) FROM leaderboard lb2
-WHERE lb2.score >= lb1.score) RANK
-FROM leaderboard lb1
-WHERE lb1.user_id = {:user_id};
-```
-
-What operations do we need to operate our leaderboard in Redis?
-- **ZADD** - insert the user into the set if they don't exist. Otherwise, update the score. O(logN) time complexity.
-- **ZINCRBY** - increment the score of a user by given amount. If user doesn't exist, score starts at zero. O(logN) time complexity.
-- **ZRANGE/ZREVRANGE** - fetch a range of users, sorted by their score. We can specify order (ASC/DESC), offset and result size. O(logN+M) time complexity where M is result size.
-- **ZRANK/ZREVRANK** - Fetch the position (rank) of given user in ASC/DESC order. O(logN) time complexity.
-
-What happens when a user scores a point?
-
-```
-ZINCRBY leaderboard_feb_2021 1 'mary1934'
-```
-
-There's a new leaderboard created every month while old ones are moved to historical storage.
-
-What happens when a user fetches top 10 players?
-
-```
-ZREVRANGE leaderboard_feb_2021 0 9 WITHSCORES
-```
-
-Example result:
-
-```
-[(user2,score2),(user1,score1),(user5,score5)...]
-```
-
-What about user fetching their leaderboard position?
-
-<div style="margin-left:3rem">
-    <img src="./images/leaderboard-position-of-user.png" alt="leaderboard-position-of-user" width="500" />
-</div>
-
-This can be easily achieved by the following query, given that we know a user's leaderboard position:
-
-```
-ZREVRANGE leaderboard_feb_2021 357 365
-```
-
-A user's position can be fetched using `ZREVRANK <user-id>`.
-
-Let's explore what our storage requirements are:
-- Assuming worst-case scenario of all 25mil MAU participating in the game for a given month
-- ID is 24-character string and score is 16-bit integer, we need 26 bytes * 25mil = ~650MB of storage
-- Even if we double the storage cost due to the overhead of the skip list, this would still easily fit in a modern redis cluster
-
-Another non-functional requirement to consider is supporting 2500 updates per second. This is well within a single Redis server's capabilities.
-
-Additional caveats:
-- We can spin up a Redis replica to avoid losing data when a redis server crashes
-- We can still leverage Redis persistence to not lose data in the event of a crash
-- We'll need two supporting tables in MySQL to fetch user details such as username, display name, etc as well as store when eg a user won a game
-- The second table in MySQL can be used to reconstruct leaderboard when there is an infrastructure failure
-- As a small performance optimization, we could cache the user details of top 10 players as they'd be frequently accessed
-
----
-
-## Step 3: Design Deep Dive
-
-### **To use a cloud provider or not**
-
-We can either choose to deploy and manage our own services or use a cloud provider to manage them for us.
-
-If we choose to manage the services our selves, we'll use redis for leaderboard data, mysql for user profile and potentially a cache for user profile if we want to scale the database:
-
-<div style="margin-left:3rem">
-    <img src="./images/manage-services-ourselves.png" alt="manage-services-ourselves" width="500" />
-</div>
-
-Alternatively, we could use cloud offerings to manage a lot of the services for us. For example, we can use AWS API Gateway to route API calls to AWS Lambda functions:
-
-<div style="margin-left:3rem">
-    <img src="./images/api-gateway-mapping.png" alt="api-gateway-mapping" width="500" />
-</div>
-
-AWS Lambda enables us to run code without managing or provisioning servers ourselves. It runs only when needed and scales automatically.
-
-Exmaple user scoring a point:
-
-<div style="margin-left:3rem">
-    <img src="./images/user-scoring-point-lambda.png" alt="user-scoring-point-lambda" width="500" />
-</div>
-
-Example user retrieving leaderboard:
-
-<div style="margin-left:3rem">
-    <img src="./images/user-retrieve-leaderboard.png" alt="user-retrieve-leaderboard" width="500" />
-</div>
-
-Lambdas are an implementation of a serverless architecture. We don't need to manage scaling and environment setup.
-
-Author recommends going with this approach if we build the game from the ground up.
-
-### **Scaling Redis**
-
-With 5mil DAU, we can get away with a single Redis instance from both a storage and QPS perspective.
-
-However, if we imagine userbase grows 10x to 500mil DAU, then we'd need 65gb for storage and QPS goes to 250k.
-
-Such scale would require sharding.
-
-One way to achieve it is by range-partitioning the data:
-
-<div style="margin-left:3rem">
-    <img src="./images/range-partition.png" alt="range-partition" width="500" />
-</div>
-
-In this example, we'll shard based on user's score. We'll maintain the mapping between user_id and shard in application code.
-We can do that either via MySQL or another cache for the mapping itself.
-
-To fetch the top 10 players, we'd query the shard with the highest scores (`[900-1000]`).
-
-To fetch a user's rank, we'll need to calculate the rank within the user's shard and add up all users with higher scores in other shards.
-The latter is a O(1) operation as total records per shard can quickly be accessed via the info keyspace command.
-
-Alternatively, we can use hash partitioning via Redis Cluster. It is a proxy which distributes data across redis nodes based on partitioning similar to consistent hashing, but not exactly the same:
-
-<div style="margin-left:3rem">
-    <img src="./images/hash-partition.png" alt="hash-partition" width="500" />
-</div>
-
-Calculating the top 10 players is challenging with this setup. We'll need to get the top 10 players of each shard and merge the results in the application:
-
-<div style="margin-left:3rem">
-    <img src="./images/top-10-players-calculation.png" alt="top-10-players-calculation" width="500" />
-</div>
-
-There are some limitations with the hash partitioning:
-- If we need to fetch top K users, where K is high, latency can increase as we'll need to fetch a lot of data from all the shards
-- Latency increases as the number of partitions grows
-- There is no straightforward approach to determine a user's rank
-
-Due to all this, the author leans towards using fixed partitions for this problem.
-
-Other caveats:
-- A best practice is to allocate twice as much memory as required for write-heavy redis nodes to accommodate snapshots if required
-- We can use a tool called Redis-benchmark to track the performance of a redis setup and make data-driven decisions
-
-### **Alternative solution: NoSQL**
-
-An alternative solution to consider is using an appropriate NoSQL database optimized for:
-- heavy writes
-- effectively sorting items within the same partition by score
-
-DynamoDB, Cassandra or MongoDB are all good fits.
-
-In this chapter, the author has decided to use DynamoDB. It is a fully-managed NoSQL database, which offers reliable performance and great scalability.
-It also enables usage of global secondary indexes when we need to query fields not part of the primary key.
-
-<div style="margin-left:3rem">
-    <img src="./images/dynamo-db.png" alt="dynamo-db" width="500" />
-</div>
-
-Let's start from a table for storing a leaderboard for a chess game:
-
-<div style="margin-left:3rem">
-    <img src="./images/chess-game-leaderboard-table-1.png" alt="chess-game-leaderboard-table-1" width="500" />
-</div>
-
-This works well, but doesn't scale well if we need to query anything by score. Hence, we can put the score as a sort key:
-
-<div style="margin-left:3rem">
-    <img src="./images/chess-game-leaderboard-table-2.png" alt="chess-game-leaderboard-table-2" width="500" />
-</div>
-
-Another problem with this design is that we're partitioning by month. This leads to a hotspot partition as the latest month will be unevenly accessed compared to the others.
-
-We could use a technique called write sharding, where we append a partition number for each key, calculated via `user_id % num_partitions`:
-
-<div style="margin-left:3rem">
-    <img src="./images/chess-game-leaderboard-table-3.png" alt="chess-game-leaderboard-table-3" width="500" />
-</div>
-
-An important trade-off to consider is how many partitions we should use:
-- The more partitions there are, the higher the write scalability
-- However, read scalability suffers as we need to query more partitions to collect aggregate results
-
-Using this approach requires that we use the "scatter-gather" technique we saw earlier, which grows in time complexity as we add more partitions:
-
-<div style="margin-left:3rem">
-    <img src="./images/scatter-gather-2.png" alt="scatter-gather-2" width="500" />
-</div>
-
-To make a good evaluation on the number of partitions, we'd need to do some benchmarking.
-
-This NoSQL approach still has one major downside - it is hard to calculate the specific rank of a user.
-
-If we have sufficient scale to require us to shard, we could then perhaps tell users what "percentile" of scores they're in.
-
-A cron job can periodically run to analyze score distributions, based on which a user's percentile is determined, eg:
-
-```
-10th percentile = score < 100
-20th percentile = score < 500
-...
-90th percentile = score < 6500
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 THE INTERVIEW SPECTRUM                                 │
+├────────────────────────────────────────┬───────────────────────────────────────────────┤
+│ L5 / Senior Engineer                   │ L6+ / Staff & Principal Engineer              │
+├────────────────────────────────────────┼───────────────────────────────────────────────┤
+│ • "Just use Redis Sorted Set"          │ • Skip List internal mechanics (probabilistic │
+│ • SQL `ORDER BY score DESC LIMIT 10`   │   heights, $O(\log N)$ search/insert/rank)    │
+│ • Ignores score tie-breaking           │ • Bit-packed composite scoring for sub-second │
+│ • Blind hash-sharding of Redis ZSETs   │   tie-breaking: $S = \text{Score} \ll 32 \mid │
+│   (Requires expensive scatter-gather)  │   (\text{MaxTime} - \text{Timestamp})$        │
+│ • Ignores cheat prevention / tampering │ • Fixed Score-Range Sharding with fast $O(1)$ │
+│ • Real-time only (ignores batch rank)  │   prefix rank summation                       │
+│                                        │ • Server-authoritative win verification &     │
+│                                        │   HMAC anti-tampering nonces                  │
+│                                        │ • Hybrid architecture: Redis for real-time +  │
+│                                        │   Apache Spark / MapReduce for weekly ranks   │
+└────────────────────────────────────────┴───────────────────────────────────────────────┘
 ```
 
 ---
 
-## Step 4: Wrap Up
+## 2. The 5-Pillar Staff Assessment Rubric for Leaderboards
 
-Other things to discuss if time permits:
-- **Faster retrieval** - We can cache the user object via a Redis hash with mapping `user_id -> user object`. This enables faster retrieval vs. querying the database.
-- **Breaking ties** - When two players have the same score, we can break the tie by sorting them based on last played game.
-- **System failure recovery** - In the event of a large-scale Redis outage, we can recreate the leaderboard by going through the MySQL WAL entries and recreate it via an ad-hoc script
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Relational SQL vs Redis ZSET vs NoSQL (DynamoDB) vs Fenwick Tree.          │
+│                         │ • Hash Partitioning (Scatter-Gather) vs Fixed Score-Range Partitioning.      │
+│                         │ • Real-time streaming (Redis) vs Scheduled Batch MapReduce (Donne Martin).   │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Explains Skip List pointer arrays ($p = 0.25$ / $0.5$ geometric height    │
+│    Proficiency          │   distribution, span counts for $O(\log N)$ `ZRANK` calculation).             │
+│                         │ • Bit-encoding score ties without floating-point precision loss.             │
+│                         │ • Compares Fenwick Tree ($O(\log M)$ memory-efficient rank prefix sums).     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes architecture into Ingress, Score Validation, & Rank Queries.    │
+│    Analytical Thinking  │ • Calculates RAM footprint ($25\text{M MAU} \times 64\text{B} \approx        │
+│                         │   1.6\text{ GB}$) and peak write QPS ($2,500\text{ writes/sec}$).            │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Enforces server-authoritative scoring (never accept scores from clients).  │
+│    Mindset              │ • Sets up Redis replication (AOF + RDB snapshots) and disaster recovery from │
+│                         │   MySQL transactional write logs.                                            │
+│                         │ • Employs client-side caching with short TTLs for top-10 hot queries.        │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Scales system 100x when game goes viral (100M+ users across continents).   │
+│    Collaboration        │ • Balances strict global ranking with regional / friend-only leaderboards.   │
+│                         │ • Presents percentile approximations when exact global rank is too costly.   │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
+
+### Functional Requirements
+1. **Real-Time Score Updates:** When a player wins a match, their score increments and their global rank updates in real-time.
+2. **Top-K Leaderboard Retrieval:** Retrieve the top 10 (or top 100) players globally on demand.
+3. **Player Rank Lookup:** Display a specific player's exact rank and score.
+4. **Surrounding Neighbors (Bonus):** Display a player's immediate neighbors (e.g., 4 ranks above and 4 ranks below).
+5. **Periodic Reset (Tournaments):** Support monthly/weekly leaderboard seasons and historical archive queries.
+
+### Non-Functional Requirements & Performance SLOs
+* **Scale:** Support **5 Million Daily Active Users (DAU)** and **25 Million Monthly Active Users (MAU)**.
+* **Latency SLOs:**
+  - `GET /v1/scores/top10`: $< \mathbf{20ms}$ (p99).
+  - `GET /v1/scores/{user_id}` (Rank Lookup): $< \mathbf{20ms}$ (p99).
+  - `POST /v1/scores` (Score Update): $< \mathbf{50ms}$ (p99).
+* **High Availability & Fault Tolerance:** Leaderboard data must never be lost upon server crash; automated recovery must restore accurate ranks.
+* **Anti-Cheat Integrity:** Score updates must be strictly server-authoritative.
+
+---
+
+## 4. Back-of-the-Envelope Capacity Estimation
+
+```
+DAU: 5 Million players
+MAU: 25 Million players
+Matches per User: 10 matches / day
+Peak Traffic Multiplier: 5x
+```
+
+### 4.1 Throughput Math
+* **Score Update QPS:**
+  $$\text{Daily Matches} = 5,000,000 \times 10 = 50,000,000 \text{ matches / day}$$
+  $$\text{Average Write QPS} = \frac{50,000,000}{86,400} \approx \mathbf{578 \text{ writes / sec}}$$
+  $$\text{Peak Write QPS (5x)} \approx \mathbf{2,890 \text{ writes / sec}}$$
+* **Leaderboard Read QPS:**
+  - Assume each active user checks the leaderboard 2 times a day:
+  $$\text{Average Read QPS} = \frac{10,000,000}{86,400} \approx \mathbf{115 \text{ reads / sec}} \quad (\text{Peak: } \approx \mathbf{600 \text{ QPS}})$$
+* *Staff Takeaway:* A single Redis master instance can easily process **100,000+ QPS**. A single node with read replicas comfortably sustains 5M DAU. However, when scale reaches **100M+ users or 100,000 QPS**, horizontal sharding becomes mandatory.
+
+### 4.2 In-Memory Storage Math
+* Active monthly tournament: 25 Million entries.
+* Each entry in Redis Sorted Set:
+  - `member` (User ID UUID / string): 24 bytes
+  - `score` (64-bit IEEE double): 8 bytes
+  - Skip List node pointers & dictionary overhead: $\approx 32 \text{ bytes}$
+  - **Total per user:** $\approx 64 \text{ bytes}$
+* **Total RAM Footprint:**
+  $$25,000,000 \times 64 \text{ bytes} \approx \mathbf{1.6 \text{ GB RAM}}$$
+* *Staff Takeaway:* 1.6 GB of memory is trivial for modern cloud instances (e.g. AWS `r6g.large` with 16 GB RAM).
+
+---
+
+## 5. End-to-End High-Level Architecture
+
+```mermaid
+flowchart TD
+    Client["Game Mobile Client"] -->|1. Submit Game Move / Finish Match| GameServer["Authoritative Game Match Server"]
+    
+    subgraph AntiCheat["Anti-Cheat & Validation"]
+        GameServer -->|2. Validate Game Rules & Win Proof| RulesEngine["Match Validation Engine"]
+    end
+
+    RulesEngine -->|3. POST /v1/scores (points, user_id)| LeaderboardService["Leaderboard Service"]
+    
+    subgraph StorageTier["Hybrid Storage Tier"]
+        LeaderboardService -->|4. ZINCRBY (Sub-millisecond update)| RedisCluster[("Redis Cluster / Master-Replica<br/>• Monthly Tournament ZSET<br/>• Top 10 & Rank lookups")]
+        LeaderboardService -->|5. Asynchronous Audit Write| MySQL[("PostgreSQL / MySQL<br/>• Transaction Match History<br/>• Cold Season Archives")]
+    end
+
+    Client -->|6. GET /v1/scores/top10| APIGateway["API Gateway & Read Cache"]
+    APIGateway -->|ZREVRANGE 0 9| RedisCluster
+    Client -->|7. GET /v1/scores/me (My Rank)| APIGateway
+    APIGateway -->|ZREVRANK user_id| RedisCluster
+```
+
+> [!IMPORTANT]
+> **Anti-Cheat Protocol:** Clients must **NEVER** call the Leaderboard Service directly. The score update must originate from an **authoritative server-side game match engine** after verifying game mechanics. Allowing client-side score reporting opens the system to trivial proxy tampering.
+
+---
+
+## 6. Storage Engine Deep Dive: Why Redis Sorted Sets Win
+
+### 6.1 The Relational Database Failure Mode
+In a relational database (MySQL/PostgreSQL), computing a user's rank requires sorting:
+```sql
+SELECT user_id, score, 
+       RANK() OVER (ORDER BY score DESC) as player_rank
+FROM tournament_scores
+WHERE user_id = 'user_9042';
+```
+* **Performance:** Even with a B+ Tree index on `score`, calculating the exact rank of a user with a score of 1,200 requires scanning all rows with $\text{score} > 1200$. In a table with 25M rows, this scan takes **seconds**, locks pages, and pegs database CPU at 100%!
+
+### 6.2 The Skip List Internal Data Structure
+Redis Sorted Sets (`ZSET`) combine two data structures:
+1. **Hash Table (`dict`):** Maps `user_id` $\to$ `score` for **$O(1)$ score lookups**.
+2. **Skip List (`zskiplist`):** A probabilistic multi-level balanced linked list that keeps entries sorted by score.
+
+```mermaid
+flowchart LR
+    subgraph SkipListDiagram["Multi-Level Skip List (O(log N) Search & Rank)"]
+        L3["Level 3"] -->|span: 4| N4_L3["Node 4 (Score: 50)"] -->|span: 4| N8_L3["Node 8 (Score: 100)"]
+        L2["Level 2"] -->|span: 2| N2_L2["Node 2 (Score: 25)"] -->|span: 2| N4_L2["Node 4 (Score: 50)"] -->|span: 2| N6_L2["Node 6 (Score: 75)"] -->|span: 2| N8_L2["Node 8 (Score: 100)"]
+        L1["Level 1 (Base List)"] --> N1["Node 1 (10)"] --> N2["Node 2 (25)"] --> N3["Node 3 (40)"] --> N4["Node 4 (50)"] --> N5["Node 5 (60)"] --> N6["Node 6 (75)"] --> N7["Node 7 (90)"] --> N8["Node 8 (100)"]
+    end
+```
+
+### 6.3 Why `ZRANK` is $O(\log N)$ (The Span Optimization)
+Standard skip lists only store forward pointers. Redis extends each skip list pointer with a **`span` integer**—the number of base-level nodes skipped by that pointer.
+* To compute `ZRANK(user_id)`:
+  - Traverse down from the highest level.
+  - Accumulate the `span` values of all traversed forward pointers until the node is reached.
+  - The sum of spans is the **exact 0-based rank**!
+  - **Time Complexity:** $\mathbf{O(\log N)}$ comparisons $\approx \mathbf{25 \text{ pointer hops for 25M elements}} \approx \mathbf{0.002ms}$!
+
+### 6.4 Handling Score Ties: Sub-Second Composite Bit-Encoding
+When two players have the exact same score, who ranks higher?
+* **Business Rule:** The player who reached that score **earlier** must rank higher.
+* **The Staff Solution:** Encode the timestamp directly into a 64-bit integer or high-precision composite score:
+  $$\mathbf{S_{\text{effective}}} = \text{Score} + \left( 1 - \frac{\text{Timestamp}}{\text{MaxTimestamp}} \right)$$
+  - Because `Timestamp` increases over time, the fraction decreases.
+  - An earlier timestamp results in a strictly higher fraction, breaking ties deterministically with zero secondary lookups!
+
+---
+
+## 7. Scaling Beyond a Single Redis Node: 100M+ Users
+
+When a game scales to 100M+ users or 200,000 QPS, a single Redis master becomes saturated. How do you shard a sorted set?
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              LEADERBOARD SHARDING MODELS                               │
+├─────────────────────┬──────────────────┬──────────────────┬────────────────────────────┤
+│ Sharding Strategy   │ Rank Query Time  │ Top-10 Retrieval │ Major Tradeoff             │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 1. Hash Sharding    │ HORRIBLE:        │ Slower (Scatter- │ Cannot find user rank      │
+│    (hash(user_id))  │ Must query all   │ Gather across    │ without merging all shards │
+│                     │ shards to rank.  │ all shards).     │ in application code.       │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 2. Fixed Score-     │ ULTRA-FAST:      │ Blazing Fast     │ Uneven shard distribution  │
+│    Range Sharding   │ O(log N) inside  │ (Read top shard  │ if score ranges are poorly │
+│    ([0-500], etc)   │ shard + O(1) sum.│ only).           │ calibrated.                │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 3. Fenwick Tree /   │ Ultra-Fast       │ Ultra-Fast       │ Approximates rank for large│
+│    Segment Tree     │ O(log M) math;   │ O(log M) prefix  │ discrete score ranges;     │
+│    (Count Array)    │ minimal RAM.     │ sum.             │ perfect for game levels.   │
+└─────────────────────┴──────────────────┴──────────────────┴────────────────────────────┘
+```
+
+### 7.1 The Production Standard: Fixed Score-Range Sharding
+
+Divide the score space into discrete buckets across independent Redis instances:
+* Shard 1: Scores $[0 \dots 1,000)$
+* Shard 2: Scores $[1,000 \dots 2,000)$
+* Shard 3: Scores $[2,000 \dots 5,000)$
+* Shard 4: Scores $[5,000 \dots \infty)$ (Grandmaster Tier)
+
+```mermaid
+flowchart TD
+    UserQuery["Query Rank for User with Score 2,450"] --> Shard3["Shard 3: [2000 - 5000)"]
+    
+    Shard3 --> LocalRank["Local Rank in Shard 3 = 142<br/>(via ZREVRANK)"]
+    
+    Shard4["Shard 4: [5000+]<br/>Total Members = 12,500 (ZCARD)"] -.-> SumRank["Global Rank = 12,500 + 142 = 12,642!"]
+    LocalRank --> SumRank
+```
+
+* **Fetching Top-10:** Directly query Shard 4 (`ZREVRANGE 0 9`). No scatter-gather needed!
+* **Fetching User Rank:**
+  1. Determine user's current shard from their score ($S = 2450 \implies \text{Shard 3}$).
+  2. Compute local rank in Shard 3: `local_rank = ZREVRANK(user_id)`.
+  3. Sum the total player counts of all higher shards using `ZCARD`:
+     $$\text{Global Rank} = \text{ZCARD}(\text{Shard 4}) + \text{local\_rank}$$
+  4. Query completes in $< \mathbf{5ms}$ across network round trips!
+
+---
+
+## 8. Batch Historical Ranking: The MapReduce / Spark Architecture (Donne Martin)
+
+Not all leaderboards require sub-second live updates. For features like **Amazon's Sales Rank by Category** or **Weekly Tournament Final Standings**, calculating rankings over billions of historical transactions is performed via batch pipelines:
+
+```mermaid
+flowchart LR
+    SalesLogs["Raw Transaction Logs in S3 / HDFS<br/>(timestamp, product_id, category_id, qty)"] --> MapPhase["Map Phase<br/>Key: (category_id, product_id)<br/>Value: quantity"]
+    MapPhase --> ReducePhase["Reduce Phase<br/>Sum total quantity per (category, product)"]
+    ReducePhase --> SparkSort["Spark / MapReduce Secondary Sort<br/>Sort by total_sales DESC within category"]
+    SparkSort --> LandDB[("Relational / Document DB<br/>category_sales_rank table")]
+```
+
+### MapReduce Logic for Category Sales Rank
+1. **Mapper:** Emits `(category_id, product_id) -> sales_volume`.
+2. **Combiner / Reducer 1:** Aggregates total sales per product over the 7-day rolling window.
+3. **Reducer 2 (Total Ordering per Category):** Emits top 100 products per category into an indexed read-replica database.
+
+---
+
+## 9. Staff-Level Interviewer Curveballs & Adaptability Playbook
+
+### Curveball 1: "Redis crashes and loses the entire in-memory leaderboard during the final 5 minutes of a $1M esports tournament. How do you recover?"
+* **Wrong Answer:** "We wait for Redis RDB snapshot to restore." *(RDB snapshots are taken periodically; the last 5 minutes of writes will be lost!)*
+* **Staff Answer:**
+  1. **Dual-Write Architecture with Redis AOF:** Configure Redis with `appendonly yes` and `appendfsync everysec`, bounding worst-case unwritten in-memory loss to $< 1\text{ second}$.
+  2. **Authoritative Event Log Replay:** Every score update is logged as an immutable, sequenced event in a Kafka topic (`game-match-results`) before being written to Redis.
+  3. **Fast Re-materialization:** In the event of catastrophic loss, an in-memory streaming Flink/Go worker replays the Kafka topic from the start of the tournament, re-hydrating the Redis ZSET within 45 seconds.
+
+### Curveball 2: "Our user base grew to 500 Million players. Range sharding is struggling with score drift. Can we avoid Redis altogether?"
+* **Staff Answer:**
+  1. **Switch to a Fenwick Tree (Binary Indexed Tree) in Memory:**
+     - If game scores are integers bounded between $0$ and $100,000$, maintain an array `Count[Score]` storing how many players have each score.
+     - A Fenwick Tree updates in $O(\log M)$ and answers prefix sum queries (*"How many players have score $> S$?"*) in $O(\log M)$ where $M = 100,000$ (only 17 operations!).
+     - Memory footprint: $100,000 \times 4\text{ bytes} \approx \mathbf{400 \text{ KB RAM}}$ to rank 500 Million players!
+  2. **Percentile / Tier Representation:** For players outside the top 10,000, display **percentile buckets** (*"Top 1% Champion Tier"*) rather than exact integer rank.
+
+### Curveball 3: "A player exploits a game client bug and sends a packet claiming they scored 999,999 points in 1 second. How is this blocked?"
+* **Staff Answer:**
+  1. **Zero Client Authority:** The client only sends player inputs (keystrokes, coordinates, clicks). The match runs inside a headless, authoritative server container.
+  2. **Cryptographic Win Attestation:** If the game is peer-to-peer (mobile turn-based), both clients must co-sign the match outcome payload with ephemeral session keys. Mismatched claims are automatically flagged for anti-cheat human review.

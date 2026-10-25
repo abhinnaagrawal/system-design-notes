@@ -798,7 +798,7 @@ graph TD
     R["Read (R = QUORUM = 2)"] -->|Reads from| N2
     R -->|Reads from| N3
 
-    style N2 fill:#d4edda,stroke:#28a745,stroke-width:3px;
+    style N2 stroke:#28a745,stroke-width:3px;
     Note["Node 2 is the guaranteed overlap!<br/>Returns latest write timestamp."]
 ```
 

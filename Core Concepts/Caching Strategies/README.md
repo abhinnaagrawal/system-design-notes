@@ -103,7 +103,7 @@ flowchart TD
         C3[Client 3] --> API
         API -- "Cache Miss (TTL expired)" --> Cache[(Redis)]
         API -- "100k Concurrent Heavy Queries" --> DB[(Database)]
-        style DB fill:#ffcccc,stroke:#ff0000
+        style DB stroke:#ff0000,stroke-width:2px
     end
 ```
 

@@ -4,6 +4,8 @@
 
 **TL;DR:** Redis (Remote Dictionary Server) is an open-source, in-memory key-value data structure store engineered for sub-millisecond latency and $100\text{k}+$ QPS. Its speed is driven by an in-memory single-threaded **Reactor Event Loop** using non-blocking OS I/O multiplexing (`epoll`/`kqueue`), paired with highly optimized, byte-packed C data structures (SDS, Quicklist, Intset, SkipList). It solves cache eviction without pointer bloat via **Approximated LRU** and **Morris Counter LFU**, and provides durability via **AOF** and **RDB** snapshots over Copy-on-Write (CoW).
 
+> 🚀 **Quick Reference:** Looking for concrete interview commands, time complexities, and design pattern mappings? Jump directly to [Section 12: Master Cheat Sheet: Redis Commands & Primitives](#12-master-cheat-sheet-redis-commands--primitives-for-system-design-interviews).
+
 ---
 
 ## 1. Architecture: Single-Threaded Reactor Event Loop
@@ -1102,5 +1104,356 @@ flowchart TD
 > * For **Choreography**, propose **Apache Kafka with the Transactional Outbox Pattern (Debezium)** to guarantee atomic event publication from local microservice databases.
 > * Use **Redis** strictly as a helper for **distributed locking, step timeouts, and idempotency deduplication**.
 > * For the full architectural breakdown of **Two-Phase Commit (2PC) vs. SAGA** and why financial rails (Fedwire, ACH, SWIFT) strictly prohibit 2PC across banks in favor of multi-stage SAGAs with settlement finality and compensating returns, see [Message Brokers and Consistency: 2PC vs. SAGA & Banking Case Study](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Message%20Brokers%20and%20Consistency/README.md#c-2pc-vs-saga-industry-standards--architectural-boundaries).
+
+---
+
+## 12. Master Cheat Sheet: Redis Commands & Primitives for System Design Interviews
+
+When designing systems in interviews, using imprecise phrases like *"store it in Redis"* raises doubts about your production depth. Staff and Principal engineers specify the **exact Redis data structure, atomic commands, time complexity ($O$), and failure modes**.
+
+---
+
+### A. The System Design Pattern $\leftrightarrow$ Redis Primitive Quick-Lookup Matrix
+
+| System Design Use Case | Best Redis Primitive | Core Commands Used | Time Complexity | Why This Primitive? | Chapter / Pattern Reference |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Distributed Lock** | String (`NX`, `PX`) | `SET key token NX PX 30000`<br>`EVAL` (safe release script) | $O(1)$ | Guarantees mutual exclusion atomically without separate `SET` + `EXPIRE` race condition. | [04. Rate Limiter](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/Readme.md), [Ch 26](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/Readme.md) |
+| **Idempotency Guard** | String (`NX`, `EX`) | `SET idemp:key "PROCESSING" NX EX 120`<br>`SET idemp:key resp XX EX 86400` | $O(1)$ | Prevents duplicate processing of payments/orders under network retries. | [08. URL Shortener](file:///Users/abhinnaagarwal/Documents/system-design-notes/08.%20URL%20Shortener/Readme.md), [Ch 26](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/Readme.md) |
+| **Rate Limiter (Fixed Window)** | String (Atomic Counter) | `INCR key`<br>`EXPIRE key 60 NX` | $O(1)$ | Ultra-low memory ($O(\text{users})$); ideal for coarse perimeter rate limiting. | [04. Rate Limiter](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/Readme.md), [Ch 30](file:///Users/abhinnaagarwal/Documents/system-design-notes/30.%20Distributed%20Rate%20Limiter/Readme.md) |
+| **Rate Limiter (Sliding Log)** | Sorted Set (`ZSET`) | `ZREMRANGEBYSCORE key 0 (now-60)`<br>`ZCARD key`<br>`ZADD key now uuid` | $O(\log N + M)$ | Exact rolling window without boundary burst leakage. Memory is $O(\text{requests})$. | [04. Rate Limiter](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/Readme.md), [Ch 30](file:///Users/abhinnaagarwal/Documents/system-design-notes/30.%20Distributed%20Rate%20Limiter/Readme.md) |
+| **Real-time Leaderboard** | Sorted Set (`ZSET`) | `ZADD lb score player`<br>`ZINCRBY lb delta player`<br>`ZREVRANK lb player`<br>`ZREVRANGE lb 0 9` | $O(\log N)$ insert<br>$O(\log N)$ rank<br>$O(\log N + K)$ range | SkipList maintains elements in sorted order dynamically; $O(\log N)$ rank queries. | [25. Gaming Leaderboard](file:///Users/abhinnaagarwal/Documents/system-design-notes/25.%20Real-time%20Gaming%20Leaderboard/Readme.md) |
+| **Delayed Task Scheduler** | Sorted Set (`ZSET`) | `ZADD delay_queue run_epoch task_id`<br>`ZRANGEBYSCORE delay_queue 0 now LIMIT 0 100`<br>`ZREM delay_queue task_id` | $O(\log N + M)$ | Score is Unix timestamp. Poller pulls eligible tasks due for execution atomically. | [31. Job Scheduler](file:///Users/abhinnaagarwal/Documents/system-design-notes/31.%20Distributed%20Job%20Scheduler/Readme.md) |
+| **Capped Activity Feed / Timeline** | List or Sorted Set | `LPUSH feed:user item`<br>`LTRIM feed:user 0 799`<br>OR `ZADD` + `ZREMRANGEBYRANK` | $O(1)$ push<br>$O(K)$ trim | Caps memory usage per user; prevents feeds from growing unbounded in RAM. | [11. News Feed](file:///Users/abhinnaagarwal/Documents/system-design-notes/11.%20News%20Feed%20System/Readme.md) |
+| **FIFO Task Queue** | List (Blocking Pop) | `RPUSH work_queue task`<br>`BLPOP work_queue 5`<br>`LMOVE q1 q2 RIGHT LEFT` | $O(1)$ | Eliminates busy polling; workers sleep until new jobs arrive. | [10. Notification](file:///Users/abhinnaagarwal/Documents/system-design-notes/10.%20Notification%20System/Readme.md), [Ch 31](file:///Users/abhinnaagarwal/Documents/system-design-notes/31.%20Distributed%20Job%20Scheduler/Readme.md) |
+| **User Entity Profile Cache** | Hash | `HSET user:101 name "Alice" plan "pro"`<br>`HGETALL user:101`<br>`HINCRBY user:101 logins 1` | $O(1)$ per field<br>$O(N)$ for all fields | Allows partial field updates without re-serializing entire JSON blob. | [01. Scaling](file:///Users/abhinnaagarwal/Documents/system-design-notes/01.%20Scaling/Readme.md) |
+| **Faceted Search / Tag Filter** | Set | `SADD tag:bug item_1`<br>`SINTER tag:bug tag:p0`<br>`SINTERSTORE dest tag1 tag2` | $O(1)$ add<br>$O(N \times M)$ intersection | Eliminates multi-join relational query explosions for multi-tag filtering. | [29. Tagging Service](file:///Users/abhinnaagarwal/Documents/system-design-notes/29.%20Tagging%20Service/Readme.md) |
+| **Daily Active Users (DAU/MAU)** | Bitmap (Bitset) | `SETBIT active:YYYY-MM-DD user_id 1`<br>`BITCOUNT active:YYYY-MM-DD`<br>`BITOP AND dest key1 key2` | $O(1)$ bit set<br>$O(N)$ bit count | 100M users tracked in just $12.5\text{ MB}$ RAM! Bitwise AND gives multi-day retention. | [20. Metrics](file:///Users/abhinnaagarwal/Documents/system-design-notes/20.%20Metrics%20Monitoring%20and%20Alerting%20System/Readme.md) |
+| **Unique Visitors / Cardinality** | HyperLogLog (HLL) | `PFADD visitors:url ip_or_uid`<br>`PFCOUNT visitors:url`<br>`PFMERGE dest k1 k2` | $O(1)$ | Standard error $0.81\%$, but caps memory at **max 12 KB** regardless of billions of elements. | [08. URL Shortener](file:///Users/abhinnaagarwal/Documents/system-design-notes/08.%20URL%20Shortener/Readme.md), [Ch 21](file:///Users/abhinnaagarwal/Documents/system-design-notes/21.%20Ad%20Click%20Event%20Aggregation/Readme.md) |
+| **Nearby Drivers / POI Search** | Geospatial (Geo) | `GEOADD drivers lon lat driver_1`<br>`GEOSEARCH drivers FROMLONLAT lon lat BYRADIUS 5 km WITHDIST` | $O(N + \log M)$ | Encodes coordinates into 52-bit Geohash on top of a Sorted Set. | [16. Proximity](file:///Users/abhinnaagarwal/Documents/system-design-notes/16.%20Proximity%20Service/Readme.md), [Ch 17](file:///Users/abhinnaagarwal/Documents/system-design-notes/17.%20Nearby%20Friends/Readme.md) |
+| **Ephemeral Real-Time Chat** | Pub/Sub | `PUBLISH chat:room_99 msg`<br>`SUBSCRIBE chat:room_99` | $O(N + M)$ | Fire-and-forget message distribution across connected WebSocket server gateways. | [12. Chat System](file:///Users/abhinnaagarwal/Documents/system-design-notes/12.%20Chat%20System/Readme.md), [Ch 17](file:///Users/abhinnaagarwal/Documents/system-design-notes/17.%20Nearby%20Friends/Readme.md) |
+| **Durable Event Log with Groups** | Redis Streams | `XADD stream * user 101 event click`<br>`XREADGROUP GROUP g1 c1 STREAMS s >`<br>`XACK stream g1 msg_id` | $O(1)$ append<br>$O(M)$ read | Kafka-like append-only log with consumer offsets, acknowledgments, and pending lists. | [19. Message Queue](file:///Users/abhinnaagarwal/Documents/system-design-notes/19.%20Distributed%20Message%20Queue/Readme.md) |
+| **User Presence / Heartbeat** | String with TTL | `SET user:101:online 1 EX 30`<br>`GET user:101:online` | $O(1)$ | Heartbeat resets TTL every 10s. If client disconnects, key expires automatically. | [12. Chat System](file:///Users/abhinnaagarwal/Documents/system-design-notes/12.%20Chat%20System/Readme.md), [Ch 17](file:///Users/abhinnaagarwal/Documents/system-design-notes/17.%20Nearby%20Friends/Readme.md) |
+
+---
+
+### B. Core Command Reference by Primitive
+
+#### 1. Strings & Numerics (Binary-Safe Blobs up to 512 MB)
+The foundation of caching, distributed locks, counters, and idempotency.
+
+```bash
+# 1. Advanced SET flags (Crucial for Locks & Idempotency)
+SET key value [EX seconds] [PX milliseconds] [NX|XX] [KEEPTTL] [GET]
+# NX: Only set if NOT exists (used for locks/idempotency)
+# XX: Only set if ALREADY exists (used for updates)
+# EX / PX: Expiration in seconds / milliseconds
+# KEEPTTL: Retain existing TTL when updating value (Redis 6.0+)
+# GET: Return previous value atomically (Redis 6.2+)
+
+# 2. Atomic Counters (Zero race conditions)
+INCR key                      # Increment integer by 1 (O(1))
+INCRBY key 50                 # Increment integer by 50 (O(1))
+DECRBY key 10                 # Decrement integer by 10 (O(1))
+INCRBYFLOAT key 1.25          # Increment float value (O(1))
+
+# 3. Batch Retrieval (Saves network round-trip latency)
+MSET k1 v1 k2 v2              # Set multiple keys atomically (O(N))
+MGET k1 k2 k3                 # Fetch multiple keys in one network packet (O(N))
+```
+
+---
+
+#### 2. Hashes (Field-Value Dictionaries)
+Maps field names to string values. Ideal for representing domain entities (User, Product, Session).
+
+```bash
+# Set & Get individual or multiple fields
+HSET user:1001 name "Alice" email "alice@example.com" role "admin"   # O(K)
+HGET user:1001 email                                                # O(1)
+HMGET user:1001 name role                                           # O(K)
+HGETALL user:1001                                                   # O(N) - CAUTION on huge hashes!
+
+# Increment specific numerical field
+HINCRBY user:1001 login_count 1                                     # O(1)
+HINCRBYFLOAT user:1001 balance 14.50                                # O(1)
+
+# Inspection & Deletion
+HEXISTS user:1001 email                                             # O(1)
+HDEL user:1001 role                                                 # O(K)
+HLEN user:1001                                                      # O(1) - Number of fields
+HSCAN user:1001 0 MATCH user:* COUNT 100                            # Safe cursor iteration
+```
+> **💡 Staff Tip:** Use Hashes instead of JSON strings when you need to update one field frequently (e.g. `login_count`) without fetching, re-serializing, and overwriting a 2 KB JSON payload.
+
+---
+
+#### 3. Lists (Linked Lists / Quicklists)
+Ordered collections of strings. Elements can be pushed and popped from both ends.
+
+```bash
+# Queue & Stack operations
+LPUSH queue task_1 task_2     # Push to head/left (O(K))
+RPUSH queue task_3            # Push to tail/right (O(K))
+LPOP queue [count]            # Pop from head (O(K))
+RPOP queue [count]            # Pop from tail (O(K))
+
+# Blocking Operations (Worker Consumer Pools - Zero Busy-Waiting)
+BLPOP queue 5                 # Pop left; block up to 5s if empty (O(1))
+BRPOP queue 0                 # Block indefinitely until a task arrives (O(1))
+
+# Safe Reliable Worker Queue Pattern (Worker takes job, moves to processing)
+LMOVE work_queue processing_queue RIGHT LEFT                        # O(1) Atomic transfer
+BLMOVE work_queue processing_queue RIGHT LEFT 10                    # Blocking variant
+
+# Bounded / Capped Collections (Feed Timelines)
+LPUSH timeline:user_123 post_99
+LTRIM timeline:user_123 0 799 # Retain only top 800 items; trims old posts (O(N))
+LRANGE timeline:user_123 0 19 # Fetch page 1 (items 0 to 19) (O(S+N))
+```
+
+---
+
+#### 4. Sets (Unordered Unique String Collections)
+Guarantees uniqueness. Extremely efficient for relationship modeling, permissions, and tag intersections.
+
+```bash
+# Add, remove, and check membership
+SADD tag:system-design item_1 item_2 item_3  # O(K)
+SREM tag:system-design item_2                # O(K)
+SISMEMBER tag:system-design item_1           # O(1) - True/False check
+SMISMEMBER tag:system-design item_1 item_9   # O(K) - Multi-check (Redis 6.2+)
+SCARD tag:system-design                      # O(1) - Total member count
+
+# Set Operations (Faceted Search & Social Graph)
+SINTER tag:system-design tag:database        # Intersection (AND query) - O(N*M)
+SUNION group:engineering group:managers      # Union (OR query) - O(N)
+SDIFF user:1001:friends user:1002:friends    # Difference (Friends of A not B) - O(N)
+SINTERSTORE result_key tag:bug tag:p0        # Intersect and store in new key (O(N*M))
+
+# Random Sampling (Giveaways / Recommendation seeds)
+SRANDMEMBER pool 3                           # Return 3 random members without removing (O(N))
+SPOP pool 1                                  # Atomically pop 1 random member (O(1))
+```
+
+---
+
+#### 5. Sorted Sets (ZSET - The Crown Jewel of Real-Time Systems)
+Every member is associated with a 64-bit floating point **score**. Members are unique; scores can be duplicated. Backed by a **SkipList + Hash Table**.
+
+```bash
+# 1. Add / Update Members (Score is float)
+ZADD leaderboard 1500 "player_alice" 2100 "player_bob"  # O(log N)
+# Flags:
+# NX: Only add new elements; don't update existing
+# XX: Only update existing elements; don't add new
+# GT: Only update score if NEW score is GREATER than current score
+# LT: Only update score if NEW score is LESS than current score
+# CH: Return count of changed elements
+# INCR: Behaves like ZINCRBY
+
+# 2. Increment score
+ZINCRBY leaderboard 50 "player_alice"                   # O(log N)
+
+# 3. Retrieve Rank & Score (0-indexed)
+ZSCORE leaderboard "player_alice"                       # O(1)
+ZMSCORE leaderboard "player_alice" "player_bob"         # O(K)
+ZRANK leaderboard "player_alice"                        # Low-to-High rank (O(log N))
+ZREVRANK leaderboard "player_alice"                     # High-to-Low rank (O(log N)) - 0 is #1!
+
+# 4. Fetch Ranked Ranges (Pagination)
+ZREVRANGE leaderboard 0 9 WITHSCORES                   # Top 10 players (Legacy syntax)
+ZRANGE leaderboard 0 9 REV WITHSCORES                  # Top 10 players (Redis 6.2+ syntax) - O(log N + M)
+
+# 5. Range by Score (Delayed Jobs & Time Windows)
+ZRANGEBYSCORE delay_queue 0 1774345200 LIMIT 0 50       # Fetch jobs where timestamp <= now (O(log N + M))
+ZCOUNT delay_queue 0 1774345200                         # Count elements in score range (O(log N))
+
+# 6. Eviction & Trimming
+ZREMRANGEBYSCORE delay_queue 0 1774345200               # Delete processed tasks (O(log N + M))
+ZREMRANGEBYRANK leaderboard 0 -101                      # Keep only top 100; delete rank 101+ (O(log N + M))
+ZPOPMIN delay_queue 1                                   # Pop element with lowest score (O(log N))
+ZPOPMAX leaderboard 1                                  # Pop element with highest score (O(log N))
+```
+
+---
+
+#### 6. Bitmaps (Bitsets - High-Density Flags)
+Strings treated as an array of bits (up to $2^{32}$ bits $\approx 4\text{ Gb} \approx 512\text{ MB}$).
+
+```bash
+# Track User Activity on 2026-10-25 (User ID = 18402)
+SETBIT users:active:2026-10-25 18402 1        # O(1)
+GETBIT users:active:2026-10-25 18402          # O(1) - Returns 1 or 0
+
+# Count Total Active Users Today (DAU)
+BITCOUNT users:active:2026-10-25              # O(N) - Fast SIMD bit counting
+
+# Multi-Day Retention (Users active BOTH today AND yesterday)
+BITOP AND users:retention:2day \
+    users:active:2026-10-25 \
+    users:active:2026-10-24                   # O(N) Hardware-level bitwise AND
+BITCOUNT users:retention:2day                 # Count retained users
+```
+> **Math Reality:** $100,000,000$ users $\div 8\text{ bits/byte} \approx \mathbf{12.5\text{ MB}}$ RAM to store an entire day of global user activity!
+
+---
+
+#### 7. HyperLogLog (Probabilistic Cardinality Counter)
+Estimates the number of unique elements with a standard error of $\mathbf{0.81\%}$. Uses at most **12 KB of memory** regardless of whether you add 1,000 or 1,000,000,000 items.
+
+```bash
+PFADD visitors:homepage "user_ip_1" "user_ip_2" "user_ip_3"   # O(1)
+PFCOUNT visitors:homepage                                     # O(1) - Returns approximate unique count
+PFMERGE visitors:weekly visitors:day1 visitors:day2           # O(N) - Merges multiple days
+```
+> **Staff Distinction:** If an interviewer asks to count unique visitors for 1,000,000 URL shortener links, using a Redis Set would take gigabytes of RAM ($O(N)$). HyperLogLog uses $\le 12\text{ KB}$ per URL.
+
+---
+
+#### 8. Geospatial (Geo - Proximity Indexing)
+Stores coordinates (longitude, latitude) by internally encoding them into a **52-bit Geohash stored in a Sorted Set**.
+
+```bash
+# Add location (Longitude first, Latitude second!)
+GEOADD drivers -122.4194 37.7749 "driver_alice" -122.4080 37.7830 "driver_bob"
+
+# Distance between two members
+GEODIST drivers "driver_alice" "driver_bob" km                # O(1)
+
+# Proximity Search (Modern Redis 6.2+ GEOSEARCH)
+GEOSEARCH drivers FROMLONLAT -122.4194 37.7749 BYRADIUS 5 km WITHDIST WITHCOORD ASC COUNT 10
+# Returns closest 10 drivers within 5km of coordinate, sorted by distance
+```
+
+---
+
+#### 9. Redis Streams (Durable Distributed Commit Log)
+Modeled on Apache Kafka: append-only log with persistent consumer groups, acknowledgment tracking, and replayability.
+
+```bash
+# 1. Producer appends event (* means auto-generate timestamp-sequence ID)
+XADD order_stream MAXLEN ~ 100000 * order_id 9928 user_id 101 amount 49.99
+
+# 2. Create Consumer Group (0 means read from beginning, $ means read newly arriving events)
+XGROUP CREATE order_stream payment_workers $ MKSTREAM
+
+# 3. Consumer pulls new unconsumed events (> means only messages never delivered to others)
+XREADGROUP GROUP payment_workers worker_1 COUNT 10 BLOCK 2000 STREAMS order_stream >
+
+# 4. Consumer acknowledges successful processing
+XACK order_stream payment_workers 1774345200000-0
+
+# 5. Fault Tolerance: Inspect Pending Entries List (PEL) for crashed workers
+XPENDING order_stream payment_workers - + 10
+
+# 6. Reclaim orphaned message from dead worker
+XCLAIM order_stream payment_workers worker_2 60000 1774345200000-0
+```
+
+---
+
+#### 10. Pub/Sub (Fire-and-Forget Ephemeral Broadcasting)
+Publishers send messages to channels without knowing who is listening. Messages are **never saved or persisted**; if a subscriber is disconnected, the message is permanently lost.
+
+```bash
+PUBLISH room:42 "Hello, World!"              # O(N+M) - Emits message to all connected subscribers
+SUBSCRIBE room:42                            # Subscribes current connection
+PSUBSCRIBE room:*                            # Pattern matching subscription
+```
+> **Staff Distinction:** Use Pub/Sub for **ephemeral presence and live WebSocket broadcast** where packet loss is acceptable. Use **Redis Streams or Kafka** when messages must never be dropped.
+
+---
+
+### C. Atomic Execution & Scripting Mechanics
+
+Because Redis is single-threaded, scripts execute as **one uninterrupted atomic transaction**. No other client command can interleave.
+
+#### 1. Safe Distributed Lock Release (Lua Script)
+```lua
+-- KEYS[1]: lock_key, ARGV[1]: lock_token
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+else
+    return 0
+end
+```
+Executed via:
+```bash
+EVAL "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end" 1 lock:order_99 uuid_token
+```
+
+#### 2. Sliding Window Rate Limiter (Atomic Lua Script)
+```lua
+-- KEYS[1]: rate_limit_key
+-- ARGV[1]: current_epoch_ms, ARGV[2]: window_size_ms, ARGV[3]: max_limit
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local clear_before = now - window
+
+-- 1. Remove timestamps older than the sliding window
+redis.call('ZREMRANGEBYSCORE', key, 0, clear_before)
+
+-- 2. Count requests in current window
+local current_requests = redis.call('ZCARD', key)
+
+-- 3. Check quota
+if current_requests < limit then
+    redis.call('ZADD', key, now, now .. '-' .. redis.call('INCR', key .. ':counter'))
+    redis.call('PEXPIRE', key, window)
+    return 1 -- ALLOW
+else
+    return 0 -- REJECT (HTTP 429)
+end
+```
+
+#### 3. Optimistic Locking: `WATCH` / `MULTI` / `EXEC`
+```bash
+WATCH user:balance
+# Client checks balance in application memory...
+MULTI
+DECRBY user:balance 50
+INCRBY merchant:balance 50
+EXEC
+# If another client modified user:balance before EXEC, the transaction aborts (returns nil).
+```
+
+---
+
+### D. Key Lifecycles, Expiration & Operational Traps
+
+#### 1. Modern TTL Flags (Redis 7.0+)
+```bash
+EXPIRE key 60 NX     # Set TTL ONLY IF the key does NOT have an existing expiration
+EXPIRE key 60 XX     # Set TTL ONLY IF the key ALREADY has an existing expiration
+EXPIRE key 60 GT     # Set TTL ONLY IF new expiration is GREATER than current expiration
+EXPIRE key 60 LT     # Set TTL ONLY IF new expiration is LESS than current expiration
+TTL key              # Returns remaining seconds (-1: no TTL, -2: key does not exist)
+PERSIST key          # Removes TTL, making key permanent
+```
+
+#### 2. `DEL` vs. `UNLINK` (The Memory Reclamation Trap)
+* **`DEL key` (Synchronous):** Frees memory immediately on the main thread. If `key` is a Hash or Set containing $5,000,000$ elements, `DEL` blocks the entire Redis engine for **2–4 seconds**, stalling all other connections!
+* **`UNLINK key` (Asynchronous - Redis 4.0+):** Unlinks the key from the keyspace dictionary in $O(1)$ time, and hands the actual memory deallocation to a **background worker thread**.
+* **Interview Rule:** Always propose **`UNLINK`** for deleting unknown or large keys in production.
+
+#### 3. `KEYS *` vs. `SCAN` (The Interview Dealbreaker)
+* **`KEYS pattern`:** Iterates through the entire dictionary synchronously. At 20M keys, it freezes Redis for 10 seconds. **Instant fail in senior/staff interviews.**
+* **`SCAN cursor [MATCH pattern] [COUNT count]`:** Cursor-based stateless iterator. Returns a small batch of keys and a new cursor without blocking the server.
+
+---
+
+### E. The 7 Deadly Redis Sins in System Design Interviews
+
+| Mistake / Anti-Pattern | Why It Breaks in Production | Staff / Principal Remediation |
+| :--- | :--- | :--- |
+| **1. Unbounded Collections** | Running `LPUSH` or `HSET` forever until the machine OOMs. | Enforce caps via `LTRIM` or `ZREMRANGEBYRANK`, or attach explicit TTLs. |
+| **2. Unbounded `HGETALL` / `SMEMBERS`** | Reading a 100k-element hash in one call saturates network bandwidth and blocks the event loop. | Use `HSCAN` / `SSCAN` or fetch specific fields with `HMGET`. |
+| **3. Synchronous `DEL` on BigKeys** | Deleting a 50MB key blocks the single thread for seconds. | Use non-blocking **`UNLINK`**. |
+| **4. `SET` + `EXPIRE` Race Condition** | Setting a lock with `SET`, then crashing before `EXPIRE`, leaves a permanent deadlock. | Use atomic `SET key val NX PX 30000`. |
+| **5. Running `KEYS *`** | Performs a full-keyspace linear scan, causing complete cluster unavailability. | Use **`SCAN`** with cursor iteration. |
+| **6. Massive Lua Scripts** | Long-running Lua loops (>5ms) block all other requests, triggering client timeouts. | Keep Lua scripts under 10 operations; offload computation to application workers. |
+| **7. Redis as Primary SAGA / ACID DB** | Assuming Redis transactions are durable across master crashes. | Redis replication is asynchronous; use **Temporal.io** or **Kafka + Outbox** for durable transactional workflows. |
 
 

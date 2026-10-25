@@ -25,7 +25,39 @@ Rate limiting is an omnipresent infrastructure building block required in almost
 
 ---
 
-## 2. Requirements & System Scope
+## 2. The 5-Pillar Staff Assessment Rubric for Rate Limiting
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • Edge Gateway (Envoy/Cloudflare) vs App Middleware vs Dedicated Service.    │
+│                         │ • In-Memory Token Leasing vs Centralized Redis on every request.             │
+│                         │ • Token Bucket vs Sliding Window Counter vs Leaky Bucket based on traffic.   │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Atomic Redis Lua scripts (`EVALSHA`) to eliminate concurrent race conditions│
+│    Proficiency          │ • Local in-memory token leasing ($B = 100$ tokens) eliminating 95% of RTTs.  │
+│                         │ • NTP clock drift handling via Redis server-side time (`redis.call('TIME')`).│
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes rate limiting into L4 (DDoS), L7 (Gateway), and Tenant tiers.   │
+│    Analytical Thinking  │ • Calculates memory footprint ($100\text{M keys} \times 24\text{ bytes}       │
+│                         │   \approx 2.4\text{ GB RAM}$) and network bandwidth overhead.                │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Fail-Open (preserve customer revenue) vs Fail-Closed (protect auth/login). │
+│    Mindset              │ • Returns standard RFC headers (`RateLimit-Remaining`, `Retry-After`).       │
+│                         │ • Mandates Exponential Backoff with Full Jitter on client SDKs.              │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Mitigates sudden bot waves without throttling legitimate active users.     │
+│    Collaboration        │ • Balances strict enforcement with VIP enterprise tenant quota overrides.    │
+│                         │ • Communicates rate-limiting degradation policies clearly to partner teams.  │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 3. Requirements & System Scope
 
 ### Functional Requirements
 1. **Accurate Throttling:** Limit requests based on client IP, authenticated User ID, API Key, or internal tenant tier.

@@ -120,7 +120,7 @@ For a given number of expected items $n$ and desired false positive probability 
 
 > [!TIP]
 > **Staff Engineer Rule of Thumb for Interviews:**
-> *   Allocating **$10$ bits per item** ($m/n = 10$) with **$k = 7$ hash functions** yields a **$\sim 1\%$ false positive rate**.
+> *   Allocating **$10$ bits per item** ($m/n = 10$) with **$k = 7$ hash functions** yields a **~1% false positive rate** ($\epsilon \approx 0.01$, or 1 in 120 items).
 > *   $1$ billion items $\times 10\text{ bits} = 10\text{ billion bits} \approx \mathbf{1.19\text{ GB RAM}}$ (compared to 1 TB for a raw HashSet!).
 
 ### D. System Design Production Use Cases
@@ -218,9 +218,81 @@ flowchart LR
     *   Otherwise: discard.
 4.  **Result:** Bounded $O(K)$ heap memory and $O(1)$ constant sketch memory, servicing live Top-K queries without memory leaks.
 
-### E. Other Production Use Cases
+### E. Counter Sizing, 4-Bit Packing & The Decay Mechanism (TinyLFU)
+
+In system design interviews, candidates often wonder: *what data type should the counters be, and what happens when counters saturate over time?*
+
+#### 1. Counter Sizing: Standard (32-bit) vs. Packed (4-bit)
+* **Standard Count-Min Sketch (32-bit / 64-bit int):**
+  * Used for unbounded streaming systems (Apache Flink, DDoS packet logging, Twitter hashtag analytics).
+  * Declared as a 2D array of standard integers: `matrix[d][w]` using `uint32` (counts up to **4.29 billion** without overflow).
+* **TinyLFU Cache Admission (4-bit counters, max count $= 15$):**
+  * Used in high-performance in-memory caches like **Caffeine Cache** (Window TinyLFU).
+  * **Why only 4 bits ($2^4 - 1 = 15$)?** An eviction policy only needs **relative recent frequency** (*"Is item A accessed more recently than victim item B?"*). An item accessed 15 times recently is already hot; knowing whether it was accessed 15 times or 50,000 times does not change the cache admission decision.
+  * **Memory optimization:** Two 4-bit counters are packed into a single 8-bit `uint8` byte (`byte & 0x0F` for the lower nibble, and `byte >> 4` for the upper nibble), cutting the sketch memory footprint in half.
+
+```
+1 Byte (8 bits) in Memory:
+┌──────────────────────┬──────────────────────┐
+│ Counter 1 (Upper 4b) │ Counter 2 (Lower 4b) │
+│ Range: 0 to 15       │ Range: 0 to 15       │
+└──────────────────────┴──────────────────────┘
+```
+
+#### 2. The Saturation Problem & The Decay (Aging / Halving) Mechanism
+* **The Problem:** A standard Count-Min Sketch only increments. Over time, two major failure modes occur:
+  1. Counters saturate at their maximum value (especially 4-bit counters stuck at 15).
+  2. **The "Stale Viral Post" Problem:** An item that went viral last Monday permanently keeps high counter values, preventing new breaking news items from ever overtaking it.
+* **The Solution (The Halving Trick):**
+  * Maintain a global counter $S$ tracking the total number of additions since the last reset.
+  * When $S$ reaches a threshold sample size $W$ (e.g., $W = 10 \times \text{cache size}$ or every $N$ seconds):
+    * Iterate through the entire $d \times w$ matrix and **divide every counter by 2** using a bitwise right-shift:
+      $$\text{sketch}[i][j] = \text{sketch}[i][j] \gg 1$$
+    * Reset the sample counter: $S \leftarrow S / 2$ (or $0$).
+* **The Mechanical Effect:**
+  * An item with count 14 drops to 7. An item with count 2 drops to 1. An item with count 1 drops to 0.
+  * Historical noise and obsolete traffic spikes decay exponentially ($1/2, 1/4, 1/8 \dots$).
+  * Fresh items can now easily accumulate new counts and surpass decaying old favorites!
+
+#### 3. Sample Code Declaration (Decaying Count-Min Sketch)
+```python
+class DecayingCountMinSketch:
+    def __init__(self, depth=5, width=2048, reset_threshold=10000):
+        self.d = depth
+        self.w = width
+        # 2D matrix of counters (e.g. 5 rows x 2048 columns)
+        self.table = [[0] * self.w for _ in range(self.d)]
+        self.seeds = [10007 * i for i in range(self.d)]
+        self.sample_size = 0
+        self.reset_threshold = reset_threshold  # Threshold W to trigger decay
+
+    def add(self, key: str, count: int = 1):
+        self.sample_size += count
+        for i in range(self.d):
+            col = hash_function(key, self.seeds[i]) % self.w
+            # Cap at 15 if using 4-bit counters, or let it grow if using standard uint32
+            self.table[i][col] = min(self.table[i][col] + count, 15)
+        
+        # Periodic Decay / Halving step
+        if self.sample_size >= self.reset_threshold:
+            self._decay()
+
+    def _decay(self):
+        """Halve all counters in the sketch to age out historical items."""
+        for i in range(self.d):
+            for j in range(self.w):
+                self.table[i][j] >>= 1  # Right shift by 1 = integer divide by 2
+        self.sample_size //= 2
+
+    def estimate(self, key: str) -> int:
+        return min(self.table[i][hash_function(key, self.seeds[i]) % self.w] for i in range(self.d))
+```
+
+---
+
+### F. Other Production Use Cases
 1.  **DDoS & Network Security:** Tracking packets per source IP address in network switches with hardware-limited TCAM memory.
-2.  **Caffeine Cache (Window TinyLFU):** Uses a 4-bit Count-Min Sketch to estimate the historical frequency of cache entries, admitting newly requested items only if their frequency exceeds the victim item being evicted.
+2.  **Caffeine Cache (Window TinyLFU):** Uses the decaying 4-bit Count-Min Sketch above to estimate the historical frequency of cache entries, admitting newly requested items only if their frequency exceeds the victim item being evicted.
 
 ---
 

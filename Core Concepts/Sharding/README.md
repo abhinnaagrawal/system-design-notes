@@ -12,15 +12,15 @@ While often used interchangeably, there is a strict mechanical difference.
 
 ```mermaid
 flowchart TD
-    subgraph Partitioning (Single Machine)
+    subgraph PartSingle ["Partitioning (Single Machine)"]
         DB_P[(Single Database)]
-        T1[Table: Orders 2023]
-        T2[Table: Orders 2024]
+        T1["Table: Orders 2023"]
+        T2["Table: Orders 2024"]
         DB_P --- T1
         DB_P --- T2
     end
     
-    subgraph Sharding (Multiple Machines)
+    subgraph ShardMulti ["Sharding (Multiple Machines)"]
         App[Application]
         DB_S1[(Shard 1)]
         DB_S2[(Shard 2)]
@@ -56,8 +56,8 @@ graph LR
         B2[created_at \n All writes hit latest shard!]:::bad
     end
     
-    classDef good fill:#d4edda,stroke:#28a745,stroke-width:2px;
-    classDef bad fill:#f8d7da,stroke:#dc3545,stroke-width:2px;
+    classDef good stroke:#28a745,stroke-width:2px;
+    classDef bad stroke:#dc3545,stroke-width:2px;
 ```
 
 1.  **High Cardinality:** Millions of unique values.
@@ -113,7 +113,7 @@ flowchart TD
     Traffic2[Justin Bieber \n Millions of followers] --> S2[(Shard 2 \n 🔥 MELTDOWN 🔥)]:::hot
     Traffic3[Normal User] --> S3[(Shard 3)]
     
-    classDef hot fill:#ffcccc,stroke:#ff0000,stroke-width:4px;
+    classDef hot stroke:#ff0000,stroke-width:3px;
 ```
 
 If Justin Bieber is on Shard 2, millions of fans will instantly overwhelm that single shard's CPU and network bandwidth.

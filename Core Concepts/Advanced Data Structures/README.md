@@ -53,8 +53,8 @@ When Node A and Node B want to sync, they execute a precise recursive network pr
 
 ```mermaid
 flowchart TD
-    classDef mismatch fill:#ffcccc,stroke:#ff0000,stroke-width:2px;
-    classDef match fill:#ccffcc,stroke:#00aa00,stroke-width:1px;
+    classDef mismatch stroke:#ff0000,stroke-width:2px;
+    classDef match stroke:#00aa00,stroke-width:2px;
 
     Root["Root Hash: Hash(H1 + H2) (MISMATCH)"]:::mismatch
     H1["Hash 1: Hash(H3 + H4) (MATCH)"]:::match

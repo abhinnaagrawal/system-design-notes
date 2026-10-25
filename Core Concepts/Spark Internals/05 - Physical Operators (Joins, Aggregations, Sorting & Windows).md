@@ -191,9 +191,9 @@ flowchart TB
     G -->|"Exchange by region"| H["Final HashAggregate"]
     H --> I["Result"]
 
-    style D fill:#eef
-    style G fill:#efe
-    style H fill:#efe
+    style D stroke:#3498db,stroke-width:2px
+    style G stroke:#28a745,stroke-width:2px
+    style H stroke:#28a745,stroke-width:2px
 ```
 
 Read this plan out loud in an interview: "Fact scan gets DPP-pruned using the broadcast dimension; the join is a broadcast hash join because the dimension is 10 MB under the 10 MB threshold; aggregation does a partial combine before the regional shuffle, then a final aggregate; AQE coalesces the post-shuffle partitions and would split any skewed region."

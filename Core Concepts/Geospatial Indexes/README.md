@@ -76,8 +76,8 @@ graph TD
     A -->|Handling shapes & disk pages| D["1984: R-Tree<br/>(Antonin Guttman)"]
     D -->|Overlap minimization heuristic| E["1990: R*-Tree<br/>(Beckmann et al.)"]
 
-    classDef legacy fill:#f9f9f9,stroke:#999,stroke-width:1px;
-    classDef prod fill:#d4edda,stroke:#28a745,stroke-width:2px;
+    classDef legacy stroke:#999,stroke-width:1px;
+    classDef prod stroke:#28a745,stroke-width:2px;
     class A,B legacy;
     class C,D,E prod;
 ```
@@ -211,8 +211,9 @@ GeoHash operates by recursively halving latitude and longitude intervals into bi
 4. **Base32 Encoding:** Group the resulting bit sequence into 5-bit chunks. Each 5-bit integer ($0\text{--}31$) maps to a character in a 32-character alphabet (`0-9`, `b-z`, omitting `a, i, l, o` to avoid visual confusion).
 
 ```
-Example: Latitude 40.7128, Longitude -74.0060 (New York City)
-Binary Interleaved Bits: 01101 10111 00101 11010 ...
+Example: Latitude 40.7484, Longitude -73.9857 (Midtown NYC / Empire State)
+Binary Interleaved Bits: 01100 10111 00101 10111 11010 ...
+Base32 Chunks:           12    23    5     23    26
 Base32 String:           d     r     5     r     u   ... -> "dr5ru"
 ```
 

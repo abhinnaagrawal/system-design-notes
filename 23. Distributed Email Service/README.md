@@ -1,325 +1,297 @@
-# Chapter 23: Distributed Email Service
+# Chapter 23: Design a Distributed Email Service (Gmail / Outlook)
 
-## Introduction
-
-We'll design a **distributed email service**, similar to **Gmail** in this chapter.
-
-In 2020, **Gmail** had 1.8bil active users, while **Outlook** had 400mil users worldwide.
-
----
-
-## Step 1: Understand the Problem and Establish Design Scope
-
-- C: How many users use the system?
-- I: 1bil users
-- C: I think following features are important - auth, send/receive email, fetch email, filter emails, search email, anti-spam protection.
-- I: Good list. Don't worry about auth for now.
-- C: How do users connect \w email servers?
-- I: Typically, email clients connect via SMTP, POP, IMAP, but we'll use HTTP for this problem.
-- C: Can emails have attachments?
-- I: Yes
-
-### **Non-functional requirements**
-
-- **Reliability** - we shouldn't lose data
-- **Availability** - We should use replication to prevent single points of failure. We should also tolerate partial system failures.
-- **Scalability** - As userbase grows, our system should be able to handle them.
-- **Flexibility and extensibility** - system should be flexible and easy to extend with new features. One of the reasons we chose HTTP over SMTP/other mail protocols.
-
-### **Back-of-the-envelope estimation**
-
-- **1bil users**
-- Assuming one person sends 10 emails per day -> **100k emails per second**.
-- Assuming one person receives 40 emails per day and each email on average has 50kb metadata -> **730pb storage per year**.
-- Assuming 20% of emails have storage attachments and average size is 500kb -> **1,460pb per year**.
+**Sources & Foundational References:**
+- [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
+- [Designing Data-Intensive Applications (Martin Kleppmann)](https://dataintensive.net/)
+- [RFC 5321 (SMTP), RFC 5322 (Internet Message Format), RFC 6376 (DKIM), RFC 7208 (SPF), RFC 7489 (DMARC)](https://datatracker.ietf.org/)
+- [Apache Cassandra Architecture & Wide-Column Storage Engine](https://cassandra.apache.org/doc/latest/)
 
 ---
 
-## Step 2: Propose High-Level Design and Get Buy-In
+## 1. Executive Interview Framing & Staff-Level Bar
 
-### **Email knowledge 101**
-
-There are various protocols used for sending and receiving emails:
-- **SMTP** - standard protocol for sending emails from one server to another.
-- **POP** - standard protocol for receiving and downloading emails from a remote mail server to a local client. Once retrieved, emails are deleted from remote server.
-- **IMAP** - similar to POP, it is used for receiving and downloading emails from a remote server, but it keeps the emails on the server-side.
-- **HTTPS** - not technically an email protocol, but it can be used for web-based email clients.
-
-Apart from the mailing protocol, there are some DNS records we need to configure for our email server - the MX records:
-
-<div style="margin-left:3rem">
-    <img src="./images/dns-lookup.png" alt="dns-lookup" width="500" />
-</div>
-
-Email attachments are sent base64-encoded and there is usually a size limit of 25mb on most mail services.
-This is configurable and varies from individual to corporate accounts.
-
-### **Traditional mail servers**
-
-Traditional mail servers work well when there are a limited number of users, connected to a single server.
-
-<div style="margin-left:3rem">
-    <img src="./images/traditional-mail-server.png" alt="traditional-mail-server" width="500" />
-</div>
-
-- Alice logs into her Outlook email and presses "send". Email is sent to Outlook mail server. Communication is via SMTP.
-- Outlook server queries DNS to find MX record for gmail.com and transfers the email to their servers. Communication is via SMTP.
-- Bob fetches emails from his gmail server via IMAP/POP.
-
-In traditional mail servers, emails were stored on the local file system. Every email was a separate file.
-
-<div style="margin-left:3rem">
-    <img src="./images/local-dir-storage.png" alt="local-dir-storage" width="500" />
-</div>
-
-As the scale grew, disk I/O became a bottleneck. Also, it doesn't satisfy our high availability and reliability requirements.
-Disks can be damaged and server can go down.
-
-### **Distributed mail servers**
-
-Distributed mail servers are designed to support modern use-cases and solve modern scalability issues.
-
-These servers can still support IMAP/POP for native email clients and SMTP for mail exchange across servers.
-
-But for rich web-based mail clients, a RESTful API over HTTP is typically used.
-
-Example APIs:
-- `POST /v1/messages` - sends a message to recipients in To, Cc, Bcc headers.
-- `GET /v1/folders` - returns all folders of an email account
-
-Example response:
+Designing a planetary-scale distributed email platform (Google Gmail, Microsoft Outlook) is an extraordinary systems challenge spanning **network protocols, multi-petabyte unstructured storage, full-text search indexing, and cryptographic reputation trust**. While mid-level candidates propose basic SQL schemas and IMAP connections, **Staff and Principal Engineers (L6+, P60) are evaluated on their mechanical knowledge of Cassandra wide-column mailbox partitioning, per-user localized inverted Lucene indices, cryptographic deliverability infrastructure (SPF, DKIM, DMARC), content-addressable attachment deduplication, and outbound SMTP reputation management**:
 
 ```
-[{id: string        Unique folder identifier.
-  name: string      Name of the folder.
-                    According to RFC6154 [9], the default folders can be one of
-                    the following: All, Archive, Drafts, Flagged, Junk, Sent,
-                    and Trash.
-  user_id: string   Reference to the account owner
-}]
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                 THE INTERVIEW SPECTRUM                                 │
+├────────────────────────────────────────┬───────────────────────────────────────────────┤
+│ L5 / Senior Engineer                   │ L6+ / Staff & Principal Engineer              │
+├────────────────────────────────────────┼───────────────────────────────────────────────┤
+│ • Traditional SMTP/IMAP servers        │ • REST/gRPC Edge Gateway for modern clients   │
+│   (Collapses under millions of sockets)│   with asynchronous SMTP edge relays          │
+│ • Relational DB for email metadata     │ • Wide-Column NoSQL (Cassandra/ScyllaDB) with │
+│   (Destructive page splits at PB scale)│   `user_id` partition key (strict single-node)│
+│ • "Just use Elasticsearch for search"  │ • Per-user isolated Lucene indices (prevents  │
+│   (Global index causes cross-shard lag)│   noisy neighbor cross-shard search collapse) │
+│ • Store attachments directly in DB     │ • Content-Addressable Storage (CAS) on S3     │
+│   (Causes catastrophic database bloat) │   with SHA-256 deduplication & pre-signed URLs│
+│ • Ignores email deliverability & spam  │ • Cryptographic trust infrastructure: SPF,    │
+│   (IPs get blacklisted by Spamhaus)    │   DKIM asymmetric signing, DMARC alignment,  │
+│                                        │   and automated IP warmup schedules           │
+└────────────────────────────────────────┴───────────────────────────────────────────────┘
 ```
-
-- `GET /v1/folders/{:folder_id}/messages` - returns all messages under a folder \w pagination
-- `GET /v1/messages/{:message_id}` - get all information about a particular message
-
-Example response:
-
-```
-{
-  user_id: string                      // Reference to the account owner.
-  from: {name: string, email: string}  // <name, email> pair of the sender.
-  to: [{name: string, email: string}]  // A list of <name, email> paris
-  subject: string                      // Subject of an email
-  body: string                         //  Message body
-  is_read: boolean                     //  Indicate if a message is read or not.
-}
-```
-
-Here's the high-level design of the distributed mail server:
-
-<div style="margin-left:3rem">
-    <img src="./images/high-level-architecture.png" alt="high-level-architecture" width="500" />
-</div>
-
-- **Webmail** - users use web browsers to send/receive emails
-- **Web servers** - public-facing request/response services used to manage login, signup, user profile, etc.
-- **Real-time servers** - Used for pushing new email updates to clients in real-time. We use websockets for real-time communication but fallback to long-polling for older browsers that don't support them.
-- **Metadata db** - stores email metadata such as subject, body, from, to, etc.
-- **Attachment store** - Object store (eg Amazon S3), suitable for storing large files.
-- **Distributed cache** - We can cache recent emails in Redis to improve UX.
-- **Search store** - distributed document store, used for supporting full-text searches.
-
-Here's what the email sending flow looks like:
-
-<div style="margin-left:3rem">
-    <img src="./images/email-sending-flow.png" alt="email-sending-flow" width="500" />
-</div>
-
-- User writes an email and presses "send". Email is sent to load balancer.
-- Load balancer rate limits excessive mail sends and routes to one of the web servers.
-- Web servers do basic email validation (eg email size) and short-circuits outbound flow if domain is same as sender. But does spam check first.
-- If basic validation passes, email is sent to message queue (attachment is referenced from object store)
-- If basic validation fails, email is sent to error queue
-- SMTP outgoing workers pull messages from outgoing queue, do spam/virus checks and route to destination mail server.
-- Email is stored in the "Sent Emails" folder
-
-We need to also monitor size of outgoing message queue. Growing too large might indicate a problem:
-- Recipient's mail server is unavailable. We can retry sending the email at a later time using exponential backoff.
-- Not enough consumers to handle the load, we might have to scale the consumers.
-
-Here's the email receiving flow:
-
-<div style="margin-left:3rem">
-    <img src="./images/email-receiving-flkow.png" alt="email-receiving-flow" width="500" />
-</div>
-
-- Incoming emails arrive at the SMTP load balancer. Mails are distributed to SMTP servers, where mail acceptance policy is done (eg invalid emails are directly discarded).
-- If attachment of email is too large, we can put it in object store (s3).
-- Mail processing workers do preliminary checks, after which mails are forwarded to storage, cache, object store and real-time servers.
-- Offline users get their new emails once they come back online via HTTP API.
 
 ---
 
-## Step 3: Design Deep Dive
-
-Let's now go deeper into some of the components.
-
-### **Metadata database**
-
-Here are some of the characteristics of email metadata:
-- headers are usually small and frequently accessed
-- Body size ranges from small to big, but is typically read once
-- Most mail operations are isolated to a single user - eg fetching email, marking as read, searching.
-- Data recency impacts data usage. Users typically read only recent emails
-- Data has high-reliability requirements. Data loss is unacceptable.
-
-At gmail/outlook scale, the database is typically custom made to reduce input/output operations per second (IOPS).
-
-Let's consider what database options we have:
-- **Relational database** - we can build indexes for headers and body, but these DBs are typically optimized for small chunks of data.
-- **Distributed object store** - this can be a good option for backup storage, but can't efficiently support searching/marking as read/etc.
-- **NoSQL** - Google BigTable is used by gmail, but it's not open-sourced.
-
-Based on above analysis, very few existing solutions seems to fit our needs perfectly.
-In an interview setting, it's infeasible to design a new distributed database solution, but important to mention characteristics:
-- Single column can be a single-digit MB
-- Strong data consistency
-- Designed to reduce disk I/O
-- Highly available and fault tolerant
-- Should be easy to create incremental backups
-
-In order to partition the data, we can use the `user_id` as a partition key, so that one user's data is stored on a single shard.
-This prohibits us from sharing an email with multiple users, but this is not a requirement for this interview.
-
-Let's define the tables:
-- Primary key consists of partition key (data distribution) and clustering key (sorting data)
-- Queries we need to support - get all folders for a user, display all emails for a folder, create/get/delete an email, fetch read/unread email, get conversation threads (bonus)
-
-Legend for tables to follow:
-
-<div style="margin-left:3rem">
-    <img src="./images/legend.png" alt="legend" width="500" />
-</div>
-
-Here is the folders table:
-
-<div style="margin-left:3rem">
-    <img src="./images/folders-table.png" alt="folders-table" width="500" />
-</div>
-
-emails table:
-
-<div style="margin-left:3rem">
-    <img src="./images/emails-table.png" alt="emails-table" width="500" />
-</div>
-
-- email_id is timeuuid which allows sorting based on timestamp when email was created
-
-Attachments are stored in a separate table, identified by filename:
-
-<div style="margin-left:3rem">
-    <img src="./images/attachments.png" alt="attachments" width="500" />
-</div>
-
-Supporting fetchin read/unread emails is easy in a traditional relational database, but not in Cassandra, since filtering on non-partition/clustering key is prohibited.
-One workaround to fetch all emails in a folder and filter in-memory, but that doesn't work well for a big-enough application.
-
-What we can do is denormalize the emails table into read/unread emails tables:
-
-<div style="margin-left:3rem">
-    <img src="./images/read-unread-emails.png" alt="read-unread-emails" width="500" />
-</div>
-
-In order to support conversation threads, we can include some headers, which mail clients interpret and use to reconstruct a conversation thread:
+## 2. The 5-Pillar Staff Assessment Rubric for Distributed Email
 
 ```
-{
-  "headers" {
-     "Message-Id": "<7BA04B2A-430C-4D12-8B57-862103C34501@gmail.com>",
-     "In-Reply-To": "<CAEWTXuPfN=LzECjDJtgY9Vu03kgFvJnJUSHTt6TW@gmail.com>",
-     "References": ["<7BA04B2A-430C-4D12-8B57-862103C34501@gmail.com>"]
-  }
-}
+┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                      5-PILLAR EVALUATION RUBRIC                                        │
+├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
+│ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 1. Decision Making      │ • HTTP REST/gRPC API for Web/Mobile vs native IMAP/POP3 protocol gateways.   │
+│                         │ • Wide-Column Cassandra vs PostgreSQL for mailbox metadata storage.          │
+│                         │ • Per-User Localized Search Indices vs Centralized Global Elasticsearch.     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 2. Technical            │ • Dissects cryptographic email authentication (SPF DNS TXT, DKIM RSA header  │
+│    Proficiency          │   signature over canonicalized body, DMARC policy enforcement).              │
+│                         │ • Explains Cassandra clustering keys (`user_id` as partition key,            │
+│                         │   `message_id` UUIDv7 as descending clustering key for fast inbox paging).   │
+│                         │ • Employs Content-Addressable Storage (CAS) for attachment deduplication.   │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 3. Problem Solving &    │ • Decomposes system into Inbound SMTP, Outbound Delivery, Metadata, Search.  │
+│    Analytical Thinking  │ • Calculates daily write IOPS (100k sent/sec), yearly metadata growth        │
+│                         │   (730 PB/year), and attachment storage (1.46 Exabytes/year).                │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 4. Operational          │ • Protects IP reputation: Outbound rate limiting, IP pool rotation, and      │
+│    Mindset              │   handling Hard Bounces (5xx) vs Soft Bounces (4xx).                         │
+│                         │ • Monitors Cassandra tombstone accumulation on bulk email deletions.         │
+│                         │ • Designs cold archival tiers for emails older than 1 year (S3 Glacier).     │
+├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
+│ 5. Adaptability &       │ • Mitigates compromised account spam storms via real-time outbound circuits. │
+│    Collaboration        │ • Balances strict user privacy with anti-malware attachment sandbox scanning.│
+│                         │ • Communicates delivery SLA expectations across external third-party MTAs.   │
+└─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
 ```
-
-Finally, we'll trade availability for consistency for our distributed database, since it is a hard requirement for this problem.
-
-Hence, in the event of a failover or network parititon, sync/update actions will be briefly unavailable to impacted users.
-
-### **Email deliverability**
-
-It is easy to setup a server to send emails, but getting the email to a receiver's inbox is hard, due to spam-protection algorithms.
-
-If we just setup a new mail server and start sending mails through it, our emails will probably end up in the spam folder.
-
-Here's what we can do to prevent that:
-- **Dedicated IPs** - use dedicated IPs for sending emails, otherwise, recipient servers will not trust you.
-- **Classify emails** - avoid sending marketing emails from the same servers to prevent more important email to be classified as spam
-- **Warm up your IP address** slowly to build a good reputation with big email providers. It takes 2 to 6 weeks to warm up a new IP
-- **Ban spammers** quickly to not deteriorate your reputation
-- **Feedback processing** - setup a feedback loop with ISPs to keep track of complaint rate and ban spam accounts quickly.
-- **Email authentication** - use common techniques to combat phishing such as Sender Policy Framework, DomainKeys Identified Mail, etc.
-
-You don't need to remember all of this. Just know that building a good mail server requires a lot of domain knowledge.
-
-### **Search**
-
-Searching includes doing a full-text search based on email contents or more advanced queries based on from, to, subject, unread, etc filters.
-
-One characteristic of email search is that it is local to the user and it has more writes than reads, because we need to re-index it on each operation, but users rarely use the search tab.
-
-Let's compare google search with email search:
-
-|               | Scope                | Sorting                               | Accuracy                                          |
-|---------------|----------------------|---------------------------------------|---------------------------------------------------|
-| Google search | The whole internet   | Sort by relevance                     | Indexing takes some time, so not instant results. |
-| Email search  | User's own email box | Sort by attributes eg time, date, etc | Indexing should be quick and results accurate.    |
-
-To achieve this search functionality, one option is to use an Elasticsearch cluster. We can use `user_id` as the partition key to group data under the same node:
-
-<div style="margin-left:3rem">
-    <img src="./images/elasticsearch.png" alt="elasticsearch" width="500" />
-</div>
-
-Mutating operations are async via Kafka in order to decouple services from the reindexing flow.
-Actually searching for data happens synchronously.
-
-Elasticsearch is one of the most popular search-engine databases and supports full-text search for emails very well.
-
-Alternatively, we can attempt to develop our own custom search solution to meet our specific requirements.
-
-Designing such a system is out of scope. One of the core challenges when building it is to optimize it for write-heavy workloads.
-
-To achieve that, we can use Log-Structured Merge-Trees (LSM) to structure the index data on disk. Write path is optimized for sequential writes only.
-This technique is used in Cassandra, BigTable and RocksDB.
-
-Its core idea is to store data in-memory until a predefined threshold is reached, after which it is merged in the next layer (disk):
-
-<div style="margin-left:3rem">
-    <img src="./images/lsm-tree.png" alt="lsm-tree" width="500" />
-</div>
-
-Main trade-offs between the two approaches:
-- Elasticsearch scales to some extent, whereas a custom search engine can be fine-tuned for the email use-case, allowing it to scale further.
-- Elasticsearch is a separate service we need to maintain, alongside the metadata store. A custom solution can be the datastore itself.
-- Elasticsearch is an off-the-shelf solution, whereas the custom search engine would require significant engineering effort to build.
-
-### **Scalability and availability**
-
-Since individual user operations don't collide with other users, most components can be independently scaled.
-
-To ensure high availability, we can also use a multi-DC setup with leader-folower failover in case of failures:
-
-<div style="margin-left:3rem">
-    <img src="./images/multi-dc-example.png" alt="multi-dc-example" width="500" />
-</div>
 
 ---
 
-## Step 4: Wrap Up
+## 3. Requirements & System Scope
 
-Additional talking points:
-- **Fault tolerance** - Many parts of the system could fail. It is worthwhile how we'd handle node failures.
-- **Compliance** - PII needs to be stored in a reasonable way, given Europe's GDPR laws.
-- **Security** - email encryption, phishing protection, safe browsing, etc.
-- **Optimizations** - eg preventing duplication of the same attachments, sent multiple times by different users.
+### Functional Requirements
+1. **Send & Receive Emails:** Users can compose and send emails via web/mobile interfaces; receive incoming emails from external domains (Yahoo, Outlook, iCloud) via SMTP.
+2. **Inbox Retrieval & Pagination:** Fast pagination of folder streams (Inbox, Sent, Trash, Drafts) ordered chronologically.
+3. **Full-Text Search:** Sub-second search across email subjects, sender addresses, and body text.
+4. **Attachments:** Support attachments up to 25 MB with virus scanning and inline preview.
+5. **Spam & Security Defense:** Filter incoming phishing/spam; sign outbound emails to guarantee deliverability.
+
+### Non-Functional Requirements & Performance SLOs
+* **Scale:** Support **1 Billion active users**, processing **100,000 sent emails / second** and **400,000 received emails / second**.
+* **Zero Data Loss:** Once an email is acknowledged by the MTA, it must **never be lost** (RPO = 0).
+* **Latency SLOs:**
+  - Inbox fetch p99 latency $< \mathbf{100ms}$.
+  - Search query p99 latency $< \mathbf{250ms}$.
+  - End-to-end delivery latency $< \mathbf{5 \text{ seconds}}$ (internal recipient).
+* **High Availability:** **99.99%** uptime for web/mobile client reading and sending.
+
+---
+
+## 4. Back-of-the-Envelope Capacity Estimation
+
+```
+Total Registered Users: 1 Billion
+Active Sending Users: 100 Million daily active users
+Emails Sent per User: 10 emails / day -> 1 Billion emails sent / day
+Emails Received per User: 40 emails / day -> 4 Billion emails received / day
+Average Metadata Size: 50 KB per email (headers, body text, thread metadata)
+Attachment Frequency: 20% of emails carry attachments (average size: 500 KB)
+```
+
+### 4.1 Throughput Math
+* **Outbound Send QPS:**
+  $$\text{Send QPS} = \frac{1,000,000,000}{86,400} \approx \mathbf{11,574 \text{ sent / sec}} \quad (\text{Peak: } \approx \mathbf{35,000 \text{ QPS}})$$
+* **Inbound Receive QPS:**
+  $$\text{Receive QPS} = \frac{4,000,000,000}{86,400} \approx \mathbf{46,300 \text{ received / sec}} \quad (\text{Peak: } \approx \mathbf{140,000 \text{ QPS}})$$
+
+### 4.2 Storage Math (The Multi-Exabyte Reality)
+* **Daily Metadata Ingestion:**
+  $$4 \times 10^9 \text{ emails} \times 50 \text{ KB} \approx \mathbf{200 \text{ TB / day}}$$
+  $$\text{Yearly Metadata Storage} = 200 \text{ TB} \times 365 \approx \mathbf{73 \text{ Petabytes / year}}$$
+  *(With 3x replication across zones: $\approx \mathbf{219 \text{ PB / year}}$)*.
+* **Daily Attachment Ingestion:**
+  $$4 \times 10^9 \times 20\% \times 500 \text{ KB} = 800\text{M} \times 500 \text{ KB} \approx \mathbf{400 \text{ TB / day}}$$
+  $$\text{Yearly Attachment Storage} = 400 \text{ TB} \times 365 \approx \mathbf{146 \text{ Petabytes / year}}$$
+  *(Over 5 years with replication: $\approx \mathbf{1.46 \text{ Exabytes}}$!)*.
+* *Staff Takeaway:* Email metadata and attachments **MUST be strictly decoupled**. Attachments reside in Content-Addressable Object Storage (S3/Ceph) with global content deduplication, while metadata resides in Cassandra.
+
+---
+
+## 5. End-to-End High-Level Architecture
+
+```mermaid
+flowchart TD
+    subgraph Clients["User Ingress (Web / Mobile / Native Apps)"]
+        WebClient["Web Browser / Mobile App"] -->|1. HTTPS / gRPC| API_GW["API Gateway (AuthN & Rate Limiting)"]
+        NativeClient["Legacy Client (Apple Mail / Thunderbird)"] -->|2. IMAP / POP3| IMAP_Proxy["IMAP / POP3 Gateway Proxy"]
+    end
+
+    subgraph OutboundFlow["Outbound Email Dispatch Pipeline"]
+        API_GW --> OutboxService["Outbox Mail Service"]
+        IMAP_Proxy --> OutboxService
+        OutboxService --> VirusScanOut["Anti-Virus & DLP Filter"]
+        VirusScanOut --> OutboundQueue["Kafka: outbound-mail-queue"]
+        OutboundQueue --> SMTP_Relay["SMTP Outbound Relays (MTA Fleet)"]
+        
+        SMTP_Relay -->|3. Query DNS MX Record| ExternalDNS["External DNS (MX Lookup)"]
+        SMTP_Relay -->|4. Cryptographic DKIM Sign & Deliver SMTP| ExternalMTA["External Mail Server (Yahoo/Hotmail)"]
+    end
+
+    subgraph InboundFlow["Inbound Email Ingestion Pipeline"]
+        ExtSender["External Sender"] -->|5. Incoming SMTP :25| InboundMTA["Inbound SMTP Receiver Fleet (Postfix/Custom)"]
+        InboundMTA --> InboundSpam["Spam / Phishing & Antivirus Filter<br/>(SPF / DKIM / DMARC Verification)"]
+        InboundSpam --> InboundQueue["Kafka: inbound-mail-queue"]
+        
+        InboundQueue --> MailProcessor["Mail Ingestion Processor"]
+        MailProcessor -->|6. Detach Attachment & Save CAS| S3_Attachments[("Object Store (S3 / CAS)")]
+        MailProcessor -->|7. Write Metadata & Folder Record| CassandraDB[("Cassandra Mailbox DB")]
+        MailProcessor -->|8. Index Body for Search| SearchFleet["Per-User Search Indexer"]
+    end
+
+    API_GW <-->|Fetch Inbox / Search| CassandraDB
+    API_GW <-->|Query Term| SearchFleet
+```
+
+---
+
+## 6. The Core Storage Engine: Why Cassandra Dominates RDBMS
+
+### 6.1 The Relational Database Failure Mode
+In PostgreSQL or MySQL, an `emails` table holding billions of rows requires B+ Tree index updates on every received email. 
+* As users delete thousands of emails or move them between folders, index pages become fragmented.
+* Running range queries across a user's inbox requires random disk I/O when index pages spill out of RAM.
+
+### 6.2 The Cassandra Wide-Column Mailbox Schema
+Cassandra organizes data around a **Partition Key** (which determines the physical node via consistent hashing) and **Clustering Columns** (which determine the physical on-disk sort order within the node's SSTable).
+
+```sql
+-- 1. Mailbox Folder Table (Optimized for Sub-Millisecond Inbox Paging)
+CREATE TABLE user_folder_emails (
+    user_id UUID,
+    folder_name VARCHAR,          -- e.g., 'INBOX', 'SENT', 'TRASH', 'STARRED'
+    message_id TIMEUUID,          -- Time-sortable UUID (v7/v1): Acts as chronological cursor
+    sender_email VARCHAR,
+    sender_name VARCHAR,
+    subject TEXT,
+    preview_snippet VARCHAR,      -- 100-character snippet for rapid inbox view
+    has_attachments BOOLEAN,
+    is_read BOOLEAN,
+    PRIMARY KEY ((user_id, folder_name), message_id)
+) WITH CLUSTERING ORDER BY (message_id DESC);
+
+-- 2. Email Content Table (Fetched only when user clicks an individual email)
+CREATE TABLE email_contents (
+    message_id TIMEUUID PRIMARY KEY,
+    body_html TEXT,
+    body_plain TEXT,
+    attachment_manifest TEXT,     -- JSON array of attachment hashes, names, sizes
+    full_headers TEXT
+);
+```
+
+### 6.3 Why This Schema Is Blazing Fast ($O(1)$ Disk Seek)
+* **Partition Key `(user_id, folder_name)`:** All emails belonging to `(Alice, 'INBOX')` are physically colocated on the **exact same storage node** in contiguous disk blocks!
+* **Clustering Key `message_id DESC`:** Emails are physically sorted on disk in **reverse chronological order**.
+* **Paging with Cursors:** To fetch page 2 of the inbox, the client simply passes the last `message_id`:
+  ```sql
+  SELECT * FROM user_folder_emails 
+  WHERE user_id = 'user_123' AND folder_name = 'INBOX' 
+    AND message_id < '018b1234-5678-7000-8000-000000000000' 
+  LIMIT 25;
+  ```
+  This is a single sequential scan on disk—completing in $< \mathbf{2ms}$!
+
+---
+
+## 7. Full-Text Search Architecture: Global Elasticsearch vs Per-User Local Index
+
+Searching across petabytes of private email text is fundamentally different from searching public web pages:
+* Public Web Search: 1 shared global index; documents are visible to all users.
+* Email Search: **Strict isolation**. User $A$ can **only** search User $A$'s emails.
+
+```
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                              EMAIL SEARCH ARCHITECTURE                                 │
+├─────────────────────┬──────────────────┬──────────────────┬────────────────────────────┤
+│ Strategy            │ Index Layout     │ Query Execution  │ Staff Engineering Verdict  │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 1. Centralized      │ Sharded by       │ HORRIBLE:        │ Severe scatter-gather      │
+│    Global Index     │ message_id       │ Query must fan   │ latency penalty. Single    │
+│    (Elasticsearch)  │ across 500 nodes.│ out to ALL 500   │ enterprise tenant can lag  │
+│                     │                  │ nodes for 1 user!│ the entire cluster.        │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 2. Sharded by       │ Route all emails │ Better, but huge │ Large user indexes can skew│
+│    User ID          │ of user to 1     │ shard imbalance  │ shard size; index rebuilds │
+│    (Elasticsearch)  │ ES shard.        │ on power users.  │ are heavyweight.           │
+├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
+│ 3. Per-User Local   │ Each user has    │ BLAZING FAST:    │ INDUSTRY SOTA (Gmail /     │
+│    Inverted Index   │ an isolated,     │ Query touches    │ Outlook): Zero cross-tenant│
+│    (Lucene / CAS)   │ lightweight      │ ONLY that user's │ interference; index can be │
+│                     │ Lucene index file│ local file in RAM│ cached on client phone!    │
+└─────────────────────┴──────────────────┴──────────────────┴────────────────────────────┘
+```
+
+---
+
+## 8. Cryptographic Email Deliverability & Anti-Spam (SPF, DKIM, DMARC)
+
+Anyone on the internet can connect to an SMTP server and claim to send an email from `ceo@apple.com` (SMTP spoofing). How does modern email guarantee sender authenticity?
+
+```mermaid
+flowchart TD
+    Outbound["Outbound Mail Relay (Our Service)"] -->|1. Sign Body with Private Key| CryptoSign["DKIM Private Key (RSA 2048)"]
+    CryptoSign -->|2. Send Email with Header: DKIM-Signature| Receiver["Receiving Mail Server (e.g. Gmail)"]
+
+    Receiver -->|3. Query Sender Domain DNS| DNS["DNS Server: ourdomain.com"]
+    DNS -->>|Returns SPF TXT: allowed server IPs| Receiver
+    DNS -->>|Returns DKIM Public Key TXT| Receiver
+    DNS -->>|Returns DMARC TXT: policy p=reject| Receiver
+
+    subgraph AuthChecks["Verification Engine"]
+        Receiver --> CheckSPF{"SPF Check:<br/>Is relay IP in allowed SPF list?"}
+        Receiver --> CheckDKIM{"DKIM Check:<br/>Does public key decrypt header signature?"}
+        Receiver --> CheckDMARC{"DMARC Alignment:<br/>Do SPF & DKIM domains match 'From' header?"}
+    end
+
+    CheckSPF & CheckDKIM & CheckDMARC -->|All PASS| Inbox["Deliver to Recipient INBOX"]
+    CheckSPF & CheckDKIM & CheckDMARC -->|FAIL| SpamBox["Drop or Quarantine to SPAM"]
+```
+
+### The 3 Core Deliverability Pillars
+1. **SPF (Sender Policy Framework):** A DNS `TXT` record published by the sender domain listing authorized outbound MTA IP addresses.
+2. **DKIM (DomainKeys Identified Mail):** The outbound MTA hashes the email headers and body, encrypts the hash with its **private RSA/Ed25519 key**, and attaches the signature in the `DKIM-Signature:` header. The receiving MTA fetches the domain's **public key from DNS** to verify cryptographic integrity.
+3. **DMARC (Domain-based Message Authentication):** Enforces alignment between the `From:` header and the SPF/DKIM domains, specifying the policy (`p=none`, `p=quarantine`, `p=reject`) if checks fail.
+
+---
+
+## 9. Staff-Level Interviewer Curveballs & Adaptability Playbook
+
+### Curveball 1: "A spammer compromises 50,000 user accounts and blasts 10 Million phishing emails via your outbound SMTP relay within 10 minutes. Spamhaus blacklists your outbound IPs. All legitimate company emails now bounce globally. How do you recover?"
+* **Wrong Answer:** "We contact Spamhaus and ask them to remove our IP." *(Takes days; business operations halt).*
+* **Staff Answer:**
+  1. **Immediate IP Pool Isolation (Subnet Partitioning):** Outbound MTAs must be physically segmented into isolated pools:
+     - Pool A (High-Reputation Tier): Established transactional users with low bounce rates.
+     - Pool B (Low-Reputation / New Tier): New signups and flagged accounts.
+     - Pool C (Marketing / Bulk Mail): Non-critical notifications.
+     The compromised blast only dirties Pool B; Pool A remains 100% clean.
+  2. **Automated Anomaly Circuit Breaker:** If an account's outbound sending rate spikes by $> 10\times$ baseline or generates $> 5\%$ hard bounces, an automated circuit breaker trips, isolating the account and revoking active OAuth sessions.
+  3. **Automated IP Warmup Fleet:** Maintain pre-warmed backup IP subnets operating at low background volumes, allowing instant traffic diversion while remediating blacklists.
+
+### Curveball 2: "A user deletes 100,000 emails from their mailbox in one click. How does this impact your Cassandra database, and how do you prevent performance degradation?"
+* **Staff Answer:**
+  1. **The Cassandra Tombstone Danger:** In Cassandra (LSM tree), deleting a row does not erase disk data immediately; it writes a **Tombstone marker**. When reading the inbox, Cassandra must scan all tombstones to verify whether rows are live. If tombstones exceed `tombstone_failure_threshold` (default: 100,000), queries crash with `TombstoneOverwhelmingException`!
+  2. **Staff Solution:**
+     - **Partition-Level Drop:** Instead of deleting 100,000 individual row keys, issue a partition-level truncate or move:
+       ```sql
+       DELETE FROM user_folder_emails WHERE user_id = 'user_123' AND folder_name = 'OLD_FOLDER';
+       ```
+     - **Fast Compaction Tuning:** Set `gc_grace_seconds = 86400` (1 day instead of default 10 days) on trash folders and trigger manual Single-SSTable compactions to purge dead tombstones quickly.
+
+### Curveball 3: "A viral marketing company sends an email with a 20 MB video attachment to 5 Million recipients inside your system. How do you prevent your storage tier from exploding by 100 Terabytes?"
+* **Staff Answer:**
+  1. **Content-Addressable Storage (CAS) Deduplication:** Compute the **SHA-256 hash** of the attachment payload: `hash = sha256(file_bytes)`.
+  2. **Single Instance Storage:** Store the 20 MB binary **exactly once** in S3 at key `/attachments/{sha256_hash}`.
+  3. **Pointer References:** In all 5 Million recipient mail records, simply insert an 8-byte pointer referencing `{sha256_hash}`.
+  4. **Result:** Consumes only **20 MB of object storage** instead of 100 Terabytes (a $5,000,000\times$ storage saving)!
