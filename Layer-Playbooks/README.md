@@ -2,7 +2,7 @@
 
 > **The Interview Decision Framework:** In Staff and Principal (L5–L7+) system design interviews, your technical decisions must be justified using **mechanical first principles** (CPU, memory, disk I/O, network) and battle-tested **trade-offs**.
 
-This directory contains 10 comprehensive playbooks—covering the fundamental layers and specialized architectural paradigms of modern distributed systems. Each document provides:
+This directory contains 12 comprehensive playbooks—covering the fundamental layers and specialized architectural paradigms of modern distributed systems. Each document provides:
 1. **60-Second Interview Decision Trees & Matrices** (Instant mental lookup)
 2. **Mechanical First Principles** (Storage physics, concurrency models, serialization, network protocols, cryptography)
 3. **Head-to-Head Architectural Shootouts** (Direct comparisons with deep under-the-hood trade-offs)
@@ -11,7 +11,7 @@ This directory contains 10 comprehensive playbooks—covering the fundamental la
 
 ---
 
-## The 10-Layer Navigation Index
+## The 12-Layer Navigation Index
 
 | Layer Playbook | Core Architectural Dilemmas Covered | Quick Link |
 | :--- | :--- | :--- |
@@ -25,6 +25,8 @@ This directory contains 10 comprehensive playbooks—covering the fundamental la
 | **08. Multi-Tenant Architecture** | • Tenancy Models: Silo (Dedicated) vs Pool (Shared) vs Bridge (Hybrid)<br>• Database Multi-Tenancy: DB-per-tenant vs Schema-per-tenant vs Shared Table with PostgreSQL Row-Level Security (RLS)<br>• Noisy Neighbor Defense: Weighted Fair Queuing (WFQ) & Tenant Sharding<br>• Context Propagation: Ingress JWT to ThreadLocal/gRPC metadata<br>• Tenant-Aware Caching: Namespacing & Virtual Epoch Invalidation | [**Read Layer 08 Playbook**](file:///Users/abhinnaagarwal/Documents/system-design-notes/Layer-Playbooks/08-Multi-Tenant-Architecture.md) |
 | **09. Security, AuthN & AuthZ** | • AuthN: Stateful Session Cookies vs Stateless JWTs vs OAuth 2.0 PKCE / OIDC<br>• Asymmetric Verification: Zero-network JWKS (`.well-known/jwks.json`) in microservices<br>• The Token Revocation Dilemma: Refresh token family rotation + Redis blocklists<br>• AuthZ Models: RBAC vs ABAC (OPA/Rego) vs ReBAC (Google Zanzibar / SpiceDB)<br>• Data Protection: Envelope Encryption (KMS/HSM + local DEK) & Zero-Trust mTLS | [**Read Layer 09 Playbook**](file:///Users/abhinnaagarwal/Documents/system-design-notes/Layer-Playbooks/09-Security-AuthN-and-AuthZ.md) |
 | **10. Observability & SRE** | • Observability Levels: eBPF/Kernel, Continuous Profiling, 4 Golden Signals, RUM Vitals, Business KPIs<br>• Reliability Math: Exact SLI/SLO/SLA formulas & 30-Day Rolling Error Budgets<br>• Multi-Window Multi-Burn-Rate Alerting ($14.4\times$ 1h/5m, $6\times$ 6h/30m)<br>• OpenTelemetry Standard: API vs SDK vs Collector pipeline, OTLP Protobuf<br>• Distributed Tracing (Jaeger): W3C `traceparent` context, Tail-Based Sampling vs Cost Explosion<br>• Metrics TSDB: Gorilla delta-of-deltas & XOR bit-packing vs Cardinality Meltdown | [**Read Layer 10 Playbook**](file:///Users/abhinnaagarwal/Documents/system-design-notes/Layer-Playbooks/10-Observability-Telemetry-and-Reliability.md) |
+| **11. Deployment & CI/CD** | • The 5 Strategies: Rolling vs Blue/Green vs Canary vs Dark Launch (Shadowing) vs Feature Flags<br>• Zero-Downtime Database Migrations: The 4-Phase Expand/Contract (Parallel Run) Pattern<br>• Automated Canary Analysis (ACA): Kayenta / Argo Rollouts Mann-Whitney U-Test<br>• Version Skew Physics: Backward/Forward wire compatibility & Protobuf tag stability<br>• GitOps: Declarative pull reconciliation, immutable SHA digests, and automated rollback gates | [**Read Layer 11 Playbook**](file:///Users/abhinnaagarwal/Documents/system-design-notes/Layer-Playbooks/11-Deployment-Strategies-and-CICD.md) |
+| **12. Failure Modes & Resiliency** | • Distributed Failure Models: Crash-Stop vs Crash-Recovery vs Timing/Omission Faults<br>• Cascading Failures: Positive feedback death spirals & load-shift queue collapse<br>• Downstream Defenses: Propagated Deadlines (`grpc-timeout`), Exponential Backoff with Full Jitter, Token-Bucket Retry Budgets ($\le 10\%$), Circuit Breakers<br>• Upstream Defenses: Ingress Load Shedding (CoDel queue delay) & Little's Law Adaptive Concurrency Limits ($L = \lambda W$)<br>• Architectural Fault Isolation: Process/Thread Bulkheads, Cell-Based Swimlanes, and Combinatorial Shuffle Sharding ($\binom{N}{k}$ blast radius reduction) | [**Read Layer 12 Playbook**](file:///Users/abhinnaagarwal/Documents/system-design-notes/Layer-Playbooks/12-Distributed-Failure-Modes-and-Resiliency.md) |
 
 ---
 

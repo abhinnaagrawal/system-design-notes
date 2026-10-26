@@ -93,6 +93,8 @@ During Staff/Principal level evaluations, interviewers look for specific behavio
    * [Layer 08: Multi-Tenant Architecture (Silo vs Pool vs Bridge, DB-per-tenant, Postgres RLS, Fair Queues)](./Layer-Playbooks/08-Multi-Tenant-Architecture.md)
    * [Layer 09: Security, AuthN & AuthZ (OAuth2/PKCE, OIDC, Asymmetric JWKS, Zanzibar ReBAC, Envelope Encryption)](./Layer-Playbooks/09-Security-AuthN-and-AuthZ.md)
    * [Layer 10: Observability, Telemetry & SRE Reliability (OpenTelemetry, SLI/SLO/SLA, Error Budgets, Jaeger Tracing)](./Layer-Playbooks/10-Observability-Telemetry-and-Reliability.md)
+   * [Layer 11: Deployment Strategies & CI/CD (Rolling, Blue/Green, Canary, Expand/Contract DB Migrations, GitOps)](./Layer-Playbooks/11-Deployment-Strategies-and-CICD.md)
+   * [Layer 12: Distributed Failure Modes & Resiliency (Cascading Failures, Deadlines, Retry Budgets, Little's Law, Shuffle Sharding)](./Layer-Playbooks/12-Distributed-Failure-Modes-and-Resiliency.md)
 
 ## Core Concepts
  * [WebSockets Crash Course](./Core%20Concepts/WebSockets/)
