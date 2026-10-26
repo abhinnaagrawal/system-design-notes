@@ -148,6 +148,10 @@ Never permit unlimited retries. A microservice client must maintain an in-memory
 
 ### 4.4 The Circuit Breaker Pattern
 
+While retries assume that downstream failures are *transient blips* (e.g., packet loss), retrying against a downstream service that is **hard down or experiencing severe resource starvation** guarantees an outage collapse. 
+
+The Circuit Breaker pattern acts as an **in-process electrical fuse**: it monitors outbound RPC failure rates, automatically trips when a dependency is unhealthy, and **fails fast locally in $<1\mu\text{s}$** without dispatching network packets or tying up worker threads.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Closed
@@ -158,10 +162,53 @@ stateDiagram-v2
     Open --> HalfOpen: Sleep Window Expires (e.g., after 30s)
     note right of Open: Fast Fail! All RPCs rejected immediately.<br/>Executes local fallback (cache / default).
     
-    HalfOpen --> Closed: Probe Requests Succeed (e.g., 5 consecutive 200 OK)
+    HalfOpen --> Closed: Probe Requests Succeed (e.g., 10 consecutive 200 OK)
     HalfOpen --> Open: Any Probe Request Fails
     note right of HalfOpen: Canary mode. Allows a limited trickle<br/>of probe requests to test backend health.
 ```
+
+#### The 3 Canonical States & Transition Physics
+
+| Circuit State | Outbound Traffic Handling | Metric Evaluation | Next Transition Trigger |
+| :--- | :--- | :--- | :--- |
+| **1. CLOSED** *(Normal)* | **100% of calls pass through** to the downstream dependency over the network. | Records call outcomes (success, error, timeout) in an in-memory **sliding window**. | If `total_calls >= min_call_volume` (e.g., $\ge 20$) **AND** failure rate $\ge 50\%$ (or P99 latency $> \text{threshold}$) $\implies$ Transitions to **OPEN**. |
+| **2. OPEN** *(Fast-Fail / Tripped)* | **0% of calls hit the network**. 100% of calls fail fast locally in $<1\mu\text{s}$ with `CallNotPermittedException`. Executes local **fallback**. | Disables active RPC monitoring; starts an asynchronous **Sleep Window timer** (e.g., $30\text{s}$ to $60\text{s}$). | When the sleep window timer elapses $\implies$ Transitions to **HALF-OPEN**. |
+| **3. HALF-OPEN** *(Canary Probe)* | **Allows a trial trickle** of $k$ requests (e.g., $5$ to $10$ probe calls) through to downstream. All other concurrent calls continue to fail fast. | Evaluates the success rate of the probe requests exclusively. | • **All probes succeed:** Downstream recovered $\implies$ Resets to **CLOSED** (clearing window).<br>• **Any probe fails/times out:** Downstream still struggling $\implies$ Snaps back to **OPEN** (often doubling sleep window). |
+
+#### Sliding Window Storage Mechanics: Time-Based vs Count-Based
+
+Circuit breakers monitor failure rates using one of two internal memory structures:
+1. **Count-Based Sliding Window (Circular Ring Buffer):**
+   * Maintains a fixed-size circular array of the last $N$ calls (e.g., $N = 100$).
+   * *Memory Overhead:* Minimal ($O(N)$ bytes).
+   * *Trade-off:* Vulnerable to low-traffic bias. If 20 failures occur during a midnight lull, the breaker may stay OPEN for hours until enough daytime traffic arrives to push the failure percentage down.
+2. **Time-Based Sliding Window (Bucketed Ring Buffer):**
+   * Maintains an array of $B$ circular time buckets (e.g., 10 buckets of 1 second for a 10-second sliding window).
+   * Old buckets are evicted dynamically as time advances.
+   * *Production Advantage:* Accurately reflects real-time health, ensuring that transient past blips automatically age out of consideration.
+
+#### Fallback Design Strategies (Degraded Mode Execution)
+
+When the circuit is **OPEN**, the client should never throw an unhandled raw 500 error to the end user. It executes one of four fallback patterns:
+1. **Stale Cache Fallback (`stale-while-revalidate`):** Return the last known good response from a local in-memory L1 cache or Redis, flagging the payload as `stale: true`.
+2. **Graceful UI Degradation:** In a microservice aggregation gateway (e.g., rendering a product details page), if the `reviews-service` circuit trips, render the product price, images, and buy button, omitting only the reviews widget.
+3. **Static / Deterministic Defaults:** Return a sensible empty set (`[]`), a static banner, or a pre-calculated default recommendation list.
+4. **Asynchronous Write Buffering:** For non-blocking write paths (e.g., logging an analytics event or user audit trail), serialize the write payload to a local disk spool or dead-letter queue (DLQ) for replay once the circuit closes.
+
+#### Service Mesh (Envoy Outlier Detection) vs In-Process Libraries
+
+* **In-Process Libraries (Resilience4j, gobreaker, Polly):** 
+  * Implemented inside the application runtime.
+  * *Advantage:* Allows fine-grained, business-aware fallbacks (e.g., calling an alternative database or generating mock domain objects).
+* **Service Mesh / Gateway (Envoy Outlier Detection):**
+  * Implemented at the L7 network sidecar proxy.
+  * *Advantage:* Completely language-agnostic. Envoy dynamically ejects consecutive failing host IPs ($5\text{xx}$ errors) from the upstream load-balancing pool for a configurable base ejection time ($30\text{s} \times \text{consecutive ejections}$), transparently re-routing traffic to healthy replicas.
+
+#### Production Observability & Alerting Invariants
+* **Key Metrics:**
+  * `circuit_breaker_state` (Gauge: `0 = Closed`, `1 = Half-Open`, `2 = Open`).
+  * `circuit_breaker_rejections_total` (Counter: rate of locally fast-failed requests).
+* **Alert Rule:** If `circuit_breaker_state == 2` for $>60\text{ seconds}$ on a critical business dependency (e.g., Payment Gateway or User Auth), trigger an immediate **P1 / High-Priority On-Call Page**. It signifies a complete downstream outage that automated retries cannot heal.
 
 ---
 
