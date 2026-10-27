@@ -1,7 +1,7 @@
 # 05 - Physical Operators: Joins, Aggregations, Sorting & Windows
 
 **Priority:** P0
-**Versions:** 1.5 -> 4.2
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md), [06 - Query Planning (Catalyst & AQE)](06%20-%20Query%20Planning%20%28Catalyst%20&%20AQE%29.md).
 
@@ -33,7 +33,7 @@ A physical plan is a menu of data-movement decisions, and the operator names tel
 | Scans | `FileSourceScanExec`, `BatchScanExec` (V2), `InMemoryTableScanExec` | Pruning/pushdown happens here |
 | Exchanges | `BroadcastExchangeExec`, `ShuffleExchangeExec`, `AQEShuffleReadExec` | The glue; AQE rewrites these at runtime |
 
-The plan is a tree executed bottom-up (with codegen fusing non-blocking subtrees). Blocking nodes - **Exchange**, **Sort**, and the build side of a hash join - are the pipeline's walls and the natural AQE re-plan points. An **Exchange** is the physical operator that moves data: `ShuffleExchangeExec` for a shuffle, `BroadcastExchangeExec` for a broadcast.
+The plan executes bottom-up. `SortExec` blocks for input and implements `BlockingOperatorWithCodegen`, allowing it to participate in generated stages. Exchanges materialize query stages and form AQE boundaries. See chapter 03's `EXPLAIN CODEGEN` comparison.
 
 ---
 
@@ -125,7 +125,7 @@ HashAggregate(final, reduce-side)  <- merge partial states
 
 | Operator | Use case | Notes |
 |----------|----------|-------|
-| `HashAggregateExec` | Default, codegen-able types | Partial aggregation before the shuffle is the map-side combine that lets the classic sort writer (chapter 04) shine |
+| `HashAggregateExec` | Default, codegen-able types | SQL partial aggregation reduces rows upstream of exchange; shuffle writer selection follows dependency flags (chapter 04) |
 | `ObjectHashAggregateExec` | Types the binary path doesn't support (e.g. decimals/arrays/maps in older versions) [RN 2.2] | Object overhead; added in 2.2 to keep such aggregations off the sort-based fallback |
 | `SortAggregateExec` | Fallback when hashing isn't possible | Requires sorted input; why some plans show Sort before Aggregate |
 
@@ -133,7 +133,7 @@ Key behaviors:
 
 - **Partial aggregation is the biggest win** when group cardinality is much smaller than row count (`count`, `sum`). Concretely, 1M orders with 50k distinct customers become 50k partial rows before the shuffle; the final aggregate merges only those. If every row is a unique group (`group by user_id` on a huge table), partial aggregation saves little and the shuffle dominates.
 - **Distinct aggregations** (`count(distinct x)`) are rewritten into grouped sub-aggregations (multiple shuffles in some plans) - a classic "why does my plan have two exchanges?" question.
-- **AQE** coalesces small post-shuffle partitions and can split skewed group-by partitions (same skew machinery as joins).
+- **AQE** can coalesce aggregation shuffle partitions. For hot GROUP BY keys, use partial/pre-aggregation or a salted two-phase aggregate with a correct merge: combine partial sums and counts to calculate averages. Skew-join splitting handles joins; REBALANCE splitting handles output sizing.
 - **Window functions without partitioning** force all data into a single partition: an accidental single-task stage. Watch for `Exchange SinglePartition` in plans.
 
 ---
@@ -196,7 +196,7 @@ flowchart TB
     style H stroke:#28a745,stroke-width:2px
 ```
 
-Read this plan out loud in an interview: "Fact scan gets DPP-pruned using the broadcast dimension; the join is a broadcast hash join because the dimension is 10 MB under the 10 MB threshold; aggregation does a partial combine before the regional shuffle, then a final aggregate; AQE coalesces the post-shuffle partitions and would split any skewed region."
+Read this plan bottom-up: DPP prunes eligible fact partitions; a dimension can be broadcast when its estimated size meets the configured threshold. The fact shuffle can remain from an earlier adaptive plan. Partial aggregation precedes the regional exchange, then final aggregation merges groups. AQE coalesces small partitions; hot region keys can use a two-phase aggregate.
 
 ---
 
@@ -272,12 +272,12 @@ Operator-level evolution is a series of robustness fixes followed by runtime int
 | 4 | When does AQE pick SHJ? | After shuffle, when the build side per partition is small enough to hash; AQE can switch strategies |
 | 5 | What is DPP? | Runtime pruning of partitioned fact scans using values from a broadcast dimension (3.0), 2-18x on 60/102 TPC-DS queries |
 | 6 | What are runtime filters (3.3)? | Bloom filters built from the small join side and pushed into big-side scans; up to 10x on affected queries |
-| 7 | Why does the aggregation plan show two HashAggregates? | Partial (map-side combine) + final (reduce-side) around the shuffle |
+| 7 | Why two HashAggregates, and which shuffle writer? | SQL partial + final around exchange; the exchange selects its writer independently using dependency flags |
 | 8 | When does partial aggregation not help? | When group cardinality ~ row count (almost every row is its own group) |
 | 9 | What does a missing `PARTITION BY` in a window cause? | Single-partition exchange + one task for the whole dataset |
 | 10 | How does top-K avoid a full sort? | Bounded heap per partition + merge (`TakeOrderedAndProjectExec`) |
 | 11 | Why would a plan show BroadcastNestedLoopJoin? | Non-equi predicate or no equi condition; O(n*m) per partition |
-| 12 | What does AQE skew join do? | Splits partitions much larger than the median (5x, > 256 MB defaults) into sub-partitions |
+| 12 | How do hot joins and hot GROUP BY keys differ? | AQE splits eligible skewed join partitions (5x median and >256 MiB defaults); hot aggregate keys use partial aggregation or salting with a correct second merge |
 | 13 | Where do full-outer joins stand post-3.3? | SHJ has supported full outer since 3.1; 3.3 added codegen; SMJ full outer is 20-30% faster and SHJ 10-20% (Databricks 3.3) |
 | 14 | Why can a join with the right strategy still be slow? | Data skew, stale stats, tiny files, or an unnecessary second shuffle - operator choice is not the whole story |
 | 15 | What does "one exchange per shuffle" imply for joins? | Each shuffle side pays an exchange; avoiding it means broadcast or pre-partitioned/bucketed data |

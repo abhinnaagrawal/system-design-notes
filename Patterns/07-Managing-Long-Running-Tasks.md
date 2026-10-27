@@ -2,6 +2,8 @@
 
 > **The System Design Interview Lens:** Operations taking longer than 2–3 seconds (video transcoding, monthly payroll report generation, ML model batch inference, bulk CSV data exports) must never execute synchronously within an HTTP request. A Staff engineer decouples execution using the **Asynchronous Request-Response Pattern**, chooses appropriate queue and worker topologies, handles poison-pill worker crashes, and guarantees execution progress visibility.
 
+> **Job contract:** `202` acknowledges durable submission. Request/job IDs deduplicate submissions, attempt tokens fence lease ownership and result publication, and business-operation IDs deduplicate external effects.
+
 ---
 
 ## 1. 60-Second Interview Decision Matrix
@@ -28,21 +30,23 @@ sequenceDiagram
     participant GW as API Gateway / App Server
     participant DB as Job Metadata DB
     participant Queue as Job Queue (RabbitMQ/SQS)
+    participant Relay as Outbox Relay
     participant Worker as Background Worker Pool
 
     User->>GW: POST /api/reports/generate (Filter criteria)
-    GW->>DB: INSERT INTO jobs (status='PENDING') -> job_id = "job_456"
-    GW->>Queue: Enqueue({job_id: "job_456", task: "REPORT"})
+    GW->>DB: Commit job + outbox intent atomically
     GW-->>User: HTTP 202 Accepted (Location: /api/jobs/job_456)
 
-    Note over User,GW: Client returns within 15ms!
+    Note over User,GW: Accepted only after durable intent
+    Relay->>DB: Read pending outbox
+    Relay->>Queue: Publish job_456 (may repeat)
 
     Worker->>Queue: Pull job message
-    Worker->>DB: UPDATE jobs SET status='RUNNING', progress=0%
+    Worker->>DB: Conditional claim; increment attempt token
     Note over Worker: Long calculation executes...
     Worker->>DB: UPDATE jobs SET progress=50%
     Note over Worker: Task finishes successfully
-    Worker->>DB: UPDATE jobs SET status='COMPLETED', download_url='s3://...'
+    Worker->>DB: Conditional completion for current attempt
     Worker->>Queue: ACK message (Delete from queue)
 ```
 
@@ -145,17 +149,35 @@ In interviews, calculate exact worker pool sizing using Donne Martin's capacity 
 
 ### Safeguard 3: Preventing Duplicate Execution (Distributed Leases)
 Because queues guarantee **at-least-once delivery**, network delays might cause a visibility timeout to expire while a slow worker is still working.
-* **The Defense:** Workers acquire a distributed lease in Redis or PostgreSQL using the `job_id`:
+* **The Defense:** Acquire the authoritative lease and fence result publication in the same store using short transactions. The PostgreSQL-style bind parameters below assume `attempt BIGINT NOT NULL DEFAULT 0`; two minutes is an example lease policy. Use database wall time, not a stale transaction-start timestamp:
   ```sql
-  -- Atomic worker heartbeat / claim
-  UPDATE jobs 
-  SET worker_id = 'worker_node_9', 
-      heartbeat_at = NOW(), 
-      status = 'RUNNING' 
-  WHERE id = 'job_456' 
-    AND (status = 'PENDING' OR heartbeat_at < NOW() - INTERVAL '2 minutes');
+  UPDATE jobs
+  SET worker_id = :worker_id,
+      heartbeat_at = clock_timestamp(),
+      attempt = attempt + 1,
+      status = 'RUNNING'
+  WHERE id = :job_id
+    AND (status = 'PENDING'
+         OR (status = 'RUNNING'
+             AND heartbeat_at < clock_timestamp() - INTERVAL '2 minutes'))
+  RETURNING attempt;
+
+  UPDATE jobs
+  SET status = 'COMPLETED', download_url = :result_url
+  WHERE id = :job_id AND status = 'RUNNING'
+    AND worker_id = :worker_id AND attempt = :claimed_attempt
+    AND heartbeat_at >= clock_timestamp() - INTERVAL '2 minutes';
   ```
-* If the row count is `0`, another worker is actively processing the job; discard the duplicate message.
+* Heartbeats use the same owner/attempt/RUNNING/unexpired guard; an expired worker must not renew itself after ownership is lost. Check affected rows on heartbeat and completion. Terminal states are never claimable.
+* Zero claim rows can mean terminal, leased or missing. Inspect authoritative state: acknowledge terminal duplicates, defer leased work under the queue policy, and alert/reconcile missing jobs rather than silently dropping them.
+* External calls use stable business-operation idempotency keys or a downstream resource that enforces fencing. Upload artifacts under attempt-specific names and expose only the winning result pointer.
+
+| Crash point | Recovery |
+| :--- | :--- |
+| Job/outbox committed, relay not run | Relay retries durable publication |
+| Worker pauses past lease | New claim advances attempt; old completion/heartbeat is rejected |
+| External effect succeeds, reply is lost | Query/retry the same business-operation key |
+| Completion commits, queue ACK is lost | Redelivery sees terminal state and acknowledges without reopening |
 
 ---
 
@@ -173,7 +195,7 @@ Because queues guarantee **at-least-once delivery**, network delays might cause 
 
 ```
 1. "Because this task takes more than 2 seconds, executing it synchronously in the HTTP request cycle is an anti-pattern that leads to 504 timeouts and server thread pool starvation."
-2. "I will implement the Asynchronous Request-Response Pattern: the API Gateway validates the request, creates a job record in PostgreSQL, enqueues the task in AWS SQS, and returns HTTP 202 Accepted within 15ms."
+2. "I will atomically persist the job and outbox intent, then return HTTP 202 with a status URL; the relay may publish more than once."
 3. "Background worker pools will autoscale dynamically based on the queue backlog depth, not CPU utilization."
 4. "To guarantee resilience against worker crashes, messages will use a 5-minute Visibility Timeout. If a worker dies, the message automatically re-appears for another worker to process."
 5. "To prevent poison pills from taking down the worker cluster, we will route tasks that fail more than 3 times to a Dead Letter Queue (DLQ) with automated alerting."

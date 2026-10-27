@@ -1,5 +1,9 @@
 # Chapter 14: Design a Global Video Streaming Platform (YouTube / Netflix)
 
+## Guarantees and assumptions
+Upload ACK follows durable object and metadata acceptance; playback becomes ready after transcoding and manifest publication. Stable upload/chunk IDs and transcode generation IDs deduplicate retries.
+**Principal IC exercise:** A transcode completes but its ACK is lost: publish exactly one validated manifest generation without deleting segments still referenced by viewers.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar

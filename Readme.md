@@ -3,11 +3,21 @@
 
 These comprehensive system design study notes are synthesized from **Alex Xu's System Design Interview (Volumes 1 & 2)**, **Donne Martin's `system-design-primer`** (cloned locally in parallel), **System Design Fight Club (SDFC)**, and real-world high-throughput production architectures at Google, Meta, Amazon, and Stripe.
 
-Every chapter has been audited, upgraded, and enriched with:
+The chapters are organized around:
 1. **Executive Framing (Senior L5 vs. Staff L6+):** What separates an average candidate from a top-of-band Staff engineer.
 2. **5-Pillar Staff System Design Assessment Rubric:** Concrete behavioral evidence across Decision Making, Technical Proficiency, Problem Solving, Operational Mindset, and Adaptability.
 3. **Hardware & Physics-Grounded Napkin Math:** Real numbers (L1 cache vs. RAM vs. NVMe vs. WAN, zero-copy `sendfile(2)`, page cache vs. JVM heap, packet serialization).
 4. **Staff Curveball Playbooks:** Countermeasures for production incidents, partition splits, celebrity hotspots, and thundering herds.
+
+## Using and Maintaining These Notes
+
+- **Concepts:** [Building Blocks](Building_Blocks.md) links to the concept notes and layer playbooks.
+- **Guarantees before products:** Each numbered design and pattern states its ACK/commit point, durability/consistency scope, retry identity and assumptions. Financial, reservation, scheduling and streaming designs include response-loss/recovery timelines.
+- **Sources:** Include the version and workload context for performance figures, and the region, mode and source for managed-service quotas. See [maintenance guidance](Layer-Playbooks/README.md#evidence-and-maintenance).
+- **Practice judgment:** Complete the [Principal-IC lab](Book-Notes.md#8-principal-ic-practice-lab): strategy memo, tenets, stakeholder decision, behavior follow-up and sustainable ownership.
+- **Validation:** With Node.js 22+ and Git, run `node --test tools/check-notes.test.mjs` and `node tools/check-notes.mjs`. CI runs the same local-link/heading checks.
+
+The checker supports inline/reference links, ATX headings, explicit HTML anchors and fenced-code exclusions. It checks case-sensitive path spelling even on macOS and reports unclosed code fences.
 
 ---
 
@@ -252,7 +262,4 @@ During Staff/Principal level evaluations, interviewers look for specific behavio
 - [Spark as a Compiler (Databricks)](https://www.databricks.com/blog/2016/05/23/apache-spark-as-a-compiler-joining-a-billion-rows-per-second-on-a-laptop.html)
 - [Adaptive Query Execution: Speeding Up Spark SQL at Runtime (Databricks)](https://www.databricks.com/blog/2020/05/29/adaptive-query-execution-speeding-up-spark-sql-at-runtime.html)
 - [Shuffle Deep Dive (Aaron Davidson)](https://www.youtube.com/watch?v=dmL0N3qfSc8)
-
-
-
 

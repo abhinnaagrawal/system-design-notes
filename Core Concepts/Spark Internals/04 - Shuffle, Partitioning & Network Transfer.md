@@ -1,7 +1,7 @@
 # 04 - Shuffle, Partitioning & Network Transfer
 
 **Priority:** P0
-**Versions:** 1.2 -> 4.2
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [Appendix B - The Story of Spark Performance](Appendix%20B%20-%20Optimization%20Evolution%20Map.md) (Campaign 1).
 
@@ -110,7 +110,7 @@ Key components:
 
 ```mermaid
 flowchart TB
-    A{"Map-side combine?<br/>(aggregation)"} -->|Yes| SORT["SortShuffleWriter<br/>(classic sort + combine)"]
+    A{"ShuffleDependency<br/>mapSideCombine=true?"} -->|Yes| SORT["SortShuffleWriter<br/>(classic sort + combine)"]
     A -->|No| B{"Partitions <= bypassMergeThreshold<br/>(default 200)?"}
     B -->|Yes| BYPASS["BypassMergeSortShuffleWriter<br/>(no sorting at all)"]
     B -->|No| C{"Serializer supports<br/>relocation?<br/>(UnsafeRow, registered Kryo)"}
@@ -121,7 +121,7 @@ flowchart TB
 ### A. Classic sort writer - the default workhorse
 
 1. Each record is tagged with its reduce partition id.
-2. If `mapSideCombine` is on (e.g. `reduceByKey`, SQL aggregation), partial results are combined in memory keyed by (partition, key).
+2. If `ShuffleDependency.mapSideCombine` is on (e.g. RDD `reduceByKey`), partial results are combined in memory keyed by (partition, key).
 3. When a memory threshold is hit, the tagged/combined records are sorted by (partition, key) and spilled to disk as a sorted run.
 4. At the end, spilled runs are merge-sorted and each partition's records are written contiguously into the single data file; the index is written.
 
@@ -129,7 +129,7 @@ Why it won over hash shuffle [Spark 1.2 release notes]: bounded memory (spill in
 
 ### B. Bypass writer - "don't sort what you don't need to sort"
 
-When there is **no aggregation** and the partition count is small (<= `spark.shuffle.sort.bypassMergeThreshold`, default 200), sorting buys nothing. The bypass writer opens one output stream per reduce partition, writes records straight to their stream, then concatenates the files into the final data file. No sort, no merge.
+When the dependency has **mapSideCombine=false** and partition count is small (<= `spark.shuffle.sort.bypassMergeThreshold`, default 200), the bypass writer opens one stream per reduce partition, writes directly, then concatenates files. **SQL partial aggregation is an upstream `HashAggregateExec`, not this dependency flag**: a normal SQL GROUP BY exchange leaves mapSideCombine false and can use bypass or unsafe shuffle.
 
 ### C. Tungsten writer (`UnsafeShuffleWriter`) - serialized bytes, sorted pointers
 
@@ -140,7 +140,7 @@ The CPU win of Tungsten applied to shuffle [Databricks, "Project Tungsten", 2015
 3. Sorting is a **radix sort on partition id only** - the pointer array is sorted, not the records and not the keys. No comparisons touch the data, no deserialization happens.
 4. When pages fill, the sorted run is spilled as raw bytes. At the end, spills are merged by partition ranges and written to the single data file. (Spill-file layout and the concatenation merge: chapter 02, §5B-5C.)
 
-Because it never compares keys, this path **cannot do map-side combine** - that is the trade. Tungsten is fast for "route and write", and falls back to the classic writer when aggregation is needed.
+Because it never compares keys, this path **cannot implement dependency-level mapSideCombine**. It can still shuffle already-aggregated SQL rows. Classic sort is required when the dependency requests combine; unsafe eligibility also includes its partition-ID limit.
 
 ### D. Compression and serialization knobs that matter
 
@@ -152,7 +152,7 @@ Because it never compares keys, this path **cannot do map-side combine** - that 
 | `spark.shuffle.accurateBlockThreshold` | 100 MB | Above this, block sizes are tracked accurately for fetch scheduling |
 | `spark.shuffle.file.buffer` | 32 KB | Per-partition output buffer size on the map side |
 
-**Memory hook:** *"No combine -> maybe bypass (<=200) -> maybe tungsten (relocatable serializer) -> otherwise classic sort. Aggregation always means the classic sort writer."*
+**Memory hook:** *"Dependency combine -> classic; otherwise <=200 -> bypass; otherwise relocatable serializer and eligible partition count -> unsafe; else classic. SQL partial aggregation is separate."*
 
 ---
 
@@ -177,7 +177,7 @@ A reduce task starts with a wish list: "partition 7 from all map outputs." The i
 | Mechanism | Version | What actually happens | How it differs |
 |-----------|---------|----------------------|----------------|
 | **Host-local read** | 3.1 (config `spark.shuffle.readHostLocalDisk`, default true) | Block is on the same host but not the same executor -> read the file directly from local disk instead of fetching over the network | Pure **fetch-path** optimization; no plan change |
-| **Local shuffle reader** (AQE) | 3.0 | AQE proves the exchange's partitioning already satisfies the consumer (e.g. two joins on the same key) -> rewrites the plan to read map outputs locally (`AQEShuffleReadExec` with a local reader) | **Plan rewrite**; can eliminate entire stages worth of network read cost |
+| **Local shuffle reader** (AQE) | 3.0 | Downstream shuffle partitioning is no longer needed (e.g. SMJ -> BHJ); map-oriented reads can prefer locality | Rewrites read partitions over materialized shuffle output to improve locality |
 | **Push-based shuffle** | 3.2 | Map tasks push outputs to the shuffle service, which **merges** blocks per partition; reducers then fetch fewer, larger merged blocks | Changes the **data layout** at the service |
 
 ### D. Push-based shuffle in one paragraph
@@ -201,13 +201,13 @@ Shuffle moves bytes; **partitioning decides where they go.** The two are insepar
 
 Spark SQL additionally uses `HashPartitioning`, `RangePartitioning`, and `RoundRobinPartitioning`, driven by `spark.sql.shuffle.partitions` (default 200 - the most famous tuning knob in Spark history).
 
-The goldilocks problem, in one line: **too few partitions -> stragglers and OOM/spill; too many -> task scheduling overhead and tiny fetches.** Pre-AQE you tuned by hand; AQE coalesces adjacent small partitions at runtime (target `spark.sql.adaptive.advisoryPartitionSizeInBytes`, default 64 MB), which is why 3.2 shipping AQE on by default "retired" that knob.
+The goldilocks problem: **too few partitions -> stragglers and OOM/spill; too many -> scheduling overhead.** Start with enough shuffle parallelism and let AQE merge small partitions. With `coalescePartitions.parallelismFirst=true` (3.5.0), coalescing prioritizes parallelism over the 64 MiB advisory target; see chapter 06.
 
 Avoiding shuffles structurally:
 
 - `coalesce(n)` narrows partitions **without** a shuffle; `repartition(n)` / `repartitionByRange` always shuffle. (Classic trap.)
 - Pre-partitioned/bucketed tables let joins skip the shuffle when both sides are clustered the same way.
-- AQE local shuffle reader and DPP/runtime filters remove or shrink shuffles at runtime (see chapter 06).
+- AQE local shuffle reader reuses existing output with locality-aware reads; DPP/runtime filters can shrink inputs. Neither implies previously written shuffle bytes vanish.
 
 **Memory hook:** *"Partitioning is a routing decision; partitioning wrong = skew = one task doing the cluster's work."*
 
@@ -228,7 +228,8 @@ sequenceDiagram
     D->>D: Job submitted; ShuffleDependency found
     D->>D: Split into ShuffleMapStage + ResultStage
     D->>M: Run map tasks
-    M->>M: Partition by productId; combine partial counts (sort writer)
+    M->>M: SQL partial HashAggregate; exchange partitions partial rows
+    M->>M: Select writer by dependency flags (not SQL aggregation)
     M->>M: Spill + merge; write data + index files
     M->>T: Register map output locations & sizes
     D->>D: Map stage complete = AQE materialization point
@@ -301,11 +302,11 @@ This lineage is the one to know cold, because shuffle questions in interviews ar
 ## 11. The One-Page Recap (memorize this)
 
 1. Shuffle = wide dependency = all-to-all by key = stage boundary = recovery unit.
-2. Map side: **aggregation -> classic writer; no combine + few partitions (<=200) -> bypass; relocatable serializer -> tungsten** (pointer sort, no combine, 2^24 partitions max).
+2. Map side: **dependency mapSideCombine -> classic; otherwise <=200 -> bypass; otherwise eligible relocatable serializer -> unsafe**. SQL partial aggregation is separate from the flag.
 3. One data file + one index file per map task; blocks in partition order -> contiguous batch fetches (3.0).
 4. Reduce side: MapOutputTracker -> ShuffleBlockFetcherIterator -> local / host-local / remote(merged) fetches; maxSizeInFlight back-pressure; retries then FetchFailed.
 5. Skips: host-local disk (fetch path), AQE local reader (plan rewrite), push-based merge (service-side layout).
-6. Skew: hash keys + hot key = straggler; observe partition sizes in the SQL tab; AQE skew join splits it.
+6. Hot key = possible straggler; AQE skew-join splitting targets joins, not ordinary final GROUP BY keys. Aggregate salting requires a correct second merge.
 7. ESS is the reason dynamic allocation is safe.
 8. Four generations: **Sort (1.2), Serialized (1.4), Skip network (3.0/3.1), Service merge (3.2)** - that sentence is the whole lineage.
 
@@ -320,13 +321,13 @@ This lineage is the one to know cold, because shuffle questions in interviews ar
 | 3 | When does the bypass writer run? | No map-side combine and <= 200 reduce partitions (`bypassMergeThreshold`) |
 | 4 | What's clever about the tungsten sort? | 8-byte packed pointers (partition id + page + offset); radix sort on pointers, no object/key comparisons; spills raw bytes |
 | 5 | What does the index file contain? | Per reduce partition: offset and length into the data file |
-| 6 | Host-local read vs AQE local reader? | Host-local: fetch path reads local disk when the block is on the same host. AQE local reader: plan rewrite that reads map outputs locally because partitioning already satisfies the consumer |
-| 7 | When can AQE skip network reads entirely? | When the exchange's output partitioning already matches the consumer's requirement (e.g. two joins by the same key) |
+| 6 | Host-local read vs AQE local reader? | Host-local is a fetch-path optimization; AQE local reader changes read partition specs when downstream shuffle partitioning is no longer needed |
+| 7 | How does AQE local reading use shuffle output? | It reuses materialized map output, e.g. after SMJ -> BHJ, and chooses locality-aware read partitions |
 | 8 | Why does push-based shuffle exist and when is it a bad idea? | Small random reads become large sequential reads via service-side merge; bad for small/quick queries, best for heavy long-running shuffle I/O |
 | 9 | Why is the External Shuffle Service required for dynamic allocation? | Executors get deallocated; shuffle files must outlive them to avoid recomputing map stages |
 | 10 | How does Spark avoid recomputing all maps when one reducer fetch fails? | FetchFailed -> only affected map outputs are recomputed (or refetched from ESS); consecutive failure limits abort the job |
 | 11 | `coalesce(10)` vs `repartition(10)`? | Coalesce narrows existing partitions without a shuffle; repartition shuffles for an even key distribution |
-| 12 | Why was 200 partitions (`spark.sql.shuffle.partitions`) such a notorious knob? | One number cannot serve all data sizes; too few -> stragglers, too many -> overhead; AQE coalescing at 64 MB targets made it mostly obsolete |
+| 12 | How should initial shuffle sizing work with AQE? | Start with sufficient parallelism, then inspect coalescing; parallelismFirst=true prioritizes parallelism over the advisory 64 MiB target |
 | 13 | How do you spot skew in the UI? | Max vs median task duration/shuffle read in the stage page; partition sizes in the SQL tab's Exchange node |
 | 14 | What changed about shuffle integrity in 4.x? | 4.0 CRC32C checksums; 4.1 can rerun the full map stage on checksum mismatch instead of failing or returning wrong results |
 | 15 | Which config caps bytes in flight per reduce task? | `spark.reducer.maxSizeInFlight`, default 48 MB |

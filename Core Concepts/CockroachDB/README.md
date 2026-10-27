@@ -5,7 +5,7 @@
 - [CockroachDB Architecture & Design Documentation](https://www.cockroachlabs.com/docs/stable/architecture/overview)
 - [Google Spanner: Becoming a SQL System (David F. Bacon et al.)](https://research.google/pubs/spanner-becoming-a-sql-system/)
 
-**TL;DR:** CockroachDB is an open-source, cloud-native **Distributed SQL** database designed to combine the familiar relational semantics and strict ACID guarantees of PostgreSQL with the horizontal scalability, multi-region survivability, and zero-downtime elasticity of NoSQL systems. Architecturally, CockroachDB translates high-level SQL tables into an **ordered global key-value keyspace**, partitions the keyspace into contiguous **64MB Ranges**, replicates each range via an independent **Multi-Raft consensus group**, and stores immutable data locally using its custom pure-Go LSM engine, **Pebble**. Unlike traditional RDBMS that require fragile manual sharding, or NoSQL databases like Cassandra that abandon ACID transactions and rollbacks, CockroachDB guarantees **Strict Serializable Isolation** across arbitrary multi-node distributed transactions using **Two-Phase Commit over Multi-Raft** and **Hybrid Logical Clocks (HLC)**.
+**TL;DR:** CockroachDB is a cloud-native **Distributed SQL** database with PostgreSQL-compatible relational semantics and automatic range distribution/replication. It maps SQL data into an ordered key-value space, replicates ranges using Multi-Raft, and stores local data using Pebble. It defaults to SERIALIZABLE isolation; current releases also support READ COMMITTED.
 
 ---
 
@@ -564,19 +564,19 @@ sequenceDiagram
 
 ---
 
-## 8. Why CockroachDB ONLY Supports Serializable Isolation
+## 8. Isolation Levels: Serializable by Default, Read Committed Also Supported
 
 In PostgreSQL and MySQL, engineers configure isolation levels (`READ COMMITTED`, `REPEATABLE READ`, or `SERIALIZABLE`).
 
-Ben Darnell explains why CockroachDB made the radical architectural choice to **exclusively support Strict Serializable Isolation**:
+The original design supported SERIALIZABLE only. **Current releases also support READ COMMITTED**, as documented in the [isolation guide](https://www.cockroachlabs.com/docs/stable/read-committed) (checked 2026-10-27).
 
 1. **Distributed Latency Dominance:**
    * On a single-node database, `Read Committed` is noticeably faster than `Serializable` because single-node memory locks are cheap.
-   * In a distributed database, **network round-trips over Raft dominate $>95\%$ of total latency**. The CPU performance difference between `Read Committed` and `Serializable` is negligible.
+   * Network coordination can dominate, but the percentage and isolation-level cost depend on contention, locality and workload. READ COMMITTED can change retry behavior; measure rather than assuming negligible differences.
 2. **Preventing Catastrophic Financial Bugs:**
    * Lower isolation levels suffer from concurrency anomalies: **Write Skew**, **Phantom Reads**, and **Read Skew**.
    * In banking, inventory management, and digital wallets, write skew allows concurrent users to overdraw accounts or double-book resources.
-   * CockroachDB eliminates this entire class of bugs by defaulting exclusively to **Serializable Isolation**.
+   * SERIALIZABLE prevents anomalies relative to serial execution; the application must still enforce balance/inventory invariants, retry serialization failures correctly and avoid out-of-transaction effects. Choosing READ COMMITTED requires separately reasoning about permitted anomalies.
 
 ---
 
@@ -588,8 +588,8 @@ Ben Darnell explains why CockroachDB made the radical architectural choice to **
 | **Partitioning Strategy**| Consistent Hash Ring | Consistent Hash Ring | **Ordered 64MB Ranges** | Ordered 64MB Splits | Manual Hash/Range Sharding |
 | **Consensus Engine** | Masterless / Gossip | Paxos per partition | **Multi-Raft per Range** | Multi-Paxos per Split | None (Master-Replica) |
 | **Clock Synchronization**| Client Timestamps (LWW) | Server Time / NTP | **Hybrid Logical Clocks (HLC)**| **TrueTime (Atomic + GPS)**| System Wall Clock |
-| **Transaction Isolation**| None (Read Uncommitted) | None / Single-Partition | **Strict Serializable** | Strict Serializable | Configurable per query |
-| **Rollback Capability** | ❌ **Never rolls back** | ❌ No rollback | ✅ **Full Rollback Support** | ✅ Full Rollback Support | ✅ Full Rollback Support |
+| **Transaction Isolation**| Consistency/LWT/batch scope differs from SQL isolation | Multi-item/table transactions within account/region limits | **SERIALIZABLE default; READ COMMITTED available** | Serializable read-write transactions | Configurable per transaction |
+| **Rollback Capability** | No general SQL multi-statement rollback | Atomic TransactWriteItems rejects/aborts the whole transaction | Transaction rollback | Transaction rollback | Transaction rollback within supported scope |
 | **Zero-RTT Reads** | ❌ No | ❌ No | ✅ **Via Range Leaseholder** | ✅ Via Leader Leases | N/A |
 | **Storage Engine** | LSM (CommitLog/SSTables) | Internal SSD B-Trees | **Pebble (Pure-Go LSM)** | RocksDB-like LSM | Heap Pages + B-Trees |
 

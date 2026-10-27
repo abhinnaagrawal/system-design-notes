@@ -45,21 +45,21 @@ Choosing the correct partition key is crucial to avoid the Scatter-Gather proble
 
 ```mermaid
 flowchart TD
-    subgraph HashPart ["Hash Partitioning (Inefficient for Range)"]
+    subgraph HashPart ["Hash on PostID (User Query Fans Out)"]
         Q1["Query: Get all posts for User A"] --> N1["Node 1"]
         Q1 --> N2["Node 2"]
         Q1 --> N3["Node 3"]
         note1["Requires querying every node and merging results"]
     end
     
-    subgraph RangePart ["Range Partitioning (Efficient for Range)"]
+    subgraph RangePart ["Partition on UserID (Hash or Range)"]
         Q2["Query: Get all posts for User A"] --> N4["Node 1"]
         note2["All posts for User A live on a single node"]
     end
 ```
 
 *   **Hash Partitioning:** If you partition by `PostID`, fetching all posts for a specific user requires a scatter-gather operation across all nodes because the posts are randomly distributed.
-*   **Range Partitioning (Composite Key):** If you partition by `UserID` and sort by `PostID`, all posts for a given user land on the same physical node. A key range query (e.g., fetching a user's timeline) can be served entirely from one node.
+* **Partition Key vs. Partition Strategy:** Hashing `UserID` colocates that user's items logically and supports a local `PostID` sort-key range. Range partitioning on a composite key supports ordered cross-partition traversal. The partition key determines logical colocation; the engine can split large logical partitions physically.
 
 ---
 
@@ -89,10 +89,11 @@ Secondary indexes do not come for free. If you want to sort a user's posts chron
 
 ### Local Secondary Indexes (LSI) vs Global Secondary Indexes (GSI)
 
-*   **Local Secondary Index (LSI):** The index only contains data that lives on that specific physical machine. 
-*   **Global Secondary Index (GSI):** The index contains data spanning across *all* nodes in the cluster.
-    *   **The Trade-off:** While GSIs prevent the scatter-gather problem for read-heavy key range queries, they introduce massive write latency. Updating a single record requires sending index updates to multiple machines across the network.
-    *   **Interview Tip / Preference:** Avoid GSIs in practice. Instead of paying the massive write penalty of a GSI, it is often better to create a downstream read-optimized view of the data (partitioned differently) to serve those specific read queries. DynamoDB supports up to 8 GSIs, but use them sparingly.
+* **Local/Global Indexes:** Local versus global describes the index's partition scope; physical placement depends on the engine.
+* **DynamoDB LSI:** Uses the base table's partition key with an alternate sort key; supports strongly consistent reads and must be created with the table.
+* **DynamoDB GSI:** Can use different partition/sort keys and scales separately; its reads are eventually consistent. Index queries still require the appropriate key predicates and are not arbitrary global range scans.
+* **Trade-off:** Compare GSI and materialized-view write/storage capacity, propagation lag and hot-key behavior for the access pattern.
+* **Quota (checked 2026-10-27):** DynamoDB's default is **20 GSIs per table** (adjustable) and **5 LSIs per table**. Verify current account/region quotas before designing. [AWS secondary-index quotas](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ServiceQuotas.html#limits-secondary-indexes).
 
 ### Concatenated Indexes
 When you index multiple columns (e.g., `UserID`, then `PostID`), the database typically sorts them alphabetically/sequentially using a B-Tree. It narrows down the first attribute, then the second. It does *not* narrow down both simultaneously (unlike Spatial indexes).

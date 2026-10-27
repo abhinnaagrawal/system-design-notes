@@ -1,7 +1,7 @@
 # 08 - Fault Tolerance, Resource Scheduling & Multi-Tenancy
 
 **Priority:** P1
-**Versions:** 1.2 (ESS/dynamic allocation) -> 4.2
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [01 - Execution Architecture & Scheduling](01%20-%20Execution%20Architecture%20&%20Scheduling.md), [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md), [07 - Storage, Caching & File Formats](07%20-%20Storage,%20Caching%20&%20File%20Formats.md).
 
@@ -29,7 +29,7 @@ The failure model is easier to remember as a hierarchy than as a list: tasks fai
 | Component | Can fail? | Consequence | Spark's mitigation |
 |-----------|-----------|-------------|--------------------|
 | Task | Yes (exceptions, OOM, poison record) | Retry within the stage | `spark.task.maxFailures` (4) + task retry |
-| Stage | Yes (all task attempts exhausted, fetch failure) | Stage resubmitted | `spark.stage.maxConsecutiveAttempts` (4) |
+| Stage | Yes (e.g. fetch failure) | Affected stages may be resubmitted; exhausted ordinary task failures normally abort the job | `spark.stage.maxConsecutiveAttempts` (4) |
 | Executor | Yes (crash, OOM, preemption) | Lost cached blocks, map outputs, running tasks | Reschedule tasks; recompute missing shuffle; ESS for shuffle data |
 | Node | Yes (hardware, spot reclaim) | All executors on it die | Same as executor loss + decommission path |
 | Driver | Yes (single point) | Application fails | Restart app; streaming recovers from checkpoint |
@@ -128,10 +128,10 @@ Dynamic allocation's hidden dependency is the exam point: removing an executor l
 
 ### C. Within-app scheduling: FIFO vs FAIR
 
-- **FIFO** (default): jobs run in submission order; one giant job monopolizes the cluster.
+- **FIFO** (default): earlier jobs get priority; later jobs can consume remaining usable slots.
 - **FAIR**: pools share resources by weight/minShare; the right choice for shared notebooks/services.
 - Pools can be nested; `fairscheduler.xml` defines weights and minimum shares. In YARN, the queue (capacity/fair scheduler) provides *cross-app* isolation; inside an app, Spark's pools provide *intra-app* fairness.
-- Stage-level scheduling considerations: a job with one straggler stage holds resources even if other jobs are waiting under FIFO.
+- While an earlier job finishes a lone straggler, later jobs can use available resources under FIFO.
 
 ### D. Resources beyond CPU/memory
 
@@ -164,7 +164,7 @@ Practical multi-tenancy guidance:
 
 - **Speculative tasks can duplicate side effects.** Spark assumes tasks are idempotent or that the sink handles duplicate attempts. Writing to a plain filesystem uses the Hadoop **output committer**: task attempts write to temporary/task-attempt directories, and only the successful attempt is committed at job commit. Non-transactional sinks (e.g., a naive HTTP call or a database insert without a key) can double-write under speculation or retries.
 - **Job commit is the atomicity boundary** for file output: `FileOutputCommitter` v1 vs v2 algorithm changes performance and duplicate-window behavior; object stores (S3) historically needed special committers for correctness/performance.
-- **Kafka sinks** achieve exactly-once only if the producer is transactional + idempotent and offsets are committed atomically with output (chapter 10 discusses offsets/checkpointing).
+- **Spark's built-in Kafka sink is at-least-once**: a replayed batch can publish previously successful records again, including when producer idempotence is enabled (chapter 10).
 
 **Concrete example: two speculative attempts write the same partition.** Attempt 1 writes `_temporary/attempt_001/part-00000`; the speculative attempt 2 writes `_temporary/attempt_002/part-00000`. When attempt 1 finishes first, the job committer renames only its directory to `part-00000` and discards attempt 2. If the sink were a plain database insert without a key, both attempts could insert the same row - the committer protects file output, not arbitrary side effects.
 
@@ -226,9 +226,9 @@ The operational model changed more than the failure semantics. Decommissioning a
 | 3 | What is the key prerequisite for dynamic allocation? | Durable shuffle outputs (External Shuffle Service) so removed executors don't force map recomputation |
 | 4 | What happens to cached blocks when an executor is removed? | They're lost; recomputed if still needed (unless replicated) |
 | 5 | ESS vs decommissioning? | ESS serves shuffle data after death; decommission migrates data/state before planned removal |
-| 6 | FIFO vs FAIR? | Submission-order monopolization vs weighted sharing across pools |
+| 6 | FIFO vs FAIR? | Earlier-job priority (spare slots remain usable by later jobs) vs weighted sharing |
 | 7 | Where do YARN queues fit? | Cross-application resource isolation; Spark FAIR pools are intra-application |
-| 8 | Which failure unit retries first? | Task (up to `spark.task.maxFailures`), then stage (`maxConsecutiveAttempts`), then job |
+| 8 | Which failures use task versus stage retry limits? | Counted task failures exhaust the task-set/job budget; fetch failures can trigger stage recovery under separate limits |
 | 9 | Why can speculation corrupt output? | Duplicate task attempts with non-idempotent side effects; committers/transactions must handle it |
 | 10 | What does the output committer do? | Writes task attempts to temp locations and commits only successful output atomically |
 | 11 | Driver failure recovery? | None for the app's in-memory state; restart; streaming recovers from checkpoint |

@@ -1,5 +1,9 @@
 # Chapter 17: Design a Real-Time Nearby Friends & Geolocation Service (Tinder / Uber / Zenly)
 
+## Guarantees and assumptions
+The location owner accepts versioned updates and publishes them asynchronously to friends. Device/session sequence numbers reject stale updates, TTLs expire presence, and new device updates refresh positions lost during failover.
+**Principal IC exercise:** Reconnect a mobile client with buffered old locations after a new session starts; prevent time-travel updates and unauthorized stale subscriptions.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar

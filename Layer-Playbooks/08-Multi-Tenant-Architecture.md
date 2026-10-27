@@ -1,5 +1,7 @@
 # Layer 08: Multi-Tenant Architecture & Isolation Playbook
 
+> **Design inputs:** Authenticated tenant identity, database roles/policies, transaction-scoped context, cache/queue namespacing and per-tenant resource budgets.
+
 > **The System Design Interview Lens:** When designing B2B SaaS platforms (Slack, Shopify, Stripe, Jira), junior engineers simply add a `tenant_id` column to every database table. Staff/Principal engineers analyze **tenancy isolation models (Silo vs. Pool vs. Bridge)**, **noisy neighbor mitigation**, **per-tenant connection pool starvation**, **Row-Level Security (RLS)**, and **tenant-aware cache namespacing**.
 
 ---
@@ -13,7 +15,7 @@
 | **Enterprise / Strictly Regulated Tenants** (Healthcare HIPAA, Banking, GovCloud) | **Silo Model** (Dedicated VPC / Dedicated DB) | **Bridge Model** (Shared compute, dedicated DB) | Pool Model (Shared DB with `tenant_id`) | Strict physical data isolation; eliminates cross-tenant blast radius; allows tenant-specific encryption keys (CMEK) and point-in-time recovery. |
 | **High-Volume, Low-Cost Standard SaaS Tier** (Free & Starter tiers, thousands of small tenants) | **Pool Model** (Shared Compute + Shared DB with RLS) | **Bridge Model** (Schema-per-tenant) | Silo Model (Overkill cost) | Maximum hardware consolidation and resource multiplexing; lowest cost-per-tenant; automated centralized scaling and schema migrations. |
 | **Mid-Market / Premium Tier** (Wants performance guarantee, cost-sensitive) | **Bridge Model** (Shared Compute + Isolated Schema/DB) | **Pool Model** with Tiered Quotas | Manual Sharding | Balances hardware efficiency of shared stateless microservices with logical or physical database isolation for large customers. |
-| **Multi-Tenant Database Row Isolation** (Preventing cross-tenant data leaks) | **PostgreSQL Row-Level Security (RLS)** | Application ORM Interceptors | Manual `WHERE tenant_id = ?` in raw SQL | Database kernel enforces tenant isolation policies at the engine level; immune to developer coding mistakes or forgotten `WHERE` clauses. |
+| **Multi-Tenant Database Row Isolation** (Preventing cross-tenant data leaks) | **PostgreSQL Row-Level Security (RLS)** | Application ORM Interceptors | Manual `WHERE tenant_id = ?` in raw SQL | Enforces row predicates using database policies, application roles and trusted tenant context. |
 | **Noisy Neighbor Ingestion Protection** (Preventing one tenant from choking shared Kafka/Queues) | **Tenant-Sharded Queues + Weighted Fair Queuing (WFQ)** | Per-Tenant Dedicated SQS Queues | Single Shared FIFO Queue without quotas | Enforces per-tenant rate limits and concurrency caps; prevents a single tenant batch job from monopolizing downstream workers. |
 
 ---
@@ -84,7 +86,7 @@ STRATEGY 3: SHARED DATABASE, SHARED SCHEMA (Discriminator Column)
 
 ---
 
-### 2. Eliminating Developer Bugs: PostgreSQL Row-Level Security (RLS)
+### 2. Defense in Depth: PostgreSQL Row-Level Security (RLS)
 
 The nightmare of shared-table multi-tenancy is a developer forgetting `WHERE tenant_id = 'acme'` in a critical query, exposing Customer A’s data to Customer B. 
 
@@ -99,13 +101,19 @@ CREATE POLICY tenant_isolation_policy ON orders
     FOR ALL
     USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
--- 3. Application sets the session tenant context before executing queries
+-- 3. On the same pooled connection, after authenticating/authorizing the tenant:
+BEGIN;
 SET LOCAL app.current_tenant_id = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11';
 
 -- 4. Even if the application runs a broad query:
 SELECT * FROM orders;
 -- PostgreSQL kernel automatically injects: WHERE tenant_id = 'a0eebc99...' under the hood!
+COMMIT;
 ```
+
+The application role must be a non-owner, non-superuser role without BYPASSRLS. Owners normally bypass RLS; `ALTER TABLE orders FORCE ROW LEVEL SECURITY` subjects owners where appropriate, but not superusers/BYPASSRLS roles. `SET LOCAL` has no effect outside a transaction block. Bind an authorized tenant, never trust an arbitrary inbound header or client-selected setting. Missing context in this policy errors rather than granting all rows; the ALL policy's USING expression also supplies its default WITH CHECK.
+
+**Checks before pooling:** Verify missing/wrong tenant contexts, unauthorized writes, admin-role separation, rollback/reuse on the same connection, and async context propagation. Sources: [SET LOCAL](https://www.postgresql.org/docs/current/sql-set.html), [RLS roles/policies](https://www.postgresql.org/docs/current/ddl-rowsecurity.html).
 
 ---
 
@@ -123,7 +131,7 @@ flowchart LR
     
     Inject --> ServiceA["Service A (Order Service)\nContext Middleware binds to ThreadLocal/Go Context"]
     ServiceA -->|gRPC call with metadata| ServiceB["Service B (Payment Service)"]
-    ServiceA -->|SET LOCAL app.current_tenant_id| DB[("PostgreSQL\n(Row-Level Security)")]
+    ServiceA -->|BEGIN + authorized SET LOCAL + query + COMMIT| DB[("PostgreSQL\n(Row-Level Security)")]
 ```
 
 *   **Extraction at Ingress:** The API Gateway validates the incoming JWT, extracts the `tenant_id` claim, and injects it as a trusted internal header (`X-Tenant-ID`) or gRPC metadata key.
@@ -278,15 +286,15 @@ When asked how to architect a multi-tenant B2B SaaS platform, structure your res
 
 | Architecture / System | Tenancy Challenge | Selected Architecture & Pattern |
 | :--- | :--- | :--- |
-| [**04. Rate Limiter**](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/README.md) | Per-Tenant Quotas & Abuse Prevention | Redis Token Bucket keyed by `tenant_id:client_ip` with tier-based bucket capacities. |
-| [**10. Notification System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/10.%20Notification%20System/README.md) | High-volume marketing dumps choking 2FA | Tenant-sharded priority queues with Weighted Fair Queuing (WFQ). |
-| [**24. S3-like Object Storage**](file:///Users/abhinnaagarwal/Documents/system-design-notes/24.%20S3-like%20Object%20Storage/README.md) | Multi-tenant bucket metadata & IAM | Multi-tenant Cassandra/Postgres metadata with bucket namespace isolation and Customer Managed Keys (CMEK). |
-| [**30. Distributed Rate Limiter**](file:///Users/abhinnaagarwal/Documents/system-design-notes/30.%20Distributed%20Rate%20Limiter/README.md) | Multi-region global quotas per tenant | Centralized Redis sync + local in-memory token leak synchronization. |
-| [**31. Distributed Job Scheduler**](file:///Users/abhinnaagarwal/Documents/system-design-notes/31.%20Distributed%20Job%20Scheduler/README.md) | Preventing bulk job submission starvation | Fair scheduler algorithm balancing job dispatch across tenant queues. |
+| [**04. Rate Limiter**](../04.%20Rate%20Limiter/Readme.md) | Per-Tenant Quotas & Abuse Prevention | Redis Token Bucket keyed by `tenant_id:client_ip` with tier-based bucket capacities. |
+| [**10. Notification System**](../10.%20Notification%20System/Readme.md) | High-volume marketing dumps choking 2FA | Tenant-sharded priority queues with Weighted Fair Queuing (WFQ). |
+| [**24. S3-like Object Storage**](../24.%20S3-like%20Object%20Storage/README.md) | Multi-tenant bucket metadata & IAM | Multi-tenant Cassandra/Postgres metadata with bucket namespace isolation and Customer Managed Keys (CMEK). |
+| [**30. Distributed Rate Limiter**](../30.%20Distributed%20Rate%20Limiter/README.md) | Multi-region global quotas per tenant | Centralized Redis sync + local in-memory token leak synchronization. |
+| [**31. Distributed Job Scheduler**](../31.%20Distributed%20Job%20Scheduler/README.md) | Preventing bulk job submission starvation | Fair scheduler algorithm balancing job dispatch across tenant queues. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   AWS IAM Multi-Tenant Policies: [`coding-practice: cloud-aws/aws-iam.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/cloud-aws/aws-iam.md)
-*   PostgreSQL Architecture & RLS: [`coding-practice: storage/postgres.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/storage/postgres.md)
-*   Argo Workflows Multi-Tenancy: [`coding-practice: orchestration/argo-workflows.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/orchestration/argo-workflows.md)
+*   AWS IAM Multi-Tenant Policies: [`coding-practice: cloud-aws/aws-iam.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/cloud-aws/aws-iam.md)
+*   PostgreSQL Architecture & RLS: [`coding-practice: storage/postgres.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/storage/postgres.md)
+*   Argo Workflows Multi-Tenancy: [`coding-practice: orchestration/argo-workflows.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/orchestration/argo-workflows.md)

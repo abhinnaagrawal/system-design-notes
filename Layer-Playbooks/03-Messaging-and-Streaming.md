@@ -1,6 +1,17 @@
 # Layer 03: Messaging, Streaming & Event-Driven Systems Playbook
 
-> **The System Design Interview Lens:** The fatal mistake in asynchronous architecture is conflating a **Task Queue** with an **Event Stream**. Junior engineers pick Kafka for everything because "it handles scale." Staff/Principal engineers analyze **consumer consumption semantics (destructive ack vs immutable replay)**, **ordering boundaries (per-key vs total)**, **backpressure resilience**, and **end-to-end exactly-once delivery via the Transactional Outbox pattern**.
+> **The System Design Interview Lens:** The fatal mistake in asynchronous architecture is conflating a **Task Queue** with an **Event Stream**. Staff/Principal engineers analyze consumption, ordering and backpressure boundaries, then distinguish **atomic publication intent, at-least-once delivery and deduplicated business effects**.
+
+> **Design inputs:** Broker ACK durability, event IDs, ordering, retention and consumer deduplication. The outbox commits business state and publication intent together; consumers handle relay retries.
+
+| Mechanism | What it guarantees | What is still required |
+| :--- | :--- | :--- |
+| Transactional outbox | Business change and publish intent commit together | Retry relay publication; duplicates are possible |
+| Consumer inbox | Suppress repeated event IDs within retained scope | Apply inbox record and business mutation atomically |
+| Broker transactions | Product-specific atomic log operations | External HTTP/database effects need their own protocol |
+| Stream checkpoint | Recover source positions and operator state | Transactional/idempotent sink and replay-safe external effects |
+
+See the [canonical partial-failure protocol](../Core%20Concepts/Partial%20Failures/README.md) and [outbox pattern reference](https://microservices.io/patterns/data/transactional-outbox.html).
 
 ---
 
@@ -32,7 +43,7 @@ flowchart TD
     %% Queue Path
     Q_Replay -- No (Discrete Job / Task Queue) --> Q_Managed{"Do you require cloud serverless\nor self-managed infrastructure?"}
     Q_Managed -- "Cloud Serverless (AWS Native)" --> Q_Order{"Strict FIFO ordering required?"}
-    Q_Order -- Yes --> Choice_SQSFIFO["AWS SQS FIFO\n(300 msg/sec or 3000 with batching, dedup IDs)"]
+    Q_Order -- Yes --> Choice_SQSFIFO["AWS SQS FIFO\n(Per-group order; check high-throughput mode and regional quotas)"]
     Q_Order -- No --> Choice_SQS["AWS SQS Standard (+ SNS for Fanout)\n(Unlimited throughput, at-least-once, best-effort ordering)"]
     
     Q_Managed -- "Complex routing / Self-hosted / AMQP" --> Choice_Rabbit["RabbitMQ\n(Erlang Actor Model + AMQP Exchanges + Destructive Ack)"]
@@ -155,7 +166,7 @@ Broker 3 (Follower):  [Msg 0][Msg 1]                ─── Lagging! (Dropped 
 │ Provisioned / Clustered (MSK/Self)│ Fully Managed Serverless                │
 │ Long-term retention (Disk-backed) │ Ephemeral (Max 14 days, auto-purged)    │
 │ Partition-ordered stream          │ SQS Standard: Unordered                 │
-│                                   │ SQS FIFO: Ordered (300 msg/sec cap)     │
+│                                   │ SQS FIFO: Per-group order; mode quotas │
 │ Manual partition rebalancing      │ Transparent auto-scaling                │
 │ Complex operations (ZooKeeper/KRaft) Zero operational maintenance           │
 └───────────────────────────────────┴─────────────────────────────────────────┘
@@ -166,7 +177,9 @@ Broker 3 (Follower):  [Msg 0][Msg 1]                ─── Lagging! (Dropped 
 *   **Kafka:** High operational footprint. Requires managing broker nodes, disk storage thresholds, JVM tuning, and partition rebalancing during cluster expansion.
 
 #### 2. The Ordering Bottleneck in SQS FIFO
-*   Standard SQS does not guarantee message ordering. AWS provides **SQS FIFO**, but it imposes a hard throughput limit: **300 transactions/second** (or up to 3,000/sec with maximum batching). If your workload demands 50,000 ordered messages/second across customer IDs, SQS FIFO is fundamentally disqualified; Kafka partitions easily satisfy this requirement.
+* Standard SQS offers best-effort order; FIFO orders within a MessageGroupId. **Non-high-throughput FIFO** has a 300 API-transactions/second per-action limit (up to 3,000 messages/second with full batches). High-throughput FIFO has much larger region-dependent quotas: AWS lists up to 70,000 non-batched TPS / 700,000 batched messages per second in selected regions as checked **2026-10-27**. Distinguish transactions from messages, partition/action limits and one hot group's serialized work from many-group parallelism.
+* For 50,000 messages/second across customer IDs, size FIFO using the region/account quota, high-throughput mode, batching, message-group distribution and consumer time. Size Kafka using partition count and broker capacity.
+* **Source:** [AWS SQS message quotas](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/quotas-messages.html).
 
 ---
 
@@ -295,15 +308,15 @@ flowchart LR
 
 | Chapter / Architecture | Messaging Technology | Specific Architectural Role |
 | :--- | :--- | :--- |
-| [**10. Notification System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/10.%20Notification%20System/README.md) | **RabbitMQ / AWS SQS** | Priority queues for transactional SMS vs marketing emails; rate-limiting per provider. |
-| [**11. News Feed System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/11.%20News%20Feed%20System/README.md) | **Apache Kafka** | Fan-out service consumes post-created events; updates follower Redis timelines asynchronously. |
-| [**19. Distributed Message Queue**](file:///Users/abhinnaagarwal/Documents/system-design-notes/19.%20Distributed%20Message%20Queue/README.md) | **Custom Distributed Log** | In-depth architectural blueprint of Kafka internals (segments, zero-copy, ISR, leader election). |
-| [**21. Ad Click Aggregation**](file:///Users/abhinnaagarwal/Documents/system-design-notes/21.%20Ad%20Click%20Event%20Aggregation/README.md) | **Apache Kafka + Flink** | Ingests 100k+ click events/sec; partitioned by `ad_id` for windowed stream aggregation. |
-| [**26. Payment System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/README.md) | **Kafka + Transactional Outbox** | Publishes payment completion events; drives async reconciliation with external banks. |
+| [**10. Notification System**](../10.%20Notification%20System/Readme.md) | **RabbitMQ / AWS SQS** | Priority queues for transactional SMS vs marketing emails; rate-limiting per provider. |
+| [**11. News Feed System**](../11.%20News%20Feed%20System/Readme.md) | **Apache Kafka** | Fan-out service consumes post-created events; updates follower Redis timelines asynchronously. |
+| [**19. Distributed Message Queue**](../19.%20Distributed%20Message%20Queue/README.md) | **Custom Distributed Log** | In-depth architectural blueprint of Kafka internals (segments, zero-copy, ISR, leader election). |
+| [**21. Ad Click Aggregation**](../21.%20Ad%20Click%20Event%20Aggregation/README.md) | **Apache Kafka + Flink** | Ingests 100k+ click events/sec; partitioned by `ad_id` for windowed stream aggregation. |
+| [**26. Payment System**](../26.%20Payment%20System/README.md) | **Kafka + Transactional Outbox** | Publishes payment completion events; drives async reconciliation with external banks. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   Kafka Architecture & Internals: [`coding-practice: streaming/kafka.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/streaming/kafka.md)
-*   CDC & Debezium Outbox: [`coding-practice: streaming/debezium.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/streaming/debezium.md)
-*   Message Brokers Core Concept: [`Core Concepts/Message Brokers and Consistency/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Message%20Brokers%20and%20Consistency/README.md)
+*   Kafka Architecture & Internals: [`coding-practice: streaming/kafka.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/streaming/kafka.md)
+*   CDC & Debezium Outbox: [`coding-practice: streaming/debezium.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/streaming/debezium.md)
+*   Message Brokers Core Concept: [`Core Concepts/Message Brokers and Consistency/README.md`](../Core%20Concepts/Message%20Brokers%20and%20Consistency/README.md)

@@ -1,5 +1,9 @@
 # Chapter 09: Design a Scalable Distributed Web Crawler (Googlebot / Archiver)
 
+## Guarantees and assumptions
+The frontier acknowledges durable enqueue; workers commit fetched content and crawl metadata before completing an attempt. Crawl-attempt IDs deduplicate retries while allowing scheduled recrawls.
+**Principal IC exercise:** Recover a worker that stored a page but lost its frontier ACK without suppressing a later legitimate recrawl.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar

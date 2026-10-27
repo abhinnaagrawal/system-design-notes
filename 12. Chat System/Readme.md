@@ -1,5 +1,9 @@
 # Chapter 12: Design a Real-Time Distributed Chat System (WhatsApp / Slack / Discord)
 
+## Guarantees and assumptions
+Server acceptance follows durable message and per-conversation sequence assignment. Reuse client message IDs, fence sequencers by leader epoch, and let clients buffer gaps and backfill history; delivery/read receipts are separate states.
+**Principal IC exercise:** Fail over a sequencer after persisting a message but before returning its sequence; recover without duplicate assignment or permanent gaps.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -78,7 +82,7 @@ Designing a large-scale real-time chat application (WhatsApp, Slack, Discord, Fa
 ### Non-Functional Requirements (SLAs & SLOs)
 * **Latency:** Real-time delivery p99 $< \mathbf{100ms}$ across active WebSocket connections.
 * **Scale:** Support **50 Million Daily Active Users (DAU)** with **10 Million concurrent active WebSocket connections**.
-* **Ordering Guarantee:** Messages within a conversation must be rendered in strict monotonic causal order (zero out-of-order bubble displays).
+* **Ordering Guarantee:** Render a durable per-conversation sequence in order, buffering/backfilling gaps. This is server acceptance order; causal ordering additionally requires clients to carry observed-sequence/dependency metadata.
 * **High Availability:** $99.99\%$ uptime; chat gateways must gracefully drain and reconnect without message loss during rolling deployments.
 
 ---
@@ -193,11 +197,13 @@ A critical systems trap: *"Sort messages by client timestamp or server wall-cloc
   - Client clocks can be manipulated, out of sync, or set to the wrong timezone.
   - Server clocks experience **Clock Drift** and NTP backward jumps (leap seconds). Two concurrent messages arriving at different servers can receive scrambled timestamps, displaying responses *before* the questions in the UI!
 * **The Staff Solution: Monotonic Sequence IDs per Conversation**
-  - We do not need a globally ordered timestamp across the entire planet. We only need **strict causal ordering within a single conversation/channel**.
-  - Maintain an atomic monotonic counter per conversation:
+  - Assign a durable acceptance sequence within each conversation/channel.
+  - Conceptually allocate a monotonic counter per conversation:
     $$\text{seq\_id} = \text{INCR conversation\_seq:}\{\text{conv\_id}\}$$
   - The composite primary key in the database is:
     $$\mathbf{\big(\text{conversation\_id}, \text{sequence\_id}\big)}$$
+  - Commit `(conversation_id, client_message_id) → sequence_id + message` atomically in the authoritative log/store before ACK. Fence the sequencer with a leader epoch; recover its committed high-water mark on failover. A standalone volatile Redis `INCR` followed by a separate database write is insufficient.
+  - Retries return the same assignment. If reservation of sequence ranges allows holes, record skipped positions or expose a committed high-water mark so clients do not wait forever for nonexistent messages. Carry the last observed sequence for causally dependent sends; define timeout/backfill behavior when a dependency is unavailable.
 
 ```
 Conversation 101:

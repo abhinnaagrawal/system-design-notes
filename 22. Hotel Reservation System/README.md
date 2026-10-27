@@ -1,5 +1,9 @@
 # Chapter 22: Design a Hotel Reservation & Flash Booking System (Marriott / Airbnb / Booking.com)
 
+## Guarantees and assumptions
+A hold ACK follows the durable inventory/reservation commit. Stable IDs deduplicate retries; confirmation and expiry serialize on one conditional transition that updates every stay date atomically. Payments received after expiry are refunded or voided.
+**Principal IC exercise:** Race an expiry worker against a paid webhook, crash either winner before ACK, and show why inventory changes exactly once.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Designing Data-Intensive Applications (Martin Kleppmann)](https://dataintensive.net/)
@@ -229,7 +233,7 @@ When 1,000 users attempt to reserve the last 5 rooms for New Year's Eve, how do 
 ├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
 │ 2. Optimistic Lock  │ Blazing Fast,    │ High Rollbacks:  │ RECOMMENDED for normal     │
 │    (Version Column) │ Zero DB lock     │ 995 of 1,000 reqs│ traffic (< 50 QPS/hotel).  │
-│                     │ overhead         │ fail and retry,  │ Zero locking overhead.     │
+│                     │ overhead         │ fail and retry,  │ Still takes DB write locks.│
 │                     │                  │ wasting CPU.     │                            │
 ├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
 │ 3. Redis In-Memory  │ Blazing Fast     │ EXCELLENT:       │ RECOMMENDED for Flash Sales│
@@ -281,8 +285,10 @@ for i, key in ipairs(KEYS) do
     redis.call('INCRBY', key, tonumber(ARGV[1]))
 end
 
-return 1 -- Hold successfully secured!
+return 1 -- Admission budget secured; proceed to the reservation transaction
 ```
+
+The Lua script manages an **admission budget**. Keep keys in one Redis Cluster hash slot, identify each lease/release idempotently, and reconcile after failover. The database transaction checks capacity and creates the hold across all stay dates. For optimistic updates, bind each date's own version and roll back the entire stay if any row fails.
 
 ---
 
@@ -301,26 +307,56 @@ sequenceDiagram
     participant Saga as Saga Orchestrator
 
     User->>API: POST /v1/reservations (Hold Request)
-    API->>Redis: Atomic Lua: Check & Increment Hold Count
-    API->>DB: INSERT reservation (status: 'PENDING_PAYMENT', expires_at: NOW() + 10m)
-    API->>DelayQueue: Schedule HoldExpirationJob (Delay: 10 minutes)
+    API->>Redis: Optional admission check (not inventory authority)
+    API->>DB: TX: Check all dates, increment held, INSERT PENDING_PAYMENT + expiry outbox
+    DB-->>API: Commit durable hold
+    API->>DelayQueue: Outbox relay schedules expiry (retry by reservation_id)
     API-->>User: HTTP 201 Created (Token, 10:00 Timer started)
 
     alt Happy Path: User completes payment within 10 minutes
         User->>API: POST /v1/checkout (Submit Card)
         API->>Saga: Execute Payment & Finalize
-        Saga->>DB: UPDATE reservation SET status = 'CONFIRMED'
-        Saga->>DB: UPDATE room_type_inventory: total_reserved += 1, total_held -= 1
-        Saga->>Redis: Transition Hold -> Confirmed
+        Saga->>DB: TX: Conditional PENDING_PAYMENT to CONFIRMED before expiry
+        Saga->>DB: Only if transition won: all dates reserved += 1, held -= 1; commit + outbox
+        Saga->>Redis: Outbox projects committed transition idempotently
         API-->>User: HTTP 200 OK (Booking Confirmed)
     else Unhappy Path: User abandons cart (10 minutes elapse)
         DelayQueue->>API: Trigger HoldExpirationJob(reservation_id)
-        API->>DB: Check status; if still 'PENDING_PAYMENT':
-        API->>DB: UPDATE reservation SET status = 'EXPIRED'
-        API->>DB: UPDATE room_type_inventory: total_held -= 1
-        API->>Redis: Decrement Hold Count (Restock room for others)
+        API->>DB: TX: Conditional PENDING_PAYMENT to EXPIRED when due
+        API->>DB: Only if transition won: all dates held -= 1; commit + outbox
+        API->>Redis: Outbox projects committed release idempotently
     end
 ```
+
+### One serialization point for confirmation and expiry
+The diagram's confirmation response is conditional on winning this transition. In PostgreSQL, lock the reservation row in a short transaction shared by both paths (`SELECT ... FOR UPDATE`), then evaluate current database time and execute one conditional transition:
+
+```sql
+-- Confirmation path, after verified payment evidence:
+UPDATE reservation
+SET status = 'CONFIRMED'
+WHERE reservation_id = :id AND status = 'PENDING_PAYMENT'
+  AND expires_at > clock_timestamp()
+RETURNING reservation_id;
+
+-- Expiry path (alternative transaction, same row lock):
+UPDATE reservation
+SET status = 'EXPIRED'
+WHERE reservation_id = :id AND status = 'PENDING_PAYMENT'
+  AND expires_at <= clock_timestamp()
+RETURNING reservation_id;
+```
+
+In the **same transaction**, the path returning a row updates inventory for **every stay date** in a consistent lock order and inserts the outbox event. A zero-row retry returns the existing state. Persist payment evidence under a unique provider event/payment ID; if expiry wins after charging, record and retry a uniquely keyed void/refund. Redis projects committed inventory and supports admission. The SQL uses PostgreSQL clock and [row-lock semantics](https://www.postgresql.org/docs/current/sql-select.html#SQL-FOR-UPDATE-SHARE).
+
+### Crash/recovery timeline: reservation
+| Crash point | Durable evidence | Recovery / retry outcome |
+| :--- | :--- | :--- |
+| Hold transaction commits, API ACK lost | Reservation ID, inventory hold, expiry outbox | Same request ID returns existing hold; relay retries expiry scheduling. |
+| PSP payment succeeds, webhook/ACK lost | Provider payment key; possibly unconfirmed booking | Reconcile provider outcome; retry the same confirmation transition, not another charge. |
+| Confirmation races expiry | Locked reservation and one winning conditional transition | Winner changes all stay dates once; loser reads committed state. If expiry won, compensate payment. |
+| Expiry commits, queue ACK lost | EXPIRED plus inventory/outbox commit | Replayed expiry returns zero rows; no second release. |
+| Confirmation commits, client ACK lost | CONFIRMED plus payment reference | Return same booking; outbox notifications deduplicate by transition ID. |
 
 ---
 

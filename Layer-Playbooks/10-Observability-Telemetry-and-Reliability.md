@@ -1,5 +1,7 @@
 # Layer 10: Observability, Telemetry & SRE Reliability Playbook
 
+> **Design inputs:** SLI event/denominator/window, missing-data behavior, sampling, cardinality, churn, retention and replication.
+
 > **The System Design Interview Lens:** In Staff and Principal (L6/L7+) interviews, observability is not a generic bullet point like *"I will use Prometheus and Grafana."* Mid-level engineers treat monitoring as an afterthought. Staff/Principal engineers treat observability as an **architectural pillar (Pillar 4: Operational Mindset)**: they establish mathematical **SLIs, SLOs, and Error Budgets**, design **W3C context-propagated distributed tracing via OpenTelemetry and Jaeger**, enforce **tail-based sampling** to prevent petabyte storage explosions, guard against **metric cardinality disasters**, and configure **multi-window burn-rate alerting** to eliminate alert fatigue.
 
 ---
@@ -474,9 +476,9 @@ When the interviewer asks: *"How will you design monitoring, observability, and 
 
 | System Design Chapter | Direct Observability Application |
 | :--- | :--- |
-| **[Chapter 04: Rate Limiter](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/Readme.md)** | Shadow mode telemetry, tracking `429 Too Many Requests` metrics, Redis latency SLIs. |
-| **[Chapter 08: URL Shortener](file:///Users/abhinnaagarwal/Documents/system-design-notes/08.%20URL%20Shortener/Readme.md)** | Async edge telemetry via `event.waitUntil` & CDN Logpush streaming to Kafka/ClickHouse. |
-| **[Chapter 19: Message Queue](file:///Users/abhinnaagarwal/Documents/system-design-notes/19.%20Distributed%20Message%20Queue/Readme.md)** | Tracking Kafka Consumer Lag as the primary saturation SLI; W3C trace context in Kafka headers. |
-| **[Chapter 20: Metrics & Monitoring](file:///Users/abhinnaagarwal/Documents/system-design-notes/20.%20Metrics%20Monitoring%20and%20Alerting%20System/Readme.md)** | Deep dive into TSDB engine internals, Gorilla compression, and alert storm suppression rules. |
-| **[Chapter 26: Payment System](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/Readme.md)** | High-severity SLIs on transaction failure rates, 3-way reconciliation audit logs, idempotency tracking. |
-| **[Chapter 31: Job Scheduler](file:///Users/abhinnaagarwal/Documents/system-design-notes/31.%20Distributed%20Job%20Scheduler/Readme.md)** | Worker heartbeat registries, dead letter queue (DLQ) alerts, task execution latency percentiles. |
+| **[Chapter 04: Rate Limiter](../04.%20Rate%20Limiter/Readme.md)** | Shadow mode telemetry, tracking `429 Too Many Requests` metrics, Redis latency SLIs. |
+| **[Chapter 08: URL Shortener](../08.%20URL%20Shortener/Readme.md)** | Async edge telemetry via `event.waitUntil` & CDN Logpush streaming to Kafka/ClickHouse. |
+| **[Chapter 19: Message Queue](../19.%20Distributed%20Message%20Queue/README.md)** | Tracking Kafka Consumer Lag as the primary saturation SLI; W3C trace context in Kafka headers. |
+| **[Chapter 20: Metrics & Monitoring](../20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.md)** | Deep dive into TSDB engine internals, Gorilla compression, and alert storm suppression rules. |
+| **[Chapter 26: Payment System](../26.%20Payment%20System/README.md)** | High-severity SLIs on transaction failure rates, 3-way reconciliation audit logs, idempotency tracking. |
+| **[Chapter 31: Job Scheduler](../31.%20Distributed%20Job%20Scheduler/README.md)** | Worker heartbeat registries, dead letter queue (DLQ) alerts, task execution latency percentiles. |

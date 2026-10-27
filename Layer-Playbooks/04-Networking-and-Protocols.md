@@ -1,5 +1,7 @@
 # Layer 04: Networking, Transport Protocols & API Gateway Playbook
 
+> **Design inputs:** API style, encoding, transport, application acknowledgments, retry IDs, payload, RTT, fanout and active/idle connection mix.
+
 > **The System Design Interview Lens:** In networking, junior engineers default to *"I will expose a REST API."* Staff/Principal engineers select protocols based on **transport-level physics**: packet framing, serialization CPU costs, duplex requirements (unidirectional vs bidirectional), connection statefulness (socket limits, ephemeral port exhaustion), and **L4 vs L7 ingress routing topology**.
 
 ---
@@ -72,7 +74,7 @@ Networking bottlenecks trace directly to **TCP handshakes, Head-of-Line blocking
 
 ### 2. Serialization Physics: JSON Text vs. Protocol Buffers (Protobuf)
 
-Why does gRPC drastically outperform REST in microservices?
+gRPC/Protobuf can reduce serialization cost through binary encoding and generated code. REST APIs can also use binary formats and HTTP/2 or HTTP/3.
 
 ```
 JSON PAYLOAD: {"user_id": 1048576, "is_active": true}
@@ -83,12 +85,11 @@ JSON PAYLOAD: {"user_id": 1048576, "is_active": true}
 PROTOBUF BINARY ENCODING:
 • Wire Size: ~7 bytes.
 • Format: [Tag 1 (Varint)] [Value: 1048576] [Tag 2 (Varint)] [Value: 1]
-• CPU Cost: Ultra-low. Integer bytes map directly to CPU registers; field tags are
-  tiny integer constants; zero heap allocation during decoding.
+• CPU Cost: Generated typed decoding can avoid some dynamic parsing, but varints
+  still require decoding and allocations depend on language, fields and reuse.
 ```
 
-*   **Bandwidth Reduction:** Protobuf payloads are typically 60%–80% smaller than equivalent JSON.
-*   **CPU Cycles:** Decoding Protobuf is 5x–10x faster because the schema is pre-compiled into strongly-typed code (C++, Go, Java), eliminating reflection and dynamic string parsing.
+* **Comparison inputs:** Schema, language/runtime, compression, payload distribution and allocation profile determine the byte and CPU savings.
 
 ---
 
@@ -98,11 +99,9 @@ When designing chat servers (Chapter 12) or push notifications (Chapter 10), int
 
 *   **The OS File Descriptor Limit:** Every TCP socket is represented as a file descriptor. Default Linux limits (`nofile = 1024`) will immediately reject connections. Systems must tune `/etc/security/limits.conf` to `nofile = 2,000,000`.
 *   **Memory Footprint per Socket:**
-    *   The Linux kernel allocates read and write socket buffers (`rmem` and `wmem`) for each connection.
-    *   Default settings: ~128KB per socket.
-        $$1,000,000 \times 128\text{KB} = 128\text{GB of RAM purely for idle kernel socket buffers!}$$
-    *   *Production Tuning:* For idle push connections, tune `net.ipv4.tcp_rmem` and `tcp_wmem` minimum buffer sizes down to 4KB:
-        $$1,000,000 \times (4\text{KB} + 4\text{KB}) \approx 8\text{GB to } 10\text{GB RAM (Easily fits on a modern 32GB server)}.$$
+    * Linux buffer settings control limits and autotuning; resident allocation grows with queued data and memory pressure.
+    * At 128 KB actually allocated per socket, one million sockets consume 128 GB for buffers. Include socket metadata, TLS/application state and active-connection distribution in the memory budget.
+    * Budget socket/slab state, TLS and application objects, active send/receive queues, fanout and reconnect bursts. Measure representative idle and active populations with `ss -m`, process RSS and slab metrics on the chosen kernel/runtime; tune buffers only against throughput/latency tests.
 *   **The Ephemeral Port Myth:** A common junior belief is that a server can only accept 65,535 connections because of port limits. **This is false.** A TCP connection is identified by a **4-tuple**:
     $$\text{(Source IP, Source Port, Destination IP, Destination Port)}$$
     Because the server listens on a fixed `(Dest IP, Dest Port)` (e.g., port 443), it can accept millions of connections as long as client `(Source IP, Source Port)` pairs are unique.
@@ -239,17 +238,17 @@ flowchart TD
 
 | Chapter / Architecture | Protocol / Ingress Technology | Specific Architectural Role |
 | :--- | :--- | :--- |
-| [**04. Rate Limiter**](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/README.md) | **API Gateway (L7 Envoy / Kong)** | Inspects client IP / API Token; calls Redis rate limiting filter before routing. |
-| [**10. Notification System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/10.%20Notification%20System/README.md) | **APNs / FCM + SSE** | Pushes notifications to mobile devices via Apple/Google gateways; web via SSE. |
-| [**12. Chat System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/12.%20Chat%20System/README.md) | **WebSockets + Epoll Gateway** | Maintains persistent full-duplex TCP connections for instant message delivery. |
-| [**17. Nearby Friends**](file:///Users/abhinnaagarwal/Documents/system-design-notes/17.%20Nearby%20Friends/README.md) | **WebSockets + Geo-Redis** | Bi-directional client location streaming and nearby peer update broadcast. |
-| [**28. Stock Exchange**](file:///Users/abhinnaagarwal/Documents/system-design-notes/28.%20Stock%20Exchange/README.md) | **L4 UDP Multicast / FIX Protocol** | Ultra-low-latency market data dissemination to trading firms. |
+| [**04. Rate Limiter**](../04.%20Rate%20Limiter/Readme.md) | **API Gateway (L7 Envoy / Kong)** | Inspects client IP / API Token; calls Redis rate limiting filter before routing. |
+| [**10. Notification System**](../10.%20Notification%20System/Readme.md) | **APNs / FCM + SSE** | Pushes notifications to mobile devices via Apple/Google gateways; web via SSE. |
+| [**12. Chat System**](../12.%20Chat%20System/Readme.md) | **WebSockets + Epoll Gateway** | Maintains persistent full-duplex TCP connections for instant message delivery. |
+| [**17. Nearby Friends**](../17.%20Nearby%20Friends/README.md) | **WebSockets + Geo-Redis** | Bi-directional client location streaming and nearby peer update broadcast. |
+| [**28. Stock Exchange**](../28.%20Stock%20Exchange/README.md) | **L4 UDP Multicast / FIX Protocol** | Ultra-low-latency market data dissemination to trading firms. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   Networking Layers & Sockets: [`coding-practice: networking/networking-layers.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/networking/networking-layers.md)
-*   gRPC Architecture & Mechanics: [`coding-practice: networking/grpc.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/networking/grpc.md)
-*   Networking Foundations: [`Core Concepts/Networking Foundations/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Networking%20Foundations/README.md)
-*   WebSockets Deep Dive: [`Core Concepts/WebSockets/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/WebSockets/README.md)
-*   gRPC Core Concept: [`Core Concepts/gRPC/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/gRPC/README.md)
+*   Networking Layers & Sockets: [`coding-practice: networking/networking-layers.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/networking/networking-layers.md)
+*   gRPC Architecture & Mechanics: [`coding-practice: networking/grpc.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/networking/grpc.md)
+*   Networking Foundations: [`Core Concepts/Networking Foundations/README.md`](../Core%20Concepts/Networking%20Foundations/README.md)
+*   WebSockets Deep Dive: [`Core Concepts/WebSockets/README.md`](../Core%20Concepts/WebSockets/README.md)
+*   gRPC Core Concept: [`Core Concepts/gRPC/README.md`](../Core%20Concepts/gRPC/README.md)

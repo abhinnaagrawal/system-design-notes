@@ -2,6 +2,8 @@
 
 > **The System Design Interview Lens:** In consumer applications (Twitter/X, Instagram, Yelp, Amazon product catalog), read-to-write ratios often exceed **100:1 or 1,000:1**. A Staff engineer systematically applies a 3-tier escalation strategy: first exhausting database engine optimizations, then scaling storage nodes horizontally, and finally introducing multi-tier caching architectures with rigorous stampede and invalidation defenses.
 
+> **Freshness contract:** The database is authoritative. Read-your-writes uses an authoritative read or applied-commit barrier; cache updates use versioning and invalidation to meet the chosen freshness target.
+
 ---
 
 ## 1. 60-Second Interview Decision Matrix
@@ -26,12 +28,12 @@ Interviewers test whether you jump to Redis immediately before considering relat
 * A **Covering Index** includes all columns requested by the `SELECT` clause directly in the index leaf pages via `INCLUDE` (PostgreSQL) or compound ordering:
   ```sql
   -- Without covering index: index scan + heap table fetch
-  -- With covering index: index-only scan (zero heap lookups!)
+  -- PostgreSQL index-only eligibility; visibility checks may still fetch heap pages.
   CREATE INDEX idx_orders_covering 
   ON orders (customer_id, created_at DESC) 
   INCLUDE (total_amount, status);
 
-  -- This query is satisfied 100% within RAM/Index leaf nodes
+  -- Verify actual heap fetches and buffer reads with EXPLAIN (ANALYZE, BUFFERS).
   SELECT total_amount, status 
   FROM orders 
   WHERE customer_id = 'CUST_123' 
@@ -71,7 +73,7 @@ flowchart TD
 ### The Replication Lag Trap: "Read-Your-Own-Writes"
 * **The Failure Mode:** A user updates their profile name from "Bob" to "Robert". The write goes to the Primary DB. The user's browser immediately redirects to `/profile`. The read request hits Replica 2, which has a 200ms replication lag. The user sees "Bob" and frantically submits the form again!
 * **Staff Solutions:**
-  1. **Session-Pinning Window:** When a user issues a mutation, store a flag in their session cookie or Redis: `user:<id>:recent_write = timestamp`. For the next 3–5 seconds, route all read queries for this specific user directly to the **Primary DB**.
+  1. **Session-Pinning Window:** After a mutation, temporarily route reads to the primary (for example 3–5 seconds). Once the window expires, reads can encounter a lagging replica. Strict read-your-writes uses a commit/application barrier and a fresh snapshot/cache path.
   2. **Monotonic Read Consistency via Replication Log Offsets:** Replicas track their applied LSN (Log Sequence Number). The client carries the transaction's commit LSN; queries route only to replicas that have caught up to that LSN.
 
 ---
@@ -114,7 +116,7 @@ Before partitioning tables horizontally across shards, apply **Database Federati
 ### Deep Dive 1: Cache Stampede (Thundering Herd)
 * **The Failure Mode:** An extremely hot key (e.g., product page for a newly launched iPhone) expires or is evicted from Redis. Suddenly, 50,000 concurrent requests miss the cache at the exact same millisecond and hammer the database with the identical query, instantly exhausting database connection pools.
 * **Solution A: Mutex / SingleFlight Pattern**
-  Only the first worker to experience a cache miss acquires a distributed mutex; all other 49,999 workers wait on a channel or retry after 50ms:
+  Coalesce concurrent misses. Go SingleFlight below is **process-local**; a fleet-wide mutex requires a separate lease, bounded waits and a safe publish protocol. Other callers can wait, serve permitted stale data or retry with jitter:
   ```go
   // Go SingleFlight implementation
   v, err, _ := g.Do(key, func() (interface{}, error) {
@@ -124,22 +126,24 @@ Before partitioning tables horizontally across shards, apply **Database Federati
   ```
 * **Solution B: Probabilistic Early Expiration (XFetch Algorithm)**
   Instead of waiting for the key to expire, clients calculate a dynamic probability of recomputing the cache item before its actual TTL:
-  $$\Delta \cdot \beta \cdot \ln(\text{random}()) > \text{TTL} - \text{now}$$
-  As the expiration time approaches, the likelihood that a client asynchronously re-warms the cache approaches 100%, ensuring zero cache misses on hot keys.
+  $$-\Delta \cdot \beta \cdot \ln(U) \ge \text{expires\_at} - \text{now}, \quad 0<U<1$$
+  Here `expires_at` is an absolute expiry timestamp, $\Delta>0$ the measured recomputation duration in the same time units, and $\beta>0$ a tuning factor. The negative logarithm is positive. Early refresh reduces miss/stampede risk but cannot guarantee zero misses or a single refresher; retain coalescing, TTL and a refresh-failure policy.
 
 ---
 
 ### Deep Dive 2: Cache Invalidation (The Hardest Problem)
 * **Trap: Cache-Aside Dual-Write Races**
-  1. Thread A updates DB row.
-  2. Thread B reads DB row before Thread A deletes the cache key.
-  3. Thread B repopulates cache with old stale value.
-* **The Architectural Fix (Change Data Capture + Kafka Invalidator):**
-  Never let application servers delete cache keys directly inside business logic controllers.
+  1. Reader B fetches old value v1 and pauses before caching it.
+  2. Writer A commits v2.
+  3. Invalidation deletes the cache key.
+  4. Delayed B publishes v1 after that deletion.
+* **Reliable Invalidation (Change Data Capture + Kafka Invalidator):**
+  CDC avoids coupling cache-deletion delivery to an application process surviving after commit:
   1. Application writes exclusively to PostgreSQL.
   2. PostgreSQL commits to the Write-Ahead Log (WAL).
   3. Debezium streams WAL events to an `invalidation-topic` in Kafka.
-  4. A dedicated Invalidator Worker consumes Kafka and executes `DEL key` in Redis. This guarantees that cache invalidation occurs **after** the transaction is durably committed.
+  4. A dedicated Invalidator Worker consumes Kafka and executes `DEL key` in Redis. A delayed v1 read can refill the cache after this deletion.
+* **Freshness Contract:** Retain a generation/version fence and atomically reject older fills until stale readers finish, or apply ordered versioned updates. Bounded-staleness designs can use TTL with invalidation-lag monitoring.
 
 ---
 
@@ -156,7 +160,7 @@ Before partitioning tables horizontally across shards, apply **Database Federati
 ```
 1. "Before jumping straight to Redis, I'll first optimize the database access path using composite covering B+ Tree indexes and denormalized tables to eliminate expensive joins."
 2. "To scale read throughput horizontally, I will provision read replicas off an asynchronous WAL stream from the primary."
-3. "To solve replication lag and protect the user experience from stale data, we will use session-pinning: any user who submits a write has their reads routed to the primary for the next 3 seconds."
+3. "For required read-your-writes, I will use an authoritative read or wait for the replica's applied commit position; a short primary-pinning window is only a heuristic."
 4. "For ultra-hot point lookups, I'll introduce an in-memory Cache-Aside layer with Redis."
 5. "To defend against Cache Stampedes on viral keys, I will use the SingleFlight/Mutex pattern and implement the XFetch probabilistic early re-warming algorithm."
 ```

@@ -1,5 +1,9 @@
 # Chapter 08: Design a URL Shortener (TinyURL / Bitly)
 
+## Guarantees and assumptions
+Creation succeeds after the unique short-code mapping commits; caches update asynchronously. Request IDs deduplicate creation retries, and a uniqueness constraint handles candidate collisions.
+**Principal IC exercise:** Compare per-insert collision retries with the probability that any collision occurs across the entire population; design safe deletion and code reuse.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -213,7 +217,7 @@ A common junior mistake: *"Hash the long URL using MD5 or SHA-256 and take the f
   - A 7-character string has $62^7 \approx 3.52 \text{ Trillion combinations}$.
   - By the Birthday Paradox, the collision probability reaches $50\%$ at:
     $$N \approx \sqrt{2 \times 62^7 \times \ln(2)} \approx 1.87 \text{ Million hashes!}$$
-  - At **100 Million writes/day**, you will encounter collisions within **hours of launch**! Resolving collisions via iterative rehashing causes catastrophic database write latency amplification.
+  - The birthday calculation gives the probability of **at least one collision across the population**. With $n$ occupied uniformly random codes in a space $M=62^7$, the next candidate collides with probability approximately $n/M$, giving $1/(1-n/M)$ expected attempts. At $n=100$ million, collision probability per candidate is about $0.00284\%$. A unique constraint and independently salted retries handle collisions; deterministic URL hashes also need a duplicate-URL/alias policy.
 
 #### The Staff Solution: Base62 of a 64-Bit Distributed Monotonic ID
 Instead of hashing the payload, generate a unique 64-bit integer and convert it directly to Base62:

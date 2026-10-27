@@ -1,11 +1,11 @@
 # 10 - Structured Streaming Internals
 
 **Priority:** P1
-**Versions:** 1.6 (mapWithState) / 2.0 (GA) -> 4.2
+**Versions:** Apache Spark **3.5.0**, micro-batch processing.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [01 - Execution Architecture & Scheduling](01%20-%20Execution%20Architecture%20&%20Scheduling.md), [08 - Fault Tolerance, Resource Scheduling & Multi-Tenancy](08%20-%20Fault%20Tolerance,%20Resource%20Scheduling%20&%20Multi-Tenancy.md), [11 - Delta Lake & Connector Internals](11%20-%20Delta%20Lake%20&%20Connector%20Internals.md).
 
-**TL;DR:** Structured Streaming runs an **unbounded table** as a sequence of incrementally planned batches over a normal Spark SQL plan. Each trigger: read new offsets -> plan the batch against the evolving result -> execute -> update state -> write to the sink -> **commit offsets to the checkpoint**. Exactly-once is a three-part contract: replayable source offsets + checkpointed state + idempotent or transactional sink. Interview skill: draw the micro-batch loop, explain what's in the checkpoint directory, and explain when exactly-once actually holds (and when it silently becomes at-least-once).
+**TL;DR:** In Spark **3.5.0 micro-batch processing**, each trigger obtains source end offsets -> **persists planned offsets** -> executes the batch with state and sink writes -> **records completed-batch metadata**. Replayable inputs, recoverable state and sink replay deduplication enable exactly-once effects. The built-in Kafka sink is at-least-once.
 
 ---
 
@@ -13,9 +13,9 @@
 
 Streaming is hard because state, time, and failure interleave. Structured Streaming's trick [S5 lineage]: **treat the stream as a table that grows**, and process it as a series of ordinary Spark SQL jobs:
 
-> A stream is an infinite, repeatedly planned batch query. Correctness comes from recording what was processed (offsets) and what state resulted (state store), so a restart can continue - not restart - no matter how it died.
+> A stream is an incrementally planned query. Planned offsets, completed-batch logs and versioned state drive recovery; the sink handles replayed effects using its transaction/idempotency protocol.
 
-Everything else follows from that: micro-batch triggers are just loop iterations; watermarks bound state by event time; checkpointing makes progress durable.
+Micro-batch triggers are loop iterations; properly configured operators use watermarks/time bounds for cleanup; durable checkpointing records progress.
 
 **Memory hook:** *"Offsets say how far we got; state says what we remember; the sink must tolerate a replay."*
 
@@ -30,14 +30,14 @@ The model is deliberately small: a table, a trigger, a mode, a watermark. Almost
 | Unbounded table | Input stream = table with rows appended over time |
 | **Output mode** | `append` (only new rows), `update` (changed rows only), `complete` (whole result each batch) |
 | **Trigger** | `default` (as fast as possible), `processingTime="10 seconds"`, `availableNow` (drain what's available, then stop), `once` (deprecated) |
-| **Watermark** | Event-time bound: state/results older than `max event time - delay` can be evicted/dropped |
+| **Watermark** | Event-time threshold used by each operator's late-data and finalization rules |
 | **Stateful operators** | Aggregations, dedup, stream-stream joins, arbitrary state (`mapGroupsWithState`/`flatMapGroupsWithState`), session windows |
 | **Sources/sinks** | Kafka, files, rate, socket; file/HDFS, Kafka, `foreachBatch`, Delta/Iceberg table sinks |
 
 Two rules that decide most designs:
 
-1. **Only `append` can be truly stateless-ish**: update/complete modes require maintaining result state.
-2. **State size is driven by key cardinality x watermark retention**, not by throughput.
+1. **Output mode and retained state**: aggregations/joins/dedup can retain state in append mode; complete-mode aggregation keeps the whole result.
+2. **State size depends on keys, rate, window/join ranges and effective retention**; configure cleanup for each operator.
 
 ---
 
@@ -57,11 +57,12 @@ sequenceDiagram
 
     T->>Q: new batch
     Q->>S: latest offsets (getOffset)
+    Q->>C: persist planned end offsets + batch metadata
     Q->>Q: plan batch (IncrementalExecution over base plan)
     Q->>E: run batch job (chapters 01-06 apply unchanged)
     E->>ST: read/update state (if stateful)
     E->>K: write output (per output mode)
-    Q->>C: write offsets + commit metadata
+    Q->>C: write completed-batch commit metadata after successful sink execution
     Q->>T: batch complete
 ```
 
@@ -73,7 +74,7 @@ Components:
 | `MicroBatchExecution` | The loop: offsets -> plan -> execute -> commit |
 | `IncrementalExecution` | Plans each batch on top of the previously planned state/result |
 | `OffsetSeqLog`, `CommitLog` | Durable offsets + completed-batch metadata in the checkpoint dir |
-| `StateStore` (per operator) | Per-key state keyed by (operator, partition, key), evicted by watermark |
+| `StateStore` (per operator) | Versioned state keyed by operator/partition/key, with operator-specific cleanup |
 | `WatermarkTracker` | Global low watermark across operators |
 | Sources/sinks | Replayable inputs, idempotent/transactional outputs |
 
@@ -94,7 +95,7 @@ State is the part of streaming that does not fit a batch mindset, so it gets its
 State store mechanics worth knowing:
 
 - State is **partitioned** and versioned; each micro-batch reads version N, writes version N+1, and commits.
-- **Watermark eviction** removes keys that can no longer be updated (late data beyond the watermark is dropped).
+- **Watermark eviction** finalizes/removes eligible state according to the operator/output mode, such as a window's end time.
 - **State schema is fixed** at query start; changing the state type/key typically means changing `checkpointLocation` and reprocessing from scratch (or a state-migration tool).
 - State metrics (rows, bytes, used memory) appear in the Streaming UI's progress data - they're your state-growth alarm.
 
@@ -102,19 +103,27 @@ State store mechanics worth knowing:
 
 ## 5. Time, Watermarks & Late Data
 
-Time semantics are where streaming correctness lives, and two sentences carry most of the interview load. First: event time is the data's clock, processing time is only the trigger's cadence. Second: a watermark is an explicit statement of "how late is too late".
+Event time is the data's clock; processing time is the engine's clock (also used for processing-time timeouts). `withWatermark(eventTimeCol, delay)` supplies an event-time threshold, but **the lateness guarantee is one-sided**: sufficiently recent data (within the configured delay) will not be dropped for lateness; older data **may or may not** be processed. Cleanup depends on the operator, window/time predicates, output mode and effective watermark advancement. Multiple inputs use a global policy (minimum by default); an idle input can stall advancement.
 
-- `withWatermark(eventTimeCol, delay)` asserts: "events older than (max event time seen - delay) are late." Consequences:
-  - Stateful aggregations can drop state for old keys -> bounded state.
-  - Stream-stream joins require watermarks on both sides (+ a join-time condition) - otherwise state grows forever.
-  - The low watermark gates when results can be emitted in `append` mode.
-- **Event time vs processing time**: windows should always use event time; processing time is only the trigger cadence.
-- **Late data policy is explicit**: with a watermark, late rows are dropped from state updates (they may still appear in stateless parts).
-- Session windows: express via `flatMapGroupsWithState` with timeouts (or platform-specific window helpers).
+**Example.** Batch 42 records Kafka end offset 13 before executing offsets `[5,13)`; sink success is followed by batch completion. With maximum event time 10:25 and a 10-minute delay, the candidate watermark is 10:15; effective operator watermarks advance at batch boundaries. A 10:12 event can still update a live `[10:10,10:20)` window at watermark 10:15 because cleanup follows **window end**. Complete-mode aggregation retains the full result.
 
-**Concrete example: one batch and its watermark.** Batch 42 consumes Kafka records 5 through 12 and records those end offsets in the offset log before execution; after the sink commits, the commit log marks batch 42 done. If the maximum event time in the batch is 10:25 and the watermark delay is 10 minutes, the watermark becomes 10:15. An event with event time 10:12 arriving in the next batch is older than the watermark and is dropped from stateful aggregation; state for keys last seen before 10:15 can be evicted. A crash between the offset-log and commit-log writes replays records 5-12, which is why the sink must be idempotent or transactional.
+### State / retention / API matrix (Spark 3.5.0)
 
-**Memory hook:** *"No watermark, no bound; watermark = 'how late is too late'."*
+| Operator / API | Required or optional time conditions | Cleanup / output-mode contract | Unbounded-state risk |
+|----------------|--------------------------------------|--------------------------------|----------------------|
+| Window aggregation, append | Watermark on grouping event-time column before aggregation required to finalize output | Emit final windows and evict when effective watermark passes window end | Stalled watermark or unbounded keys within live windows |
+| Window aggregation, update | Watermark optional; proper grouping/time placement needed for cleanup | Update live results; eligible window state can be removed | Without cleanup conditions, state accumulates |
+| Aggregation, complete | Retains the complete result | Entire result retained/emitted | Full result grows with cardinality |
+| `dropDuplicates` / `dropDuplicatesWithinWatermark` (3.5) | Without watermark, remember all keys; with watermark use API-specific event-time/dedup-key rules | Within-watermark API bounds remembered IDs by event-time delay; duplicates outside its guarantee may recur | Unbounded without effective retention; choose delay for duplicate timestamp spread |
+| Inner stream-stream join | Watermarks/time-range predicates optional for validity; needed to bound both sides | Each side's cleanup derives from opposite watermark and join-time bounds; append output | No finite time constraints or stalled input => retained join state |
+| Left/right/full outer stream-stream join | Appropriate watermark and time-range conditions required (both sides for full outer; see join support matrix) | Unmatched output waits until no future match is possible; batch progress required | Delayed/null output and state growth if watermarks stall |
+| `mapGroupsWithState` / `flatMapGroupsWithState`, processing-time timeout | Timeout mode and per-key timeout duration set by application | Callback after timeout when triggers run; application must remove/update state | No trigger or no removal => retained state; not an event-time guarantee |
+| Same APIs, event-time timeout | Watermark plus per-key timeout timestamp required | Timeout after effective watermark passes timestamp; application removes state | Stalled watermark or application retention |
+| Native `session_window` (since 3.2) aggregation | Built-in SQL/DataFrame session grouping; watermark needed for bounded finalization | Sessions merge by event-time gaps; append/complete supported, **update not supported in 3.5** | No watermark, stalled progress or continually extended sessions |
+
+The [pinned streaming guide](https://github.com/apache/spark/blob/v3.5.0/docs/structured-streaming-programming-guide.md) lists watermark placement and output-mode/join support for these APIs.
+
+**Memory hook:** *"Watermarks protect recent data; operators decide finalization."*
 
 ---
 
@@ -124,16 +133,24 @@ Exactly-once holds when **all three** are true:
 
 1. **Replayable source**: the engine can re-read from recorded offsets (Kafka, files, Delta).
 2. **Checkpointed state**: aggregation/join state can be reconstructed from the checkpoint at the last committed batch.
-3. **Idempotent or transactional sink**: re-executing a committed batch's output must not duplicate effects.
+3. **Replay-safe sink protocol**: output already committed before Spark records completion must be deduplicated on batch replay; transactionality alone is insufficient.
 
 | Sink | Guarantee |
 |------|-----------|
 | File sink (HDFS/cloud files) | Exactly-once via commit log + file commit protocol |
-| Kafka sink | At-least-once by default; exactly-once with idempotent/transactional producer semantics |
-| `foreachBatch` custom sink | Whatever you implement: dedup keys, MERGE, or transactional writes |
-| Delta/Iceberg table sinks | Exactly-once via transactional table commits (chapter 11) |
+| Built-in Kafka sink | **At-least-once**; Spark batch replay can republish records as new producer sends |
+| `foreachBatch` custom sink | At-least-once callback; use stable query/application identity + batch ID and atomic dedup/output (or genuinely idempotent MERGE semantics) |
+| Delta / other transactional table sinks | Connector-specific replay protocol; Delta commits application/batch transaction identifiers with file actions (chapter 11) |
 
 Failure/recovery flow: restart -> read checkpoint -> resume from last offset -> replay the uncommitted batch -> commit -> continue. With `foreachBatch`, batch re-execution is the reason idempotency is your job.
+
+| Crash point | Spark recovery with intact checkpoint | Required sink behavior |
+|-------------|---------------------------------------|------------------------|
+| Planned offsets durable, before sink output | Re-execute same batch/ranges | Handle retries/partial task effects; no assumed external rollback |
+| Sink commit succeeded, before Spark completion log | Replay same batch; Spark cannot infer external commit from offsets alone | File sink metadata / Delta txn dedup avoids duplicate effects; Kafka or naive callback may duplicate |
+| Spark completion log durable | Continue with next batch | Earlier output already durable under that sink's contract; retention must preserve recovery data |
+
+Source offsets identify input ranges; Kafka offsets are per topic/partition with exclusive end offsets. **Batch IDs identify query-local executions**. Stable application/query identity plus batch ID supplies a replay key. A new checkpoint resets batch numbering, so coordinate the application identity with the sink (see the Delta replay example).
 
 ---
 
@@ -161,14 +178,14 @@ Streaming failures almost always replay something, and replay is where exactly-o
 
 | Situation | Behavior | Notes |
 |-----------|----------|-------|
-| Executor loss mid-batch | Batch retries from offsets (tasks/stages retry as chapter 08) | No partial commit: commit log is the atomicity point |
+| Executor loss mid-batch | Failed tasks retry; fetch failures may recover stages; query restart can replay batch | Sink transaction/idempotency protocol handles repeated effects |
 | Driver restart | Resume from checkpoint at last committed batch | Replays uncommitted batch -> needs idempotent sink |
 | Checkpoint lost/corrupt | Cannot resume; start new query (may reprocess or skip) | Treat checkpoint dir as critical data |
 | State schema change | Query fails on restart | New checkpoint location or migration tooling |
-| No watermark on stateful op | State grows unboundedly (OOM) | Add watermark or bounded retention |
+| No effective state retention | State can grow unboundedly | Watermark/time conditions or application-controlled timeouts/removal; a declaration alone may not suffice |
 | Kafka rebalance | New partitions assigned -> offsets from checkpoint | Spark manages offsets; Kafka consumer groups not the source of truth |
 | Sink not idempotent + replay | Duplicates | Fix with dedup keys/MERGE/transactions |
-| Late data spike beyond watermark | Dropped from stateful results | Increase delay or accept drops |
+| Late data beyond delay | May be processed or dropped depending on operator/window/mode | Measure dropped-row/state metrics; define required lateness policy |
 | Small files from streaming | Many tiny output files | Compact periodically; table formats help |
 
 ---
@@ -193,7 +210,7 @@ Rule: alerts should fire on **processRate < inputRate sustained**, **batch durat
 
 ## 10. Version Notes
 
-The version history of streaming is a widening of the latency band: micro-batch first, then continuous experiments, then rock-solid state engines, then real-time mode. Read the table as a story about how low Spark could push latency without giving up exactly-once.
+Experimental continuous processing uses at-least-once delivery; the micro-batch recovery protocol is described above.
 
 | Version | Change | Impact |
 |---------|--------|--------|
@@ -210,11 +227,11 @@ The version history of streaming is a widening of the latency band: micro-batch 
 
 1. Structured Streaming = unbounded table + repeated batch planning (`MicroBatchExecution` + `IncrementalExecution`).
 2. Checkpoint = offsets + commits + state; it is the source of truth for progress.
-3. Exactly-once = replayable source + checkpointed state + idempotent/transactional sink.
-4. Output modes: append/update/complete; triggers: default/processingTime/availableNow (+ Real-Time in 4.1).
-5. Watermarks bound state and define late-ness; no watermark = unbounded growth for stateful ops.
+3. Exactly-once effects need retained replayable source + recoverable state + sink replay dedup; transactionality alone is insufficient.
+4. Output modes: append/update/complete; micro-batch triggers: default/processingTime/availableNow.
+5. Watermarks give a one-sided lateness guarantee; cleanup depends on operator/mode/time bounds and progress. Native session_window exists since 3.2.
 6. State stores: HDFS-backed (default), RocksDB (3.2), changelog checkpointing (3.5).
-7. `foreachBatch` means *you* own idempotency; Delta/file sinks buy it via commits.
+7. Built-in Kafka is at-least-once; foreachBatch uses application-owned replay deduplication; Delta uses txn identities.
 
 ---
 
@@ -224,19 +241,19 @@ The version history of streaming is a widening of the latency band: micro-batch 
 |---|----------|--------|
 | 1 | What is the core execution model? | Micro-batches of a normal SQL plan over an unbounded table |
 | 2 | What's in the checkpoint directory? | Metadata, offsets log, commit log, state store data, source metadata |
-| 3 | Three requirements for exactly-once? | Replayable source, checkpointed state, idempotent/transactional sink |
-| 4 | When does Kafka sink give exactly-once? | Only with transactional/idempotent producer semantics; otherwise at-least-once |
-| 5 | What does a watermark do? | Bounds state retention and defines which data is "too late" (dropped) |
-| 6 | Why do stream-stream joins need watermarks on both sides? | Without them, join state grows forever |
+| 3 | Three requirements for exactly-once effects? | Retained replayable source, recoverable checkpointed state, sink protocol deduplicating batch replay |
+| 4 | Does producer idempotence make the built-in Kafka sink exactly-once? | No; it remains at-least-once across Spark batch replay |
+| 5 | What does a watermark guarantee? | Recent data within delay is not dropped for lateness; older data may or may not be processed; operator/mode controls cleanup |
+| 6 | Which joins need watermarks? | Inner joins allow none but need time bounds/watermarks for bounded state; outer joins require appropriate watermark/time conditions for unmatched output |
 | 7 | Output mode differences? | Append: new rows only; update: changed rows; complete: full result per batch |
 | 8 | When use `availableNow`? | Scheduled/backfill processing with stream semantics; drains then stops |
-| 9 | What retries after executor loss mid-batch? | The batch (from recorded offsets); commit is atomic |
+| 9 | What is checkpoint ordering? | Planned offsets before execution; successful state/sink work before completed-batch metadata; failures can replay external effects |
 | 10 | What happens if checkpoint state schema changes? | Restart fails; new checkpoint or migration required |
 | 11 | How do you control burst ingestion? | `maxOffsetsPerTrigger` (Kafka), `maxFilesPerTrigger` (files) |
 | 12 | What's the latency formula? | Trigger interval + batch execution + sink commit |
 | 13 | Why is `foreachBatch` dangerous with exactly-once? | Batch replay duplicates non-idempotent side effects unless you dedup/MERGE |
 | 14 | 3.2 vs 3.5 state store changes? | RocksDB state store (3.2); changelog checkpointing (3.5) |
-| 15 | What did 4.1 add for latency? | Real-Time Mode for stateless sub-second pipelines (single-digit ms reported) |
+| 15 | What changes when a query starts with a new checkpoint? | Batch numbering resets; use a new sink application identity so earlier batch IDs remain distinct |
 | 16 | What metrics alarm on backlog? | Process rate < input rate; batch duration > trigger interval |
 
 ---

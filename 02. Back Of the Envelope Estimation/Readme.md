@@ -1,5 +1,9 @@
 # Chapter 02: Back-of-the-Envelope Capacity Estimation & Hardware Sizing
 
+## Guarantees and assumptions
+Capacity calculations include peak traffic, retries, compression, retention, replication, indexes and failure headroom. Latency budgets separate database commit, replication and client response.
+**Principal IC exercise:** Recompute capacity with one zone unavailable, twice the retry traffic, and a tenfold increase in distinct keys; identify the first saturated resource.
+
 **Sources & Foundational References:**
 - [Latency Numbers Every Programmer Should Know (Colin Scott / Jeff Dean)](https://gist.github.com/jboner/2841832)
 - [The System Design Primer: Back-of-the-Envelope Calculations (Donne Martin)](https://github.com/donnemartin/system-design-primer#powers-of-two-table)

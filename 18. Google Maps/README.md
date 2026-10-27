@@ -1,5 +1,9 @@
 # Chapter 18: Design Google Maps & Real-Time Navigation (Routing, ETAs, Map Rendering)
 
+## Guarantees and assumptions
+Navigation uses versioned graph/traffic snapshots; telemetry ACK follows durable ingestion. Deduplicate device events and publish map generations atomically across routing and tile services.
+**Principal IC exercise:** Roll out a road-closure update across routing and tile services while preventing mixed-version routes through a closed edge.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Google S2 Geometry Library Documentation](http://s2geometry.io/)
@@ -50,7 +54,7 @@ Designing Google Maps is one of the most intellectually demanding systems design
 │                         │ • Evaluates S2 Geometry vs Geohash; selects S2 for distortion-free cells.    │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 2. Technical            │ • Explains S2 spherical projection (Cube mapping + Hilbert space-filling     │
-│    Proficiency          │   curve) yielding 64-bit integer IDs for $O(1)$ spatial B-Tree indexing.     │
+│ Proficiency │ curve) yielding 64-bit IDs; B-tree lookup is O(log N) plus output.    │
 │                         │ • Dissects Hidden Markov Model (Emission probabilities for GPS noise +       │
 │                         │   Transition probabilities for road network topology).                       │
 │                         │ • Formulates edge weight functions ($W = \frac{\text{Distance}}{\text{Speed}(t)}$).│
@@ -169,16 +173,16 @@ Spatial indexing cannot use naive latitude/longitude bounding boxes because degr
 ├─────────────────────┼──────────────────┼──────────────────┼────────────────────────────┤
 │ 3. Google S2        │ 3D Sphere onto   │ 64-bit Integer   │ MINIMAL DISTORTION. Hilbert│
 │    (Industry SOTA)  │ Cube + Hilbert   │ (`uint64_t`)     │ space-filling curve preserves│
-│                     │ Curve            │                  │ 1D locality; $O(1)$ B-Tree │
-│                     │                  │                  │ range scans in PostgreSQL. │
+│                     │ Curve            │                  │ 1D locality; B-tree ranges │
+│                     │                  │                  │ cost O(log N) plus output. │
 └─────────────────────┴──────────────────┴──────────────────┴────────────────────────────┘
 ```
 
 ### 6.2 S2 Spatial Mechanics
 1. **Cube Projection:** Project the spherical Earth onto the 6 faces of a circumscribed cube.
 2. **Hilbert Curve Mapping:** Subdivide each face quadtree-style down to level 30 (centimeter-level resolution). Traverse the quadrants using a continuous **Hilbert Space-Filling Curve**.
-3. **64-bit Integer Index:** Every point on Earth is represented by a single unsigned 64-bit integer (`uint64_t`). Two points close on Earth have IDs close to each other on the 1D Hilbert curve.
-4. **Fast Range Queries:** A circular bounding query (e.g. *"find all traffic incidents within 5 km of my car"*) translates directly into a sequence of **contiguous 1D integer range scans** (`WHERE s2_cell_id BETWEEN min_val AND max_val`) executed at hardware speed over database B+ Trees!
+3. **64-bit Integer Index:** S2 represents a selected cell containing the point using a 64-bit ID. Fixed-level ID computation has bounded work; locality is useful but nearby points can straddle distant curve ranges.
+4. **Range Queries:** Cover the circle with S2 cells, turn the covering into integer ranges, query the B-tree, then apply exact-distance filtering. Each range costs roughly $O(\log N + k)$ including returned candidates, plus covering/merge overhead. Precision and covering size trade false positives against fan-out. See the [S2 cell hierarchy](http://s2geometry.io/devguide/s2cell_hierarchy).
 
 ```mermaid
 flowchart LR

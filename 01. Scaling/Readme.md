@@ -1,5 +1,9 @@
 # Chapter 01: Scale from Zero to Millions of Users (The Definitive Architecture Evolution)
 
+## Guarantees and assumptions
+Mutations succeed after the authoritative database commit; replicas and caches update asynchronously. Clients reuse operation IDs across retries and load-balancer changes.
+**Principal IC exercise:** Define a read-your-writes contract during primary failover; quantify the latency and availability cost of bypassing stale replicas.
+
 **Sources & Foundational References:**
 - [The System Design Primer: Scaling to Millions of Users on AWS (Donne Martin)](https://github.com/donnemartin/system-design-primer/blob/master/solutions/system_design/scaling_aws/README.md)
 - [System Design Interview – An Insider's Guide, Vol 1 (Alex Xu)](https://bytebytego.com/)

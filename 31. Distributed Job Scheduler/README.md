@@ -1,5 +1,9 @@
 # Chapter 31: Design a Distributed Job Scheduler (6+ Approaches)
 
+## Guarantees and assumptions
+Submission ACK follows durable job creation. Claim atomically records the attempt token/owner, completion checks the current RUNNING attempt, and stable business-operation IDs deduplicate downstream effects.
+**Principal IC exercise:** A worker performs its effect then loses the completion ACK after lease expiry; recover without duplicating the effect or accepting a stale result.
+
 Based on the system design breakdown from **[System Design Fight Club - Atlassian Interview Question: Job Scheduler (6+ Approaches)](https://www.youtube.com/watch?v=ur3ioZhwG8w)** with additions for Staff/Principal-level evaluation.
 
 ---
@@ -161,13 +165,13 @@ Understanding worker pool sizing and storage velocity:
    FOR UPDATE SKIP LOCKED;
    ```
 3. The poller queries `machine_status` to find idle worker instances.
-4. The poller assigns `job_id` to `worker_id`, updates `jobs.status = 'RUNNING'`, and dispatches the task over HTTP/gRPC.
-5. Worker finishes, writes output to S3, and updates `jobs.status = 'COMPLETED'` and `machine_status.status = 'AVAILABLE'`.
+4. In the **same short transaction** as the locked selection, store `RUNNING`, owner, a new attempt token, and lease deadline. Commit before dispatch over HTTP/gRPC; never hold database locks while running the task. Recover dispatch loss by retrying the same attempt identity.
+5. Worker writes attempt-specific output, then conditionally completes only its current token/owner/RUNNING lease (see fencing SQL below). Only a winning completion promotes output and releases the matching worker slot; stale attempts cannot publish a final result.
 
 #### Fatal Bottlenecks:
 - **Lock Contention:** Constantly polling tables with `FOR UPDATE` creates severe row-locking contention.
 - **Wasted Database Cycles:** When queue is empty, poller hammers the DB with empty queries.
-- **Scalability Limit:** Hard ceiling around $500\text{--}1,000\text{ TPS}$.
+- **Sizing estimate:** $500\text{--}1,000\text{ TPS}$ for this baseline; query/index shape, batch size, contention and commit durability determine capacity.
 
 ---
 
@@ -332,14 +336,28 @@ Worker B: ───────────────────────�
 ```
 
 - **Staff Solution: Monotonic Fencing Tokens:**
-  - Whenever a job is assigned or re-assigned, the scheduler generates a monotonically increasing `fencing_token` (e.g., Token = 101, Token = 102).
-  - The storage/database layer enforces a condition on write:
+  - On claim/reassignment, atomically store the new monotonically increasing attempt `fencing_token`, owner, lease expiry, and `RUNNING` state in the authoritative job row (for example 101 then 102). The worker receives that committed attempt.
+  - Completion accepts only the currently assigned attempt:
     ```sql
     UPDATE jobs 
-    SET output = :result, status = 'COMPLETED', fencing_token = :token 
-    WHERE id = 42 AND fencing_token < :token;
+    SET output = :result, status = 'COMPLETED'
+    WHERE id = :job_id
+      AND fencing_token = :attempt_token
+      AND owner_id = :worker_id
+      AND status = 'RUNNING'
+      AND lease_expires_at > clock_timestamp();
     ```
-  - When Worker A attempts to write with stale `token = 101`, the database rejects the update because `token = 102` has already been committed.
+  - Check affected rows: zero means stale/expired/already-completed, not success. Worker A's 101 fails as soon as reassignment stores 102, **even before B completes**; B's current 102 can succeed. Use the same database clock/locking contract for lease renewals, reassignment, and completion; a rejected expired result is retried as a new attempt. This sample uses PostgreSQL's current wall-time `clock_timestamp()` rather than transaction-start `CURRENT_TIMESTAMP`; verify the deployed release's [date/time semantics](https://www.postgresql.org/docs/current/functions-datetime.html).
+  - This fences **job metadata only**. External writes must enforce the current authority token themselves or use a stable logical effect ID/idempotent API. A resource's conventional “reject tokens below highest seen” rule is weaker: it rejects old writers only after observing the newer token.
+
+### Crash/recovery timeline: scheduler and side effects
+| Crash point | Durable evidence | Recovery / retry outcome |
+| :--- | :--- | :--- |
+| Claim committed, dispatch ACK lost | RUNNING attempt/token/owner | Redeliver that attempt; worker startup deduplicates attempt ID. |
+| Worker pauses; lease expires and B claims | Job row now stores B's newer token | Reject A's heartbeat/completion even if B has not produced a result. |
+| External side effect succeeds, response/ACK lost | Stable logical effect ID; provider/resource may have applied it | Query/retry the same effect ID. A new attempt token must not create a new logical payment/email identity. |
+| Completion commits, worker ACK lost | COMPLETED output for the run | Lookup stored outcome; do not execute the effect again. |
+| Effect has no idempotency/fencing support | External outcome remains ambiguous | Reconcile against downstream records or escalate for manual resolution. |
 
 ---
 

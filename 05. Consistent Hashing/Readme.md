@@ -1,5 +1,9 @@
 # Chapter 05: Consistent Hashing (Cassandra, DynamoDB, Maglev)
 
+## Guarantees and assumptions
+Ring versions identify ownership during migration; retries retain their operation IDs. Token placement, key popularity and object sizes determine data and traffic balance.
+**Principal IC exercise:** Design a ring-version migration that never drops a concurrent write and measure temporary duplicate storage and read fan-out.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -14,7 +18,7 @@ Consistent Hashing is the architectural backbone of modern distributed storage, 
 ├────────────────────────────────────────┼───────────────────────────────────────────────┤
 │ • Basic hash ring modulo circle        │ • Mathematical proof of key redistribution:   │
 │ • "Walk clockwise to find server"      │   K/N keys moved vs 100% in modulo hashing    │
-│ • Mentions virtual nodes vaguely       │ • Vnode variance math: sigma proportional     │
+│ • Mentions virtual nodes vaguely       │ • Relative ownership standard deviation       │
 │ • Ignores replication across racks     │   to 1/sqrt(V); heterogeneous capacity weights│
 │ • Ignores lookup data structure        │ • In-memory TreeMap / Binary search O(log M)  │
 │ • Ignores live node join data streaming│ • Rack-aware physical node deduplication      │
@@ -38,7 +42,7 @@ Consistent Hashing is the architectural backbone of modern distributed storage, 
 │                         │ • Evaluates trade-offs between virtual node count and memory lookup bounds.  │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 2. Technical            │ • In-Memory Binary Search ceiling lookup ($O(\log M)$ on Red-Black Tree).    │
-│    Proficiency          │ • Virtual node load variance math ($\sigma \propto \frac{1}{\sqrt{V}}$).     │
+│    Proficiency          │ • Derives relative ownership dispersion ~1/sqrt(V).                       │
 │                         │ • Rack-aware physical node traversal for replica sets (skipping co-located). │
 │                         │ • Zero-downtime data migration streaming during node ring joins.             │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
@@ -145,18 +149,19 @@ graph TD
     end
 ```
 
-#### The Variance Formula
-The standard deviation $\sigma$ of the fraction of keys assigned to any server is inversely proportional to the square root of the number of virtual nodes:
-$$\sigma \propto \frac{1}{\sqrt{V}}$$
-* With $V = 100$ vnodes: Key distribution variance drops to $< 10\%$.
-* With $V = 256$ vnodes: Key distribution variance drops to $< 5\%$!
+#### Expected Ownership Dispersion
+For $N$ equal-capacity servers with $V$ independent uniformly random tokens each, relative standard deviation of owned ring fraction is:
+$$\frac{\sigma}{\mu} = \sqrt{\frac{N-1}{NV+1}} \approx \frac{1}{\sqrt{V}} \quad \text{for large } N.$$
+* With $V = 100$: approximately **10% relative standard deviation**.
+* With $V = 256$: approximately **6.25% relative standard deviation**.
+Key populations, object sizes, token placement and hot-key popularity determine realized data/traffic balance around these expectations.
 
 #### Heterogeneous Server Capacities
 Virtual nodes elegantly solve hardware heterogeneity:
 * If Server A has **64 GB RAM** and Server B has **256 GB RAM** (4x capacity):
   - Assign **100 vnodes** to Server A.
   - Assign **400 vnodes** to Server B.
-* Server B naturally absorbs exactly 4x more traffic and data without complex manual sharding!
+* Server B receives approximately **4x the expected ring ownership**; actual data and traffic need not scale 4x, especially with hot keys.
 
 ---
 

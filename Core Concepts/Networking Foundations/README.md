@@ -57,6 +57,6 @@ When setting up a Reverse Proxy (like HAProxy) to load balance traffic across yo
 *   **Cons:** "Dumb" routing. It cannot route traffic based on the URL. If you want `/api/users` to go to Server A, and `/api/payments` to go to Server B, Layer 4 cannot do this because it cannot read the URL.
 
 ### Layer 7 Load Balancing (Application)
-*   **How it works:** The Load Balancer terminates the TCP connection, decrypts the TLS certificate, and reads the actual **HTTP headers and URL path**. It then establishes a *second, brand new TCP connection* to the chosen backend server.
+* **How it works:** For HTTPS inspection, the load balancer terminates TLS with its configured certificate/key, decrypts traffic and reads HTTP headers/path. It then establishes a separate backend connection, optionally using TLS. See [TLS handshake mechanics](../Encryption%20and%20TLS/README.md).
 *   **Pros:** "Smart" routing. Can route based on URL path, HTTP headers, or even cookies (Sticky Sessions).
 *   **Cons:** **Slower and CPU intensive**. Maintaining two separate TCP connections (Client <-> Proxy, and Proxy <-> Backend) and decrypting traffic adds latency and server overhead.

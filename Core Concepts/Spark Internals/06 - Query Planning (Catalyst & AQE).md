@@ -1,7 +1,7 @@
 # 06 - Query Planning: Catalyst & Adaptive Query Execution (AQE)
 
 **Priority:** P0
-**Versions:** 1.x (Catalyst) -> 2.2 (CBO) -> 3.0/3.2 (AQE) -> 4.2
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [05 - Physical Operators](05%20-%20Physical%20Operators%20%28Joins,%20Aggregations,%20Sorting%20&%20Windows%29.md), [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md), [Appendix C - The Spark Acceleration Landscape](Appendix%20C%20-%20The%20Spark%20Acceleration%20Landscape.md) (planner vs execution-engine responsibilities).
 
@@ -149,12 +149,16 @@ Every AQE rule follows the same shape: observe a materialized exchange, then rew
 
 | Rule | Effect | Defaults to know |
 |------|--------|------------------|
-| **Coalesce shuffle partitions** | Merge adjacent small post-shuffle partitions | Target `spark.sql.adaptive.advisoryPartitionSizeInBytes` = 64 MB |
-| **Switch join strategies** | Convert SMJ -> BHJ/SHJ when real sizes allow | Broadcast threshold still applies (`autoBroadcastJoinThreshold`) |
+| **Coalesce shuffle partitions** | Merge adjacent small post-shuffle partitions | Advisory size 64 MiB; parallelismFirst=true changes target calculation (see below) |
+| **Switch join strategies** | Convert SMJ -> BHJ/SHJ when real sizes allow | Adaptive broadcast threshold can differ from static threshold (see below) |
 | **Optimize skewed join** | Split partitions much larger than median; join sub-partitions separately | Skew factor 5x median and size > 256 MB |
-| **Local shuffle reader** | Skip network reads when the exchange's partitioning already satisfies the consumer | Plan rewrite; no data movement |
+| **Local shuffle reader** | Locality-aware reads when downstream shuffle partitioning is no longer needed, e.g. SMJ -> BHJ | Reuses materialized shuffle output with locality-aware read partitions |
 | **Propagate empty relations** | Remove joins/aggregations that can't produce rows | Cheap but big wins |
 | **Coalesce/rebalance handling** | Adapt partition counts for `rebalance` hints | Extended in 3.2+ |
+
+**3.5.0 configuration interaction.** `spark.sql.adaptive.coalescePartitions.parallelismFirst=true` (default) prioritizes parallelism using cluster default parallelism and the minimum partition size (default 1 MiB), rather than simply packing partitions to the 64 MiB advisory size. With it false, advisory size is the principal coalescing target (still constrained by minimum size and other rules). Start with enough `spark.sql.shuffle.partitions` or `coalescePartitions.initialPartitionNum`; coalescing cannot generally repair too few initial partitions. Measure task sizes/counts in the final plan before changing either knob.
+
+Static planning uses `spark.sql.autoBroadcastJoinThreshold` (10 MiB default). AQE uses `spark.sql.adaptive.autoBroadcastJoinThreshold`, which falls back to the static value when unset; independently configure it when static and runtime policies should differ. Broadcast eligibility and memory safety still matter.
 
 ### D. The numbers (with context)
 
@@ -234,7 +238,7 @@ HashAggregate(final, customer_id)
           FileScan customers (50k rows, 2 files)
 ```
 
-The `Exchange` is the AQE checkpoint. After the partial aggregate, AQE sees the real post-shuffle sizes: if the 200 partitions are mostly small, it coalesces them toward the 64 MB target (say 8); if the join had started as SMJ and the build side is actually small, it can switch to BHJ/SHJ. CBO's statistics explain the choices before runtime: `customer_id` has NDV 50k, so 1M orders collapse to ~50k groups; a filter with 10% selectivity is estimated at 100k rows. Those estimates decide join order and build side before execution.
+The `Exchange` is an AQE materialization point. This example coalesces 200 small aggregation partitions to 8 based on bytes, `parallelismFirst` and minimum sizing. A plan initially using SMJ can switch to BHJ/SHJ when the measured build side is small enough, reusing already-written shuffle data through local reads.
 
 ---
 
@@ -249,7 +253,7 @@ Most frustrating planning behavior is actually a predictable interaction between
 | AQE "does nothing" | Disabled (`spark.sql.adaptive.enabled=false`), or plan has no exchange boundaries (single-stage query) | Check config and plan shape |
 | Coalescing not happening | Post-shuffle partitions already near/above advisory size | Expected; target size is advisory |
 | Skew persists | Skew key inside a single partition within advisory size, or no exchange before the skewed operator | Salt/isolate hot key; verify skew thresholds |
-| Local shuffle reader not used | The exchange output partitioning doesn't satisfy the consumer (different keys/ordering) | That's correct behavior - the rewrite is proof-based |
+| Local shuffle reader not used | Downstream requires shuffle partitioning, or the read-spec rewrite is ineligible | Inspect required partitioning and the final AQE read specifications |
 | Plan change overhead | Frequent re-planning of very large plans | AQE 3.4+ caches; keep logical plans lean |
 | Inconsistent benchmark numbers | Adaptive plan not final / stats warming | Compare final plans and repeat runs |
 
@@ -316,12 +320,12 @@ The planning lineage is a story of adding intelligence in layers: rules, then co
 | 7 | Why did AQE exist? | Static stats are stale/missing; real sizes only appear after each shuffle |
 | 8 | Where does AQE re-optimize? | At query stage boundaries (shuffle/broadcast materializations), never mid-task |
 | 9 | Name four AQE rules. | Coalesce shuffle partitions, switch join strategy, split skew, local shuffle reader |
-| 10 | What's the target partition size for coalescing? | 64 MB (`advisoryPartitionSizeInBytes`) |
+| 10 | Is 64 MiB the default coalesced size? | Advisory only; parallelismFirst=true prioritizes parallelism/minimum size; false makes advisory size the principal target |
 | 11 | What are the skew thresholds? | 5x median partition size and > 256 MB |
 | 12 | How do DPP and Bloom filters differ? | DPP prunes whole partitions using dimension values; Bloom filters skip non-matching rows inside scans |
 | 13 | Why might AQE be invisible in the SQL tab? | You're seeing a non-final plan, or AQE is disabled/no exchanges exist |
 | 14 | Two reasons a broadcast OOM survives AQE. | Bad stats/hint chose broadcast pre-stage; or the real build side genuinely exceeds memory |
-| 15 | What does "local shuffle reader" require? | Proof that the exchange output partitioning already satisfies the consumer's requirements |
+| 15 | What does "local shuffle reader" require? | Downstream shuffle partitioning no longer needed (e.g. SMJ -> BHJ); eligible locality-aware reads reuse existing shuffle output |
 | 16 | Where do you look to see which optimizer rules fired at runtime? | Plan change logs (`spark.sql.planChangeLog`) and initial-vs-final SQL tab plans |
 | 17 | When is AQE *not* the fix? | Bad storage layout, expensive UDFs, intra-task cardinality explosions |
 

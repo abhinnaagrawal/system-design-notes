@@ -11,11 +11,11 @@
 ### What is RPC?
 In traditional programming, you execute a function locally (e.g., `calculateSum(a, b)`). A **Remote Procedure Call (RPC)** aims to make executing a function on a *different machine over the network* look exactly like calling a local function.
 
-### The Problem with REST / JSON
-While REST over HTTP/1.1 with JSON payloads is the undisputed standard for web APIs, it has limitations at massive scale:
+### Comparing API Style, Encoding and Transport
+REST can use HTTP/2 or HTTP/3 and schema-driven typed clients. The following compares a common REST/JSON-over-HTTP/1.1 deployment with gRPC/Protobuf:
 1.  **JSON is slow and bulky:** JSON is a text-based format. Computers must spend CPU cycles parsing text into memory objects. Strings take up a lot of bandwidth.
 2.  **HTTP/1.1 is inefficient:** It suffers from Head-of-Line blocking (you have to wait for one request to finish before sending the next on the same TCP connection) and sends bulky, uncompressed text headers with every request.
-3.  **Weakly Typed:** In REST, there is no strict contract. A server might expect an `integer` but the client sends a `string`, causing runtime errors.
+3. **Contract enforcement:** Ad hoc JSON can lack validation, but OpenAPI/JSON Schema and generated clients can provide explicit contracts. Both REST and gRPC still need compatible deployed versions and runtime validation.
 
 **The Solution:** gRPC solves these by using **Protocol Buffers** and **HTTP/2**.
 
@@ -124,14 +124,14 @@ sequenceDiagram
 ## 4. Pros & Cons
 
 ### Pros ✅
-*   **High Performance:** Binary serialization and HTTP/2 make it vastly faster and more CPU/bandwidth efficient than REST/JSON.
-*   **Strict Contracts:** The `.proto` file acts as the ultimate source of truth. If the backend changes a data type, the client code will fail to compile, preventing runtime bugs.
+* **Performance:** Protobuf and connection multiplexing can reduce bytes/CPU for suitable workloads; benchmark payloads, implementation, compression and topology rather than assuming a universal speedup.
+* **Explicit Contracts:** Generated types catch local code/schema mismatches. Deployed client/server compatibility also depends on schema evolution: preserve field numbers, reserve removed tags/names and test supported version skew.
 *   **Built-in Code Generation:** You never have to manually write HTTP `fetch` requests or parse responses again. The generated SDK handles all networking.
 *   **Excellent for Microservices:** Perfect for backend-to-backend communication where speed is critical.
 
 ### Cons ❌
 *   **Not Browser Friendly:** You cannot natively call a gRPC endpoint from a web browser (JavaScript) because browsers do not expose low-level control over HTTP/2 framing. You must use a translation layer like `gRPC-Web` or an API Gateway (like Envoy) to translate REST to gRPC.
-*   **Hard to Debug:** Because the traffic is binary, you cannot just open the Chrome Network Tab or use `curl` to read the payload. You need specialized tools (like `grpcurl` or Postman) that have access to the `.proto` schema to decrypt the binary.
+* **Harder to Inspect:** Tools such as `grpcurl` use descriptors or server reflection to decode Protobuf. Inspecting TLS-protected traffic also requires access to the decrypted transport.
 *   **Steep Learning Curve:** Requires managing `.proto` files, compiling them in CI/CD pipelines, and distributing the generated code to different teams.
 
 ---

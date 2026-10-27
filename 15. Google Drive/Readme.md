@@ -1,5 +1,9 @@
 # Chapter 15: Design a Cloud Storage & Multi-Device File Sync System (Google Drive / Dropbox)
 
+## Guarantees and assumptions
+A sync ACK follows durable chunks and an atomic metadata-version commit. Stable operation IDs, base-version checks and retained tombstones resolve retries, concurrent edits and offline replay.
+**Principal IC exercise:** Replay an offline rename/edit after another device deletes the file; specify version checks, conflict recovery, and tombstone retention.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -261,6 +265,8 @@ sequenceDiagram
    WHERE file_id = 'fl_109' AND version = 4;
    ```
 3. **Automatic Conflict Branching:** If the update fails (0 rows affected), the client automatically saves the local changes under a branched name: `filename (User's conflicted copy Date).ext`, alerting the user in the UI.
+4. **Rename/Delete/Offline Replay:** Address immutable file IDs, not paths; require expected file and parent-directory versions for rename/move/delete. A concurrent delete leaves a versioned tombstone so an offline edit cannot silently resurrect the file. Offer an explicit recover-as-copy workflow for retained local content, subject to current permissions.
+5. **Retry and Retention:** Persist a client operation ID and payload digest with the metadata mutation/outbox. After ACK loss return that outcome, not a second conflict copy. Retain tombstones and operation IDs beyond the supported offline horizon; older clients must perform a full resync rather than replay operations against reclaimed history.
 
 ---
 

@@ -1,5 +1,9 @@
 # Chapter 13: Design a Search Autocomplete System (Typeahead Suggestions)
 
+## Guarantees and assumptions
+Each query reads one immutable trie generation. Build jobs persist validated artifacts and activation records, publish the version pointer atomically, and retain old generations until their readers finish.
+**Principal IC exercise:** Roll back a corrupt trie snapshot while readers span two generations; specify reference/epoch-based reclamation and freshness monitoring.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -202,13 +206,14 @@ A classic junior pitfall: *"When new queries arrive, update the Trie node counte
 * **The Lock Contention Disaster:** If a Trie server is handling 30,000 reads/sec, acquiring a write lock on the root node to update query frequencies causes severe **read thread starvation and latency spikes**.
 * **The Staff Solution: Atomic Pointer Swap (Double Buffering in RAM)**
   1. The offline data pipeline builds a brand new immutable Trie in the background.
-  2. The new Trie snapshot is saved to S3/persistent storage.
-  3. The query server downloads the new Trie into a secondary memory buffer.
+  2. Save an immutable versioned artifact plus checksum, schema/tokenizer version, source cutoff, and ranking-policy version; validate before publishing the activation manifest.
+  3. The query server downloads and validates the named generation into a secondary memory buffer. Reserve peak memory for both generations plus readers still holding older ones.
   4. The server executes an **Atomic Pointer Swap** using language memory barriers (e.g. Go `atomic.StorePointer` or C++ `atomic_store`):
      ```go
      atomic.StorePointer(&activeTriePointer, unsafe.Pointer(newTrie))
      ```
-  5. Active read threads reading the old Trie finish uninterrupted; all subsequent queries immediately read the new Trie. Zero locks, zero downtime!
+  5. Each request captures one generation pointer for its entire lookup. Reclaim old tries after their readers finish, using garbage-collected strong references or explicit reference counts/epochs/RCU.
+  6. Record the active generation per replica; activation is atomic **per process**, not globally simultaneous. Idempotently retry the same manifest version and retain a known-good prior artifact for rollback.
 
 ```mermaid
 sequenceDiagram

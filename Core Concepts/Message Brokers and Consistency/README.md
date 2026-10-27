@@ -2,7 +2,9 @@
 
 **Source:** [When NOT to use a message broker? (System Design Fight Club)](https://www.youtube.com/watch?v=eWpOlIBxB_U)
 
-**TL;DR:** While message brokers (Kafka, Kinesis, SQS, RabbitMQ) are fantastic for decoupling systems and increasing availability, they fundamentally **kill strong consistency**. If your system requires immediate, strong consistency (e.g., Financial Trading, Wallets, Payment Gateways), you should *not* place an asynchronous message broker in the critical path between your API and the database.
+**TL;DR:** Consistency depends on **what the response acknowledges and which state a read observes**. An enqueue ACK can precede database projection updates. Read-your-writes requires waiting for application and reading at or beyond that commit.
+
+> **Delivery contract:** Broker configuration defines ACK durability. Retention covers recovery time; stable event IDs and atomic consumer deduplication handle replay.
 
 ---
 
@@ -14,7 +16,7 @@ In a standard CRUD application without a broker, the flow is completely synchron
 3. **Acknowledgment:** The Data Store confirms the write has been successfully committed.
 4. **Response:** The API returns a `200 OK` to the client.
 
-**Mechanical Detail:** Because the write is strictly synchronous, the moment the client receives the `200 OK`, any subsequent Read request is guaranteed to see the newly written data. As long as the underlying database supports strong consistency (like PostgreSQL or Spanner), there are no stale reads. 
+**Mechanical Detail:** A committed write followed by a fresh primary read can provide read-your-writes under the selected isolation level. Asynchronous replicas, stale transaction snapshots and caches can return older data.
 
 ```mermaid
 sequenceDiagram
@@ -38,13 +40,13 @@ When you introduce a message broker (Kafka, Kinesis, SQS) to increase availabili
 
 1. **Write Request:** The client sends a write request.
 2. **Broker Persistence:** The Write Capture Service writes the event to the Message Broker. 
-3. **Immediate Response:** Once the broker acknowledges ("yep, I've got it stored"), the API *immediately* returns `200 OK` to the client.
+3. **Immediate Response:** After the configured durable broker ACK, return `202 Accepted` and an operation/status ID if the business operation is not yet applied.
 4. **Asynchronous Processing:** In the background, a Task Runner (or consumer) asynchronously pulls the event from the broker and writes it to the Data Store.
 
-*(Note: As mentioned in Martin Kleppmann's "Designing Data-Intensive Applications" (DDIA), you can think of message brokers as temporary data stores. In fact, under the hood, AWS Kinesis is essentially implemented on top of DynamoDB.)*
+*A durable log can serve as authoritative state, with databases maintaining projections of that log.*
 
 ### ⚠️ Trap Warnings: Stale Reads and Lost Writes
-Because the API returned `200 OK` before the data actually reached the database, a client might immediately issue a Read request and get **stale data** (or a 404 Not Found). The data is safely persisted in the highly-available message queue, but it is not yet visible to readers.
+Because the API acknowledges acceptance before database application, an immediate projection read can return **stale data** or 404. Expose operation status, carry an application-position barrier, or wait for the applied result before promising completion.
 
 If the database or task runners experience an outage (which could last for hours or even a whole day), the data will simply queue up in the broker. 
 - **Stale Reads:** Readers will receive outdated information until the outage is resolved and the broker drains.
@@ -61,7 +63,7 @@ sequenceDiagram
     Client->>API: Write Request
     API->>Broker: Publish Event
     Broker-->>API: Ack (Persisted in Queue)
-    API-->>Client: 200 OK (Fast!)
+    API-->>Client: 202 Accepted + operation ID
     
     Client->>API: Read Request
     API->>DB: SELECT
@@ -74,7 +76,7 @@ sequenceDiagram
 ```
 
 ## 3. Why Use a Broker? (Push vs. Pull Mechanism)
-Why trade away consistency? **Availability and shielding the database.**
+Why accept asynchronous visibility? **Buffering and shielding the database.** The API contract must expose that choice.
 
 Databases (like a time-series database) often go down or get overwhelmed under massive load. Message brokers are explicitly designed for extreme high availability. 
 
@@ -82,25 +84,24 @@ By placing a broker in front of a database, you transform a **Push** system (whi
 
 **Mechanical Detail:** You do not want retry logic on the Write Service API itself. If the DB is struggling, executing retries synchronously before returning a `200 OK` will massively inflate API latency and potentially exhaust connection pools. Instead, you write to the highly available broker. The downstream Task Runners can then "pull" from the broker and "push" to the database, executing retry logic safely in the background without affecting user-facing API latency.
 
-## 4. The CAP Theorem Trade-off
-You are actively trading Consistency (C) for Availability (A) under the CAP Theorem.
+## 4. The CAP Theorem and the Acknowledgment Boundary
+During a partition, preserving linearizability can require rejecting requests whose required quorum is unreachable.
 
 The theorem states "Consistency, Availability, Partition Tolerance — Pick Two." However, in distributed systems, Partition Tolerance (network partitions) is a reality you cannot opt out of. So the real choice is: **Consistency or Availability — Pick One.**
 
-By throwing a message broker in front, your system stays highly available for writes even if the primary datastore is down. The exact cost of this availability is abandoning strong consistency and embracing eventual consistency.
+A broker-first API can accept durable intents while its database projection is unavailable and expose their pending status. A log-authoritative design defines success at log commit and uses application/read barriers to serve ordered state.
 
 ## 5. System Design Interview Tips
 
-### 💡 Tip 1: Do Not Design for Kafka Going Down
-In a system design interview, you *can* and *should* expect data stores to go down. You account for this by throwing a message broker in front of it. 
-However, **do not account for the message broker itself going down.** Trying to design a fallback for Kafka or Kinesis going down is like trying to design for AWS itself going down. While it happens in the real world, it is typically out of scope for a standard system design interview. Assume the broker is highly available.
+### 💡 Tip 1: Broker Failure and Recovery
+Cover durable ACKs, replication, retention, timeouts, backpressure and backlog draining. During broker unavailability, return an error/pending status or retain publication intent in a committed outbox.
 
 ### 💡 Tip 2: When NOT to Use a Broker
-Do not use an asynchronous message broker in the critical path if you are designing:
+Wait for the required business-state commit before returning completion for:
 *   **Wallet Services:** As referenced in Alex Xu's System Design Interview (Volume 2), a wallet cannot tolerate a user seeing a stale balance after a deposit.
 *   **Stock Exchanges:** Financial trading platforms require strict, immediately consistent views of trades and balances.
 
-For these systems, you must stick to synchronous database writes (and potentially Distributed Transactions if crossing microservices). Yes, you will get lower availability (if the DB is down, the system rejects the write), but every single `200 Success` guarantees absolute correctness and zero stale reads.
+A synchronous database commit and an authoritative log with application/read barriers are two options. Both enforce business invariants, deduplicate effects and define the read contract.
 
 ---
 
@@ -303,4 +304,3 @@ Because the originating bank already committed its debit hours before the benefi
 | **Failure Recovery** | **Automatic Abort & Rollback** (Release held locks) | **Compensating Transactions** ($C_1, C_2 \dots$ run in reverse order) | **Compensating Return Rails (ACH Returns, `pacs.004`) + Nightly Reconciliation Breaks** |
 | **Source of Truth** | Distributed Transaction Coordinator | Orchestrator Event History (Temporal) or Kafka Log | **Central Bank Reserve Ledger** (Domestic) / Nostro-Vostro Ledgers (Global) |
 | **Typical Scale Boundary** | $\le 10$ nodes within same data center | $10 - 100+$ microservices across clouds | Thousands of independent global financial institutions |
-

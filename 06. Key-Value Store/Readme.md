@@ -1,5 +1,9 @@
 # Chapter 06: Design a Distributed Key-Value Store (DynamoDB / Cassandra / RocksDB)
 
+## Guarantees and assumptions
+A write ACK follows the configured replica acknowledgment and persistence policy. Reuse write/version IDs on retries, resolve concurrent versions, and retain tombstones through the repair window.
+**Principal IC exercise:** Trace a timed-out partial write through two intersecting reads and specify the extra protocol needed to prevent values moving backward.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -36,9 +40,9 @@ Designing a distributed, masterless Key-Value store (Amazon DynamoDB, Apache Cas
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 1. Decision Making      │ • Leaderless Dynamo (Cassandra/DynamoDB) vs Single-Leader vs Raft Consensus. │
 │                         │ • LSM-Tree (High-write sequential append) vs B+ Tree (High-read in-place).   │
-│                         │ • AP vs CP configuration tuned via Quorum read/write numbers ($N, W, R$).    │
+│                         │ • Separates quorum overlap from consensus-backed atomic consistency.      │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
-│ 2. Technical            │ • Pigeonhole Principle proof of Quorum Consistency ($W + R > N$).            │
+│ 2. Technical            │ • Proves fixed-set intersection; distinguishes it from linearizability.    │
 │    Proficiency          │ • LSM-Tree write path (WAL -> Memtable -> Bloom Filter -> SSTable).          │
 │                         │ • Compaction strategy analysis: Size-Tiered (writes) vs Leveled (reads).     │
 │                         │ • Sloppy Quorums, Hinted Handoff, and Merkle-Tree Anti-Entropy repair.       │
@@ -51,7 +55,7 @@ Designing a distributed, masterless Key-Value store (Amazon DynamoDB, Apache Cas
 │    Mindset              │ • Manages tombstone deletion accumulation and gc_grace_seconds bounds.       │
 │                         │ • Monitors Phi Accrual failure detection thresholds across datacenter links. │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
-│ 5. Adaptability &       │ • Responds to network partitions by switching from Strong Quorum to AP mode. │
+│ 5. Adaptability &       │ • Specifies fixed vs sloppy quorum behavior during partitions.             │
 │    Collaboration        │ • Balances strict immediate consistency against p99 latency SLA targets.     │
 │                         │ • Explains eventual consistency causal anomalies transparently to developers.│
 └─────────────────────────┴──────────────────────────────────────────────────────────────────────────────┘
@@ -99,15 +103,18 @@ flowchart TD
 * $W$: Write quorum size (number of successful replica ACKs required for write success).
 * $R$: Read quorum size (number of replica responses compared for read success).
 
-$$\mathbf{W + R > N} \implies \text{Strong Consistency Guarantee}$$
+$$\mathbf{W + R > N} \implies \text{Fixed-set read/write quorum intersection}$$
 
-* **Why $W + R > N$ Guarantees Freshness (The Pigeonhole Principle):**
+* **What $W + R > N$ Actually Guarantees (The Pigeonhole Principle):**
   - The set of nodes written to ($W$) and the set of nodes read from ($R$) must overlap by at least **one node** ($W \cap R \neq \emptyset$).
-  - That overlapping node is mathematically guaranteed to hold the latest version!
+  - For a completed write to that fixed replica set, at least one read respondent received it, assuming retained durable versions. Concurrent or partial writes also require a version-selection and recovery protocol.
+  - Counterexample: a timed-out write reaches only A. Read A+B returns the new value; read B+C then returns the old value. Both reads use $R=2$ for $N=3$ yet move backward. Read repair/write-back with a suitable register protocol, or consensus/LWT, is needed for stronger semantics. Sloppy quorums may not intersect at all.
 * **Production Tunings:**
-  - $N=3, W=2, R=2$: Strong consistency, balanced latency.
+  - $N=3, W=2, R=2$: Intersecting quorums with balanced fan-out, **not automatically linearizable**.
   - $N=3, W=1, R=3$: Fast writes, expensive reads (ideal for write-heavy telemetry).
   - $N=3, W=3, R=1$: Fast reads, slow writes (ideal for read-heavy catalogs).
+
+These examples use fixed replica membership. The [Dynamo paper](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf) and [Cassandra consistency guide](https://cassandra.apache.org/doc/latest/cassandra/architecture/guarantees.html) describe the versioning, repair and conditional-write protocols used with quorum operations.
 
 ---
 

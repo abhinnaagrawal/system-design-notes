@@ -1,5 +1,7 @@
 # Layer 01: Storage & Database Selection Playbook
 
+> **Design inputs:** Transaction/isolation scope, commit durability, access patterns, working set, index/write amplification and recovery headroom.
+
 > **The System Design Interview Lens:** In a Staff/Principal interview, you are never asked *"what database exists?"*—you are asked *"why this storage engine for this access pattern, what are the mechanical trade-offs at the hardware level (CPU, disk I/O, memory, network), and how does your choice fail when scale increases by 100x?"*
 
 ---
@@ -491,26 +493,26 @@ Below is the definitive cross-reference mapping how these database choices are a
 
 | Chapter / Architecture | Primary Database Selected | Specific Justification & Pattern |
 | :--- | :--- | :--- |
-| [**04. Rate Limiter**](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/README.md) | **Redis / Valkey** | In-memory atomic token bucket / sliding window counters using Lua scripts. |
-| [**06. Key-Value Store**](file:///Users/abhinnaagarwal/Documents/system-design-notes/06.%20Key-Value%20Store/README.md) | **SSTable / LSM-Tree Engine** | Custom distributed Dynamo-style KV store with consistent hash ring and vector clocks. |
-| [**07. Unique-Id Generator**](file:///Users/abhinnaagarwal/Documents/system-design-notes/07.%20Unique-Id%20Generator/README.md) | **No Database (Snowflake) or MySQL Ticket Server** | Snowflake avoids DB locks; Ticket Server uses MySQL `REPLACE INTO` for centralized IDs. |
-| [**12. Chat System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/12.%20Chat%20System/README.md) | **Cassandra / HBase** | Massive append-only message history; sequential range scans by timestamp per channel. |
-| [**16. Proximity Service**](file:///Users/abhinnaagarwal/Documents/system-design-notes/16.%20Proximity%20Service/README.md) | **PostgreSQL (PostGIS) or Redis Geo / Geospatial Index** | R-Tree / Geohash / S2 Cell spatial lookups for bounding-box coordinates. |
-| [**20. Metrics Monitoring**](file:///Users/abhinnaagarwal/Documents/system-design-notes/20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.md) | **OpenTSDB / InfluxDB / TimescaleDB** | Time-series metrics with Gorilla compression, rollup aggregations, and high write ingestion. |
-| [**22. Hotel Reservation**](file:///Users/abhinnaagarwal/Documents/system-design-notes/22.%20Hotel%20Reservation%20System/README.md) | **PostgreSQL (with Pessimistic/Optimistic Locking)** | Strict transactional guarantees to prevent overbooking rooms across dates. |
-| [**24. S3-like Object Storage**](file:///Users/abhinnaagarwal/Documents/system-design-notes/24.%20S3-like%20Object%20Storage/README.md) | **PostgreSQL / Cassandra (Metadata) + Raw File Store (Data)** | Separates high-frequency metadata queries from multi-part immutable blob chunks. |
-| [**25. Real-time Leaderboard**](file:///Users/abhinnaagarwal/Documents/system-design-notes/25.%20Real-time%20Gaming%20Leaderboard/README.md) | **Redis Sorted Sets (ZSET)** | In-memory SkipList maintains $O(\log N)$ real-time rank updates and range extractions. |
-| [**26. Payment System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/README.md) | **PostgreSQL (Double-Entry Ledger)** | Serializable ACID transactions, immutable append-only ledger rows, idempotency keys. |
-| [**27. Digital Wallet**](file:///Users/abhinnaagarwal/Documents/system-design-notes/27.%20%20Digital%20Wallet/README.md) | **PostgreSQL / CockroachDB** | Strict balance invariants: total debits must equal total credits at all times. |
+| [**04. Rate Limiter**](../04.%20Rate%20Limiter/Readme.md) | **Redis / Valkey** | In-memory atomic token bucket / sliding window counters using Lua scripts. |
+| [**06. Key-Value Store**](../06.%20Key-Value%20Store/Readme.md) | **SSTable / LSM-Tree Engine** | Custom distributed Dynamo-style KV store with consistent hash ring and vector clocks. |
+| [**07. Unique-Id Generator**](../07.%20Unique-Id%20Generator/Readme.md) | **No Database (Snowflake) or MySQL Ticket Server** | Snowflake avoids DB locks; Ticket Server uses MySQL `REPLACE INTO` for centralized IDs. |
+| [**12. Chat System**](../12.%20Chat%20System/Readme.md) | **Cassandra / HBase** | Massive append-only message history; sequential range scans by timestamp per channel. |
+| [**16. Proximity Service**](../16.%20Proximity%20Service/Readme.md) | **PostgreSQL (PostGIS) or Redis Geo / Geospatial Index** | R-Tree / Geohash / S2 Cell spatial lookups for bounding-box coordinates. |
+| [**20. Metrics Monitoring**](../20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.md) | **OpenTSDB / InfluxDB / TimescaleDB** | Time-series metrics with Gorilla compression, rollup aggregations, and high write ingestion. |
+| [**22. Hotel Reservation**](../22.%20Hotel%20Reservation%20System/README.md) | **PostgreSQL (with Pessimistic/Optimistic Locking)** | Strict transactional guarantees to prevent overbooking rooms across dates. |
+| [**24. S3-like Object Storage**](../24.%20S3-like%20Object%20Storage/README.md) | **PostgreSQL / Cassandra (Metadata) + Raw File Store (Data)** | Separates high-frequency metadata queries from multi-part immutable blob chunks. |
+| [**25. Real-time Leaderboard**](../25.%20Real-time%20Gaming%20Leaderboard/README.md) | **Redis Sorted Sets (ZSET)** | In-memory SkipList maintains $O(\log N)$ real-time rank updates and range extractions. |
+| [**26. Payment System**](../26.%20Payment%20System/README.md) | **PostgreSQL (Double-Entry Ledger)** | Serializable ACID transactions, immutable append-only ledger rows, idempotency keys. |
+| [**27. Digital Wallet**](../27.%20%20Digital%20Wallet/README.md) | **PostgreSQL / CockroachDB** | Strict balance invariants: total debits must equal total credits at all times. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   PostgreSQL Internals: [`coding-practice: storage/postgres.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/storage/postgres.md)
-*   Cassandra Architecture: [`coding-practice: storage/cassandra.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/storage/cassandra.md)
-*   LSM-Trees & Compaction: [`coding-practice: data-structures/lsm-trees.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/data-structures/lsm-trees.md)
-*   RocksDB Internals: [`coding-practice: data-structures/rocksdb.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/data-structures/rocksdb.md)
-*   Data Modeling Playbook: [`coding-practice: data-modeling/data-modeling-interview-playbook.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/data-modeling/data-modeling-interview-playbook.md)
-*   Cassandra Core Concept: [`Core Concepts/Cassandra/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Cassandra/README.md)
-*   CockroachDB Core Concept: [`Core Concepts/CockroachDB/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/CockroachDB/README.md)
-*   DynamoDB Core Concept: [`Core Concepts/DynamoDB/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/DynamoDB/README.md)
+*   PostgreSQL Internals: [`coding-practice: storage/postgres.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/storage/postgres.md)
+*   Cassandra Architecture: [`coding-practice: storage/cassandra.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/storage/cassandra.md)
+*   LSM-Trees & Compaction: [`coding-practice: data-structures/lsm-trees.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/data-structures/lsm-trees.md)
+*   RocksDB Internals: [`coding-practice: data-structures/rocksdb.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/data-structures/rocksdb.md)
+*   Data Modeling Playbook: [`coding-practice: data-modeling/data-modeling-interview-playbook.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/data-modeling/data-modeling-interview-playbook.md)
+*   Cassandra Core Concept: [`Core Concepts/Cassandra/README.md`](../Core%20Concepts/Cassandra/README.md)
+*   CockroachDB Core Concept: [`Core Concepts/CockroachDB/README.md`](../Core%20Concepts/CockroachDB/README.md)
+*   DynamoDB Core Concept: [`Core Concepts/DynamoDB/README.md`](../Core%20Concepts/DynamoDB/README.md)

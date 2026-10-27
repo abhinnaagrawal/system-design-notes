@@ -1,5 +1,9 @@
 # Chapter 24: Design a Distributed S3-Compatible Object Storage System (Amazon S3 / Ceph / MinIO)
 
+## Guarantees and assumptions
+PUT ACK follows the durable fragment quorum and metadata/version commit. Multipart retries retain upload/part IDs and finalization preconditions; fragment placement and repair capacity determine failure tolerance.
+**Principal IC exercise:** Lose a rack during multipart finalization; distinguish committed objects from orphan fragments and bound repair exposure.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Finding a needle in Haystack: Facebook's photo storage (Beaver et al.)](https://www.usenix.org/legacy/event/osdi10/tech/full_papers/Beaver.pdf)
@@ -52,7 +56,7 @@ Designing an S3-compatible distributed object storage platform (Amazon S3, Ceph 
 │                         │ • Implements Content-Addressable Storage (CAS) with SHA-256 deduplication.  │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 3. Problem Solving &    │ • Decomposes system into API Gateway, Placement Service, Data Nodes, Metadata│
-│    Analytical Thinking  │ • Calculates hardware requirements for 100 PB storage, 0.68 Billion objects, │
+│    Analytical Thinking  │ • Calculates hardware requirements for 100 PB storage, about 42B objects,   │
 │                         │   and SATA HDD IOPS limits (100 IOPS random vs 150 MB/s sequential).         │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 4. Operational          │ • Mitigates Silent Data Corruption (Bit Rot) via background data scrubbing.  │
@@ -78,7 +82,7 @@ Designing an S3-compatible distributed object storage platform (Amazon S3, Ceph 
 5. **Multipart Upload:** Resumable, parallel chunk uploads for objects exceeding 100 MB.
 
 ### Non-Functional Requirements & Durability SLOs
-* **Scale:** Store **100 Petabytes of data** and support **0.68 Billion objects**.
+* **Scale:** Store **100 Petabytes of data** and support **41.975 Billion objects (approximately 42B)** under the byte-weighted mix below.
 * **Data Durability:** **11 Nines (99.999999999%)** durability (annual probability of losing an object is $10^{-11}$).
 * **Service Availability:** **99.99% (4 Nines)** availability for read and write API endpoints.
 * **Storage Cost Efficiency:** Minimize hardware storage overhead while maintaining high read throughput.
@@ -107,6 +111,7 @@ Hardware Spec: 12 TB 7200 RPM Enterprise SATA HDDs
 * **Total Objects in Metadata Catalog:** $\approx \mathbf{42 \text{ Billion objects}}$!
   - At 1 KB of metadata per object (name, ETag, version, size, placement pointers):
   $$\text{Metadata Storage} = 42 \times 10^9 \times 1 \text{ KB} \approx \mathbf{42 \text{ Terabytes}}$$
+  This is raw metadata payload in decimal units; secondary indexes, versions, replicas, tombstones, and compaction/rebuild headroom are additional.
 
 ### 4.2 Storage Efficiency: 3x Replication vs Erasure Coding
 * **Option A: 3x Replication (Replication Factor = 3):**
@@ -116,7 +121,7 @@ Hardware Spec: 12 TB 7200 RPM Enterprise SATA HDDs
   - 8 data chunks + 4 parity chunks.
   - Storage overhead: $\frac{12}{8} = 1.5\times$ ($\mathbf{50\% \text{ overhead}}$).
   - Requires only **150 PB of raw disks** (saving **150 PB of physical hardware**)!
-  - Delivers **11 Nines of durability**, tolerating the simultaneous failure of any 4 drives across different racks!
+  - With independent fragment placement, 8+4 coding reconstructs a stripe after any 4 fragment losses. Reaching the **11-nines durability target** also depends on correlated-failure rates, repair time, latent corruption and placement.
 
 ---
 
@@ -295,8 +300,8 @@ Because objects are immutable, updating or deleting an object simply appends a *
 
 ### Curveball 1: "An entire datacenter rack containing 40 storage servers suddenly loses power. Clients are actively reading objects. What happens to read latency, and does the system panic?"
 * **Staff Answer:**
-  1. **Zero Data Loss via Failure Domain Placement:** Our Placement Service ensures that the 12 blocks of any Erasure Coded object ($8+4$) are distributed across **12 distinct racks**. Losing 1 rack knocks out at most **1 block per object**.
-  2. **Degraded Read Mode (Zero Reconstruct Overhead):** Because $K=8$ blocks are required, and 11 blocks are still online, the Data Routing service simply reads the surviving 8 data blocks directly. **No reconstruction math is executed**, keeping read latency fast!
+  1. **Failure Domain Placement:** Place the 12 fragments of an $8+4$ stripe across **12 distinct racks**. One rack failure loses at most one fragment under this placement assumption, not zero risk under arbitrary correlated failures.
+  2. **Degraded Read Mode:** Any 8 surviving fragments reconstruct the object. If a data fragment is missing, parity decoding adds CPU/network cost; only a parity-only loss leaves all original data fragments directly readable.
   3. **Reconstruction Rate Limiter:** The system does **not** immediately initiate emergency parity rebuilds (which would saturate network bandwidth with petabytes of traffic). It initiates a 15-minute grace timer. If the rack power returns, the blocks rejoin instantly. If the rack is dead permanently, throttled background rebuild workers restore parity over hours.
 
 ### Curveball 2: "AWS S3 historically offered eventual consistency for overwrites, but switched to strong consistency in 2020. How would you design strong read-after-write consistency in your object store?"

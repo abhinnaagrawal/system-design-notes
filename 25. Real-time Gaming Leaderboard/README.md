@@ -1,5 +1,9 @@
 # Chapter 25: Design a Real-Time Gaming Leaderboard & Global Sales Rank (Redis ZSET, Skip Lists, Fenwick Trees)
 
+## Guarantees and assumptions
+A score-update ACK follows the authoritative event commit. Deduplicate match/player/event IDs before incrementing, and preserve season and tie-breaking rules during replay and rebuilds.
+**Principal IC exercise:** Rebuild a leaderboard after failover without applying an already-counted match twice or mixing seasons.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [The System Design Primer: Design Amazon's Sales Rank by Category (Donne Martin)](https://github.com/donnemartin/system-design-primer/blob/master/solutions/system_design/sales_rank/README.md)
@@ -268,9 +272,9 @@ flowchart LR
 ### Curveball 1: "Redis crashes and loses the entire in-memory leaderboard during the final 5 minutes of a $1M esports tournament. How do you recover?"
 * **Wrong Answer:** "We wait for Redis RDB snapshot to restore." *(RDB snapshots are taken periodically; the last 5 minutes of writes will be lost!)*
 * **Staff Answer:**
-  1. **Dual-Write Architecture with Redis AOF:** Configure Redis with `appendonly yes` and `appendfsync everysec`, bounding worst-case unwritten in-memory loss to $< 1\text{ second}$.
+  1. **Redis AOF Recovery:** `appendonly yes` with `appendfsync everysec` requests roughly one-second persistence cadence. Delayed fsync/storage failures can extend the loss window; the durable event log supplies authoritative replay.
   2. **Authoritative Event Log Replay:** Every score update is logged as an immutable, sequenced event in a Kafka topic (`game-match-results`) before being written to Redis.
-  3. **Fast Re-materialization:** In the event of catastrophic loss, an in-memory streaming Flink/Go worker replays the Kafka topic from the start of the tournament, re-hydrating the Redis ZSET within 45 seconds.
+  3. **Re-materialization:** Replay authoritative events from a consistent snapshot/offset or season start, deduplicating match/player/event IDs before increments. Evaluate the 45-second restore target with simultaneous reads and replica rebuilds.
 
 ### Curveball 2: "Our user base grew to 500 Million players. Range sharding is struggling with score drift. Can we avoid Redis altogether?"
 * **Staff Answer:**

@@ -679,4 +679,87 @@ Key insight: **most interventions focus on low-leverage parameters**, because th
 
 ---
 
-*Last updated: 2026-10-23*
+## 8. Principal-IC Practice Lab
+
+Use one real initiative (for example, recovering ambiguous payment outcomes) across the exercises so technical and organizational decisions reinforce each other. Set targets from an observed baseline and an agreed success threshold.
+
+### Exercise 1: A One-Page Technical Strategy Memo
+
+**Timebox:** 45 minutes writing, 20 minutes challenge/review. Apply Rumelt's kernel, Reilly's organizational map and Meadows's feedback analysis.
+
+| Memo section | Worked example | Review question |
+| :--- | :--- | :--- |
+| Diagnosis | Payment timeouts are retried with new provider keys; support cannot distinguish declined from captured-with-lost-reply. The constraint is missing operation identity and recovery. | What evidence would disprove this diagnosis? |
+| Guiding policy | Make every accepted payment durably identifiable and every ambiguous outcome recoverable before scaling request volume. | What tempting work are we explicitly not doing? |
+| Coherent actions | Persist intent/key; add provider lookup and reconciliation; test response loss; migrate one payment path behind a flag; train support on UNKNOWN states. | Do the actions reinforce the same policy, with owners and dependencies? |
+| Non-goals | No new database or company-wide workflow-platform migration in this iteration. | Which alternative did we reject, and why? |
+| Measures and stop rule | Baseline unresolved-outcome age, duplicate business effects and manual repair hours. Agree a pilot threshold and rollback trigger before rollout. | Are we measuring outcomes rather than deployments completed? |
+| Risks and learning | Provider retention/API behavior, late webhooks, migration overlap and compensation failures. Run a loss-of-ACK drill. | Who owns the unresolved case after the pilot? |
+
+**Deliverable:** One page plus a causal sketch and a decision log. A reviewer should be able to state the obstacle, policy and next three actions without reconstructing a slide deck.
+
+### Exercise 2: Engineering Tenets That Resolve a Disagreement
+
+Write three to five tenets for the same initiative. Each needs a rationale, a concrete decision, a trade-off and an exception owner/expiry.
+
+| Tenet | Decision it changes | Accepted cost / bounded exception |
+| :--- | :--- | :--- |
+| Timeouts remain UNKNOWN until resolved | Reconcile using the same operation key | Additional state and recovery work |
+| A success response names its durable boundary | Return accepted versus applied status explicitly | Additional status/read-barrier paths; pilot one endpoint first |
+| Domain invariants have one enforcement owner | Route ledger posting through a controlled atomic operation | Less flexibility for direct writes; break-glass access is audited and time-bounded |
+| Local teams own implementation within shared contracts | Publish compatibility/crash tests rather than require Principal approval on every PR | Contract maintenance; time-box escalations for genuine invariant conflicts |
+
+**Deliverable:** A tenet document that can settle two example disputes.
+
+### Exercise 3: Stakeholder Decision Without Becoming the Bottleneck
+
+Map engineering, product, support, finance and operations by responsibility, incentives and information needed. Identify a decision owner, implementers, consulted stakeholders and the person who accepts residual risk.
+
+Run a 30-minute decision meeting with two credible alternatives. Send a pre-read containing the kernel, costs, unknowns and a recommendation. Record dissent, the final owner, a decision date, a reversible pilot, an exception/escalation route and a revisit trigger. Delegate the pilot with constraints and checkpoints rather than taking over its tactical implementation.
+
+**Deliverable:** A one-page decision record and an ownership map. **Observable signal:** routine implementation decisions continue while you are unavailable; important invariant violations still escalate.
+
+### Exercise 4: Stop Adding Value Just to Win
+
+Use an RFC where a colleague's approach satisfies the required invariants but differs from your preference. Before speaking, classify your comment as **correctness risk**, **evidence gap**, **useful option** or **personal preference**.
+
+- Replace "Yes, but we should rewrite it my way" with "Which requirement does this trade-off serve? Would you like an alternative, or is this sufficient for the pilot?"
+- Escalate durability, tenant-isolation and invariant defects with evidence.
+- Ask the author to own the final safe implementation choice and give them credit for the outcome.
+- Ask three collaborators for feedforward on one behavior and follow up weekly for four weeks.
+
+**Deliverable:** A to-stop commitment and two anonymized before/after examples. Track unsolicited preference overrides, decisions returned to their owner and collaborator feedback.
+
+### Exercise 5: Technical Debt as an Organizational Feedback Loop
+
+Apply Larson and Meadows: map the stock of unresolved operations/technical debt, inflow of new cases, repair outflow, queue delay, on-call interruptions and investment in prevention.
+
+```text
+More unresolved outcomes -> more interrupts -> less prevention capacity
+-> more unresolved outcomes (reinforcing loop).
+Stable identities + reconciliation + protected prevention time
+-> fewer new cases and faster repair (balancing intervention).
+```
+
+Identify a high-leverage change to information flow, ownership or WIP policy. Compare the cost of recurring repair with prevention and migration cost. Review lead-time distribution, repair age and customer impact after an agreed observation window.
+
+**Deliverable:** One causal-loop sketch, a baseline and a small reversible intervention. Name delays and confounders before interpreting an improvement.
+
+### Exercise 6: Sustainable Execution and Renewal
+
+Apply Habit 7 within a sustainable working week: reserve learning/reflection and physical recovery time, peer connection and a meaningful priority review. Rotate operational responsibility, document decisions and train a second owner instead of making your availability the safety mechanism.
+
+**Deliverable:** A two-week calendar and coverage plan. Check whether the intervention reduces after-hours rescue work and concentrated ownership without merely transferring overload to another team. Revisit the strategy and workload rather than prescribing individual resilience as the fix for structural understaffing.
+
+### Lab Acceptance Checklist
+
+- The memo has a falsifiable diagnosis, a real choice and coherent owned actions.
+- Tenets settle concrete trade-offs, with bounded exceptions.
+- Stakeholders know the decision owner, accepted risk and revisit trigger.
+- Another engineer can drive the pilot without waiting for your tactical approval.
+- Behavior feedback and renewal measures are observable, lightweight and non-punitive.
+- The architecture has explicit ACK/durability boundaries and a response-loss recovery drill.
+
+---
+
+*Last updated: 2026-10-27*

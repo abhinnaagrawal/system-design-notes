@@ -1,5 +1,9 @@
 # Chapter 23: Design a Distributed Email Service (Gmail / Outlook)
 
+## Guarantees and assumptions
+SMTP acceptance transfers durable responsibility for the message. Internal delivery IDs deduplicate mailbox writes; a lost remote acceptance reply can cause a duplicate on retry.
+**Principal IC exercise:** Recover a relay after the remote server accepts DATA but the final reply is lost; document the unavoidable ambiguity and operator evidence.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Designing Data-Intensive Applications (Martin Kleppmann)](https://dataintensive.net/)

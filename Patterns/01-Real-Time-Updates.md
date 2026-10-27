@@ -1,5 +1,7 @@
 # Pattern 01: Real-Time Updates
 
+> **Delivery contract:** Sequence/event IDs, reconnect cursors, retained replay history and duplicate handling let clients recover after disconnects.
+
 > **The System Design Interview Lens:** In high-concurrency systems, standard HTTP request-response breaks down when the server needs to push live events to clients. A Staff-level answer does not simply jump to WebSockets for everything—it separates client delivery (**Hop 1**) from backend fanout (**Hop 2**), justifies transport protocols based on directionality and state, grounds decisions in network transport physics (TCP/IP vs UDP vs HTTP/2/3), and protects infrastructure against thundering herd reconnects.
 
 ---

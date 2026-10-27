@@ -1,5 +1,9 @@
 # Chapter 29: Design a Tagging Service (Atlassian / Jira / Twitter)
 
+## Guarantees and assumptions
+A tag mutation ACK follows the authoritative association commit; search and reverse indexes update asynchronously. Stable operation IDs and unique resource/tag association keys deduplicate retries.
+**Principal IC exercise:** Rename a popular tag while association events replay and a tenant deletes resources; preserve authorization and converge reverse indexes.
+
 Based on the system design breakdown from **[System Design Fight Club - Atlassian Interview Question: Tagging Service](https://www.youtube.com/watch?v=WNIR7eiv0Hk)** with additions for Staff/Principal-level evaluation.
 
 ---

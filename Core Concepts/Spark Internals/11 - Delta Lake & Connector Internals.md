@@ -1,7 +1,7 @@
 # 11 - Delta Lake & Connector Internals
 
 **Priority:** P2
-**Versions:** Spark 3.x DataSource V2 era -> 4.2; Delta Lake 1.x -> 3.x
+**Versions:** Apache Spark **3.5.0** / Delta protocol **3.0.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [06 - Query Planning (Catalyst & AQE)](06%20-%20Query%20Planning%20%28Catalyst%20&%20AQE%29.md), [07 - Storage, Caching & File Formats](07%20-%20Storage,%20Caching%20&%20File%20Formats.md), [10 - Structured Streaming Internals](10%20-%20Structured%20Streaming%20Internals.md).
 
@@ -86,7 +86,7 @@ Interview line: *"DSv2 didn't make scans fast by itself; it gave Spark a contrac
 ### B. ACID & optimistic concurrency
 
 1. Writer reads the current snapshot (version N) and plans its changes (new `add`/`remove` files).
-2. Writer commits a single log entry; the log store atomically publishes it (rename on HDFS; conditional put/`_last_checkpoint`-style coordination on object stores).
+2. The configured storage/LogStore implementation publishes the next log version **atomically and exclusively**. Competing version claims trigger conflict checks/retries. Readers use **`_last_checkpoint`** to locate a checkpoint for snapshot reconstruction.
 3. If another writer committed first, conflict detection runs (did both touch the same files/partitions?): the loser retries or fails with a conflict exception (`ConcurrentAppendException`, `ConcurrentDeleteReadException`, `ConcurrentDeleteDeleteException`, `MetadataChangedException`, `ProtocolChangedException` [S24]).
 
 Readers never see partial writes: they read a snapshot version and its reachable files, while concurrent writers create *new* files - the classic **snapshot isolation for readers + optimistic writers** pattern [S22].
@@ -114,8 +114,16 @@ A reader at version 0 still sees A+B; a reader at version 2 sees A+D. Neither ev
 | Schema enforcement | Commits must match table schema | - |
 | Schema evolution | `mergeSchema` opt-in on writes | Some changes require protocol/metadata updates |
 | Small-file control | `OPTIMIZE` (compaction), Z-order clustering | Rewrite cost; coordinate with readers |
-| Deletes/updates | Rewrite affected files (merge-on-read); newer Delta adds deletion vectors to avoid full rewrites [S23] | Protocol version gates feature support [S23] |
-| Streaming integration | Delta commit = streaming sink commit => exactly-once end-to-end with checkpointed offsets (chapter 10) | - |
+| Deletes/updates | **Copy-on-write** replaces affected files with remove/add actions; deletion vectors can instead mask deleted row positions at read time, deferring rewrites [S23] | DV is a protocol/table feature; reads honor masks and later maintenance may rewrite files |
+| Streaming integration | Stable application/batch transaction identifiers committed with file actions (chapter 10) | Retain application identity, checkpoint and transaction history through the replay window |
+
+### F. Replay identity: `txn(appId, version)`
+
+The Delta **3.0.0 protocol** records application transaction identifiers (`appId`, monotonically increasing `version`) in `txn` actions alongside `add`/`remove` actions. The sink skips an already-committed batch version, atomically coupling replay identity and table effects. Spark source offsets remain in the streaming checkpoint.
+
+**Crash example:** app `orders-stream-A`, batch 42 publishes its files plus `txn(appId="orders-stream-A", version=42)`, then the driver dies before Spark's completion log. Restart replays batch 42; the Delta sink sees version 42 and skips another add. For `foreachBatch`, configure supported `txnAppId`/`txnVersion` options or implement equivalent atomic deduplication.
+
+A new checkpoint resets batch IDs. Reusing an old app ID with reset versions may silently skip intended writes; changing app ID during replay may duplicate effects. Coordinate new identities with deliberate replay policy. Expiring transaction identifiers (e.g. configured transaction retention) before the replay horizon removes dedup protection; data/log/VACUUM retention is a separate concern.
 
 ### E. Table format landscape (one-line comparisons)
 
@@ -147,7 +155,7 @@ sequenceDiagram
     Note over P,F: DPP may prune more partitions at runtime (ch06)
 ```
 
-Write side (e.g., `MERGE INTO`): plan the merge -> identify affected files (`remove`) -> write new files (`add`) -> single log commit. The commit is the atomicity line; a crash before it leaves orphan files (invisible to readers, cleaned by `VACUUM`), a crash after it is durable.
+Write side (copy-on-write `MERGE INTO` example): plan -> identify affected files (`remove`) -> write replacements (`add`) -> atomic log commit (including `txn` for replay-safe sink writes). DV-enabled paths may mask rows instead of immediately replacing entire files. A crash before publication leaves invisible orphans; a crash afterward is durable, but replay still needs identity-based dedup.
 
 ---
 
@@ -164,7 +172,7 @@ Delta's failure modes are the price of its optimistic design, and they are all r
 | Protocol upgrade | Old readers/writers may lose access | Protocol versions gate features [S23] |
 | Small files + no OPTIMIZE | Slow scans; listing overhead | Compaction + Z-order [S24] |
 | Metadata (log) growth | Slow snapshot construction | Checkpointing keeps it bounded [S23] |
-| Streaming + non-idempotent sink | Duplicates on replay | Delta sink commits atomically with offsets (chapter 10) |
+| Sink commit before Spark completion | Same batch may replay | Retained Delta txn appId/version deduplicates replay; source offsets remain in the Spark checkpoint |
 | Object store consistency | Rare listing/read anomalies | Modern stores are strong per-object; log design avoids multi-object atomicity anyway [S22] |
 
 ---
@@ -207,7 +215,7 @@ Version notes in this chapter split between Spark's connector surface and Delta'
 3. Optimistic concurrency: new files + one atomic log commit; readers see snapshots, conflicts retried/failed.
 4. Stats live in the log: file-level pruning before Parquet row-group pruning.
 5. Time travel bounded by log (30 d) and file (VACUUM 7 d) retention defaults.
-6. Streaming + Delta = exactly-once because the sink commit is transactional.
+6. Streaming + Delta replay safety = stable appId/version txn committed with file actions plus retained checkpoint/history.
 7. Table formats differ in commit/metadata machinery, all ride Parquet + object stores.
 
 ---
@@ -225,7 +233,7 @@ Version notes in this chapter split between Spark's connector surface and Delta'
 | 7 | Name the two retention defaults. | Files: 7 days (`VACUUM`); log: 30 days |
 | 8 | What does DSv2's `SupportsPushDownFilters` do? | Lets Spark delegate filter evaluation into the source scan |
 | 9 | How does DPP involve connectors? | Runtime filter/partition pruning interfaces (`SupportsRuntimeFiltering`) pass join-derived values into scans |
-| 10 | Why exactly-once with Delta sinks? | The table commit is transactional and bound to checkpointed offsets |
+| 10 | Why replay-safe Delta sinks? | txn(appId, version) is committed with file actions; replayed batch versions are skipped; source offsets need not be in the Delta commit |
 | 11 | What are orphans? | Files written but never committed (crash); invisible to readers, cleaned by VACUUM |
 | 12 | What does `OPTIMIZE` fix? | Small files; `ZORDER BY` additionally clusters for better min/max skipping |
 | 13 | Delta vs Iceberg in one line? | Log + checkpoints vs manifest-tree snapshots; both ACID-over-Parquet |

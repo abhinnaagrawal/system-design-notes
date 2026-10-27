@@ -5,7 +5,9 @@
 - [Life Beyond Distributed Transactions: An Apostate's Opinion (Pat Helland, Amazon/Salesforce)](https://queue.acm.org/detail.cfm?id=1281891)
 - [Sagas (Hector Garcia-Molina & Kenneth Salem, 1987)](https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf)
 
-**TL;DR:** When applications scale from a monolithic database to microservices or sharded data stores, atomic single-database transactions break down into multi-database **Distributed Transactions**. The two canonical approaches are **Two-Phase Commit (2PC)** and the **SAGA Pattern**. While 2PC provides strong consistency on paper, its synchronous blocking nature, coordinator single points of failure, and lock-holding across network boundaries cause catastrophic availability collapses at scale. Consequently, modern distributed systems (Uber, Netflix, Amazon, DoorDash) overwhelmingly reject cross-service 2PC and adopt **Sagas**—decomposing workflows into a sequence of independent local ACID transactions paired with business-level **compensating actions** (refunds/cancellations) and **eventual consistency**. Sagas are implemented via **Choreography** (event-driven pub/sub) for simple flows ($\le 3$ steps) or **Orchestration** (durable execution engines like Temporal or AWS Step Functions) for complex enterprise workflows, protected by the **Transactional Outbox Pattern** to eliminate dual-write partial failures.
+**TL;DR:** **Two-Phase Commit (2PC)** coordinates atomic commit across supported participants. **Sagas** use local transactions and explicit compensations across autonomous services, exposing intermediate states. Choose based on business invariants and participant support. An outbox commits publication intent with local state; consumers deduplicate relay retries.
+
+> **Recovery:** Persist coordinator decisions and operation IDs. For external APIs, use [durable intent, idempotency and reconciliation](../Partial%20Failures/README.md#4-scenario-4-external-apis-durable-intent-idempotency-and-reconciliation).
 
 ---
 
@@ -200,7 +202,7 @@ If a network partition isolates a participant from the coordinator during Phase 
 Microservices are built on independent deployment cycles and polyglot persistence. 2PC requires every database to support XA/2PC protocols (many NoSQL databases like Cassandra or MongoDB do not) and forces one team's database availability to depend directly on another team's uptime.
 
 > **Seminal Reference: Pat Helland's *"Life Beyond Distributed Transactions"***
-> In this foundational distributed systems paper, Amazon and Salesforce architect Pat Helland proved that **distributed transactions across autonomous boundaries are fundamentally incompatible with internet scale and high availability**. Systems must instead embrace independent entities, asynchronous messaging, and eventual consistency.
+> Pat Helland argues for autonomous entities and asynchronous messaging at very large scale. This approach trades cross-entity atomic transactions for local ownership and asynchronous coordination. Distributed databases offer coordinated transactions with different latency and availability costs.
 
 ---
 

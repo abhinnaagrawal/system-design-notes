@@ -1,5 +1,9 @@
 # Chapter 10: Design a Distributed Notification System
 
+## Guarantees and assumptions
+API acceptance follows durable enqueue. Track provider acceptance and delivery receipts separately, reuse notification/provider keys on retries, and reconcile ambiguous send outcomes.
+**Principal IC exercise:** A provider sends an SMS then times out: choose retry, lookup, or reconciliation and quantify duplicate-message versus lost-message risk.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -70,12 +74,12 @@ Designing a scalable notification system (like Amazon SNS/SES, Courier, or Twili
 7. **Delivery Analytics:** Track dispatch, delivery receipts, bounces, opens, and clicks.
 
 ### Non-Functional Requirements (SLAs & SLOs)
-* **Zero Data Loss for Transactional Alerts:** $100\%$ delivery guarantee for critical alerts (at-least-once with downstream idempotency).
+* **Transactional Alert Reliability:** Durably queue accepted alerts, retry/reconcile provider outcomes, and track delivery failures and expiry.
 * **Latency:**
   - High-Priority (OTP / Fraud): p99 $< \mathbf{3\text{ seconds}}$.
   - Low-Priority (Marketing / Newsletters): Deliver within minutes to hours.
 * **Throughput:** Support **100 Million notifications / day** with spiky holiday workloads (up to $10,000\text{ notifications/sec}$).
-* **Deduplication:** Exactly-once user perception (users must never receive duplicate OTPs or payment notifications).
+* **Deduplication:** Suppress repeated logical notifications internally and use provider-supported idempotency for send retries.
 
 ---
 
@@ -209,19 +213,25 @@ Networks are unreliable. Third-party providers timeout. Message brokers offer **
 ```mermaid
 flowchart TD
     A["Worker consumes message"] --> B["Compute Idempotency Key:<br/>hash(recipient, template, entity_id)"]
-    B --> C{"Redis SETNX<br/>idemp_key EX 86400"}
-    C -->|Key Existed: Duplicate!| D["Drop message & ACK queue"]
-    C -->|Key Created: First Time!| E["Call Third-Party Provider<br/>(APNs / FCM / Twilio)"]
-    E -->|Success 200| F["Update status to DELIVERED<br/>Persist to Audit Log"]
-    E -->|Timeout / 5xx| G["Push to Retry Queue<br/>with Exponential Backoff"]
+    B --> C{"Durable delivery state<br/>and conditional claim"}
+    C -->|Provider acceptance already recorded| D["Return stored state and ACK queue"]
+    C -->|Claim active elsewhere| H["Defer until claim completes or expires"]
+    C -->|Claim acquired| E["Call provider with stable key<br/>only if API supports idempotency"]
+    E -->|Acceptance response| F["Persist PROVIDER_ACCEPTED<br/>Delivery receipt is separate"]
+    E -->|Ambiguous timeout| G["Resolve by provider lookup/key<br/>or reconcile duplicate/loss risk"]
 ```
 
 #### Deduplication Rules
 1. **Idempotency Key Construction:** Combine `recipient_id`, `template_id`, and `business_entity_id` (e.g. `usr_91_pwd_reset_req_1092`).
-2. **Atomic In-Flight Lock:** Worker executes `SET idemp:{key} "PROCESSING" NX EX 300` in Redis:
-   - If returns `0`: Another worker is currently processing this exact notification. Drop or wait.
-   - If returns `1`: Acquired lock; proceed to third-party delivery.
-3. **Downstream Idempotency:** Pass the idempotency key in the HTTP header when calling downstream providers that support it (e.g. Stripe, SendGrid `X-Entity-ID`).
+2. **Durable Delivery State:** Persist QUEUED/PROCESSING/PROVIDER_ACCEPTED/DELIVERED (receipt)/FAILED with a conditional claim and recovery deadline. Recover expired PROCESSING claims. Redis `SET NX` can reduce concurrent work; durable state drives crash recovery.
+3. **Provider Idempotency:** Use the provider's documented request-key and status-lookup API within its retention window. After send-success/ACK-loss, resolve the same notification before resending. Providers without these APIs require reconciliation and a duplicate/loss policy.
+
+| Crash point | Recovery evidence and action |
+| :--- | :--- |
+| Durable enqueue succeeded, API ACK lost | Return the existing notification ID on retry; do not enqueue a new logical alert. |
+| Claim acquired, worker crashes before send | Recover expired claim from durable state; a lock alone must not suppress the alert. |
+| Provider sends/accepts, ACK lost | Query/retry supported provider key within its retention window; otherwise reconcile ambiguous outcome. |
+| Provider accepted, device never receives | Preserve PROVIDER_ACCEPTED separately from delivered receipt; retry/expire according to channel policy. |
 
 ---
 
@@ -380,9 +390,9 @@ flowchart LR
 
 | Architectural Dilemma | Junior / Senior Approach | Staff / Principal Approach |
 | :--- | :--- | :--- |
-| **Data Loss Prevention** | Direct HTTP call between services | **Transactional Outbox Pattern with CDC (Debezium):** Guarantees zero lost alerts during crashes. |
+| **Data Loss Prevention** | Direct HTTP call between services | **Transactional Outbox + CDC:** Atomic accepted intent; retry relay/consumer delivery within documented durability, retention and recovery assumptions. |
 | **Queue Design** | Single shared queue for all messages | **Segregated Priority Queues:** OTPs never get stuck behind promotional marketing blasts. |
-| **Duplicate Prevention** | Database lookup on event ID | **Distributed Idempotency Keys in Redis (`SETNX`) + Downstream Provider Idempotency Headers.** |
+| **Duplicate Prevention** | Database lookup on event ID | **Durable delivery state + verified provider idempotency/lookup; Redis locks are only an optimization.** |
 | **APNs Connection** | New TLS connection per push | **Persistent HTTP/2 Multiplexed Connection Pool:** Prevents socket exhaustion and IP bans. |
 | **Spam & Annoyance** | Single boolean opt-out flag | **Granular Matrix + Timezone-Aware Quiet Hours + Sliding Window Event Digesting.** |
 | **SMS Cost runaway** | Infinite retry loop on failure | **Strict SMS Frequency Caps + Circuit Breaker with Fallback Provider Routing.** |

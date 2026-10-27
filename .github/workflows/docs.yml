@@ -1,0 +1,16 @@
+name: Documentation checks
+on:
+  pull_request:
+  push:
+permissions:
+  contents: read
+jobs:
+  local-links-and-examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test tools/check-notes.test.mjs
+      - run: node tools/check-notes.mjs

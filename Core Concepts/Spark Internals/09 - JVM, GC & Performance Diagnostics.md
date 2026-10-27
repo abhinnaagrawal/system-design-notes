@@ -1,7 +1,7 @@
 # 09 - JVM, GC & Performance Diagnostics
 
 **Priority:** P1
-**Versions:** 1.x -> 4.2 (JDK 17 baseline in 4.0; JDK 25 support in 4.2)
+**Versions:** Apache Spark **3.5.0**, Java **8/11/17**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [02 - Memory Management & Disk Spilling](02%20-%20Memory%20Management%20&%20Disk%20Spilling.md), [03 - Tungsten, Serialization & Data Representation](03%20-%20Tungsten,%20Serialization%20&%20Data%20Representation.md), [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md).
 

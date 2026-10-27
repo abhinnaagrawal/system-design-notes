@@ -1,5 +1,9 @@
 # Chapter 28: Design an Ultra-Low Latency Electronic Stock Exchange (NASDAQ / NYSE / LMAX)
 
+## Guarantees and assumptions
+Order ACK follows durable sequenced-log acceptance; matching and market-data publication have separate states. Client/session order IDs deduplicate retries, leader epochs fence sequencers, and replay uses the recorded rule/config version.
+**Principal IC exercise:** An execution occurs but the client ACK is lost during sequencer failover; recover order state and publish one identifiable trade.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [The LMAX Architecture: High-Throughput Low-Latency Trading (Martin Fowler & LMAX)](https://martinfowler.com/articles/lmax.html)
@@ -212,7 +216,7 @@ Next is the sequencer - it is the key component making the matching engine deter
 We stamp inbound orders and outbound fills for several reasons:
  * timeliness and fairness
  * fast recovery/replay
- * exactly-once guarantee
+ * stable operation identities for replay and downstream deduplication
 
 Conceptually, we could use Kafka as our sequencer since it's effectively an inbound and outbound message queue. However, we're going to implement it ourselves in order to achieve lower latency.
 
@@ -475,7 +479,7 @@ Let's now explore how mmap works - it is a UNIX syscall, which maps a file on di
 One trick we can use is creating the file in `/dev/shm`, which stands for "shared memory". Hence, we have no disk access at all.
 
 ### **Event sourcing**
-Event sourcing is discussed in-depth in the [digital wallet chapter](../chapter28). Reference it for all the details.
+Event sourcing is discussed in-depth in the [digital wallet chapter](../27.%20%20Digital%20Wallet/README.md). Reference it for durable log/replay and retry-identity details.
 
 In a nutshell, instead of storing current states, we store immutable state transitions:
 

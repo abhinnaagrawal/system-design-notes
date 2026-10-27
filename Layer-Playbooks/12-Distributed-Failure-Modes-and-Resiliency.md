@@ -1,5 +1,7 @@
 # Layer 12: Distributed Failure Modes, Resiliency & Fault Isolation Playbook
 
+> **Design inputs:** Retry deadlines, ambiguous outcomes, correlated failures, surviving capacity, RPO/RTO and recovery owners.
+
 > **The System Design Interview Lens:** In Staff and Principal (L6/L7+) interviews, the system is guaranteed to fail. Mid-level engineers draw architectures assuming happy paths and mention *"I will add retries and circuit breakers."* Staff and Principal engineers treat failure as a **continuous physical reality (Pillar 4: Operational Mindset & Pillar 3: Problem Solving)**: they calculate **retry amplification factors**, design **deadline context propagation** to eliminate zombie compute, enforce **client-side retry budgets and full-jitter backoff**, implement **adaptive concurrency limits (Little's Law)** to prevent server death spirals, and mathematically isolate blast radiuses using **cell-based architecture and combinatorial Shuffle Sharding**.
 
 ---
@@ -14,7 +16,7 @@
 | **Downstream Latency Spike** | **Deadlines / Context Propagation (`grpc-timeout`)** | Client-side Circuit Breaker (Hystrix/Resilience4j) | Indefinite synchronous blocking timeouts | Without propagated deadlines, upstream servers continue holding sockets and burning thread pools for requests whose client has already abandoned/timed out. |
 | **Retry Storms & Amplification** | **Exponential Backoff + Full Jitter & Retry Budgets ($\le 10\%$)** | Dead Letter Queues (DLQ) with exponential delay | Blind immediate retries ($N$ attempts) | Retrying immediately multiplies load during an outage by $3\times$ to $27\times$. Full Jitter flattens concurrency spikes, and Retry Budgets hard-cap retry volume. |
 | **Cache Stampede / Thundering Herd** | **Mutex Locking (SingleFlight) & Probabilistic Early Expiration (XFetch)** | Pre-computed cache warming cron | Storing raw keys with identical static TTLs | When a hot key expires, thousands of concurrent threads query the database simultaneously, crushing connection pools. |
-| **Noisy Neighbor / Poison-Pill Attack** | **Shuffle Sharding (Combinatorial assignment)** | Cell-Based Architecture (Silos) | Shared flat multi-tenant worker pool | A poison-pill request crashes a shared worker fleet completely ($100\%$ blast radius). Shuffle sharding reduces collision probability to $\frac{1}{\binom{N}{k}}$. |
+| **Noisy Neighbor / Poison-Pill Attack** | **Shuffle Sharding (Combinatorial assignment)** | Cell-Based Architecture (Silos) | Shared flat multi-tenant worker pool | Uniform independent k-of-N assignments have identical-set probability $\frac{1}{\binom{N}{k}}$; partial overlap is much more common and determines degraded capacity. |
 | **Dependency Outage** | **Fail-Open with Stale Cache or Fallback Default** | Fail-Closed (Hard rejection) | Blocking until dependency recovers | For non-critical paths (recommendations, analytics), serving degraded/cached data preserves core checkout/write flows. |
 
 ---
@@ -83,9 +85,9 @@ A cascading failure is an outage that progressively worsens over time due to pos
 ### 3.2 Retry Storms & Retry Amplification
 When downstream latency increases, upstream clients time out and immediately retry.
 * **The Amplification Multiplier:** In a multi-tier microservice architecture ($A \to B \to C \to D$):
-  If each layer configures $3$ retries upon failure:
+  If each of the three edges allows $3$ **total attempts** (initial request plus two retries):
   $$\text{Maximum Amplified Requests on D} = 3 \times 3 \times 3 = 27\text{ requests per user action}$$
-* **Result:** A transient 100ms database blip turns into an overwhelming $27\times$ load flood that permanently prevents the database from recovering.
+* **Result:** This permits $27\times$ amplification. With **three retries plus the initial attempt** on each edge, the bound is instead $4^3=64$. Actual volume depends on failures, cancellation and deadlines; retry storms can prevent recovery.
 
 ```
 Client (User)
@@ -108,7 +110,8 @@ Client (User)
   │                                       Service B (Retry wave 3)
   │                                         └── 3 more requests to Service C
   ▼
-Total requests hitting backend: 1 * 3 * 3 = 9x to 27x amplification!
+Diagram: two retrying edges, three total attempts each => 3 * 3 = 9 backend calls.
+Extending to three such edges => 3^3 = 27. Three retries per edge => 4^3 = 64.
 ```
 
 ---
@@ -312,10 +315,10 @@ When the interviewer asks: *"Downstream Service X latency increases from 10ms to
 
 | System Design Chapter | Direct Failure Modes & Resiliency Application |
 | :--- | :--- |
-| **[Chapter 04: Rate Limiter](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/Readme.md)** | Designing fail-open behavior when Redis becomes unreachable to prevent the rate limiter from causing an outage. |
-| **[Chapter 06: Key-Value Store](file:///Users/abhinnaagarwal/Documents/system-design-notes/06.%20Key-Value%20Store/Readme.md)** | Quorum math ($R + W > N$), handling split-brain via Sloppy Quorums and Hinted Handoff during network partitions. |
-| **[Chapter 08: URL Shortener](file:///Users/abhinnaagarwal/Documents/system-design-notes/08.%20URL%20Shortener/Readme.md)** | SingleFlight cache mutexes to prevent thundering herd when a celebrity shortened link expires. |
-| **[Chapter 10: Notification System](file:///Users/abhinnaagarwal/Documents/system-design-notes/10.%20Notification%20System/Readme.md)** | Exponential backoff with full jitter and Dead Letter Queues (DLQ) when third-party APNs/FCM servers return HTTP 429/503. |
-| **[Chapter 12: Chat System](file:///Users/abhinnaagarwal/Documents/system-design-notes/12.%20Chat%20System/Readme.md)** | Managing reconnect storms when a WebSocket gateway crashes; using randomized client reconnection jitter to prevent gateway collapse. |
-| **[Chapter 26: Payment System](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/Readme.md)** | Strict fail-closed semantics on PSP failures; idempotency keys and retry budgets to prevent double charges during timeouts. |
-| **[Chapter 28: Stock Exchange](file:///Users/abhinnaagarwal/Documents/system-design-notes/28.%20Stock%20Exchange/Readme.md)** | LMAX Disruptor ring buffers as physical bulkheads, isolating matching engines from network I/O jitter. |
+| **[Chapter 04: Rate Limiter](../04.%20Rate%20Limiter/Readme.md)** | Designing fail-open behavior when Redis becomes unreachable to prevent the rate limiter from causing an outage. |
+| **[Chapter 06: Key-Value Store](../06.%20Key-Value%20Store/Readme.md)** | Quorum math ($R + W > N$), handling split-brain via Sloppy Quorums and Hinted Handoff during network partitions. |
+| **[Chapter 08: URL Shortener](../08.%20URL%20Shortener/Readme.md)** | SingleFlight cache mutexes to prevent thundering herd when a celebrity shortened link expires. |
+| **[Chapter 10: Notification System](../10.%20Notification%20System/Readme.md)** | Exponential backoff with full jitter and Dead Letter Queues (DLQ) when third-party APNs/FCM servers return HTTP 429/503. |
+| **[Chapter 12: Chat System](../12.%20Chat%20System/Readme.md)** | Managing reconnect storms when a WebSocket gateway crashes; using randomized client reconnection jitter to prevent gateway collapse. |
+| **[Chapter 26: Payment System](../26.%20Payment%20System/README.md)** | Strict fail-closed semantics on PSP failures; idempotency keys and retry budgets to prevent double charges during timeouts. |
+| **[Chapter 28: Stock Exchange](../28.%20Stock%20Exchange/README.md)** | LMAX Disruptor ring buffers as physical bulkheads, isolating matching engines from network I/O jitter. |

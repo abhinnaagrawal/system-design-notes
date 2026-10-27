@@ -1,5 +1,7 @@
 # Layer 07: Compute, Stream Processing & Orchestration Playbook
 
+> **Design inputs:** Source/state/sink coordination, stable effect IDs, durable decisions, compensation and recovery ownership.
+
 > **The System Design Interview Lens:** System design isn't just about where data rests; it's about how data moves and transforms. In Staff/Principal interviews, you must articulate the boundary between **true event streaming (Apache Flink)**, **micro-batch processing (Apache Spark)**, and **durable code workflows (Temporal)** versus **scheduled batch DAG orchestrators (Apache Airflow)**.
 
 ---
@@ -140,7 +142,7 @@ TEMPORAL DURABLE EXECUTION MECHANICS:
 #### Why Airflow Fails for Business Transactions
 Many candidates propose Airflow for order processing or payment sagas. **This is an interview red flag:**
 1.  **Poller Latency:** Airflow's scheduler polls the metadata database in cycles (often 5–15 seconds). Launching a task takes several seconds. A customer waiting at an e-commerce checkout cannot wait 30 seconds for an Airflow worker to poll and execute the payment step.
-2.  **No Native Sagas or Compensation:** Airflow is built for forward-only DAG execution (Task A $\to$ Task B $\to$ Task C). If Task C fails, rolling back Task B and Task A requires complex custom logic. Temporal natively supports the **Saga Pattern**: if an activity fails, compensation functions execute automatically in reverse order.
+2. **Saga State and Compensation:** Airflow orchestrates DAGs/tasks. Temporal durably executes workflow logic; authors register and invoke compensations, choose their order and retries, and handle compensation failures.
 
 ---
 
@@ -172,10 +174,10 @@ Many candidates propose Airflow for order processing or payment sagas. **This is
 ### The 3-Sentence Justification Formula
 
 #### Example: Ad Click Aggregation (Chapter 21 Ad Click)
-> *"For real-time ad click event aggregation, I am selecting **Apache Flink** deployed alongside Kafka. Our system requires sub-second windowed aggregations across sliding 1-minute and 1-hour intervals, where late-arriving events from mobile clients must be reconciled using event-time watermarking. Flink's pipelined execution and incremental RocksDB state checkpoints provide true low-latency streaming without the multi-second latency floor of Spark's micro-batching."*
+> "For this ad-click workload, I will compare Flink's pipelined event-time processing with Spark micro-batching against a sub-second output target. The evaluation includes state size, watermark policy, allowed lateness, sink behavior and recovery."
 
 #### Example: Payment Saga Orchestration (Chapter 26 Payment System)
-> *"For orchestrating the multi-step payment fulfillment workflow, I am selecting **Temporal** rather than Apache Airflow or an asynchronous Kafka chain. The payment lifecycle requires durable execution across payment authorization, ledger reserve, and third-party bank capture, where transient network failures must be safely retried without double-charging. Temporal's event-sourcing replay model guarantees that our compensating rollback activities execute deterministically even if worker nodes crash mid-transaction."*
+> "Temporal records workflow history and replays deterministic decisions. Activities can repeat after an external success with a lost completion record. I use stable provider keys, reconcile unknown outcomes and implement retry-safe compensation with escalation."
 
 ---
 
@@ -184,11 +186,20 @@ Many candidates propose Airflow for order processing or payment sagas. **This is
 #### Trap 1: *"How does Apache Flink achieve exactly-once processing state recovery when a worker node crashes?"*
 *   **The Trap:** Testing your mechanical knowledge of distributed stream checkpointing.
 *   **The High-Scoring Response:**
-    > *"Flink achieves exactly-once state consistency through the **Chandy-Lamport distributed checkpointing algorithm**:
-    > 1. Checkpoint Coordinator periodically injects special **Checkpoint Barriers** into the Kafka consumer input streams.
-    > 2. These barriers flow downstream alongside normal data records without halting the stream.
-    > 3. When an operator receives a barrier from all incoming channels, it takes an incremental snapshot of its local state (stored in **embedded RocksDB**) and writes it asynchronously to durable storage (S3/HDFS).
-    > 4. Upon a worker failure, Flink halts the pipeline, resets all Kafka consumer offsets back to the last successful checkpoint barrier, and reloads operator states from the RocksDB snapshot, guaranteeing identical state reconstruction without duplicate side-effects."*
+    > "Flink coordinates consistent distributed checkpoints:
+    > 1. The coordinator triggers sources to insert checkpoint barriers into their streams.
+    > 2. Barriers flow with records; aligned checkpoints can pause an input while waiting for other barriers.
+    > 3. Operators snapshot the configured state backend to durable storage. Incremental RocksDB snapshots require the corresponding configuration; unaligned checkpoints also capture in-flight data.
+    > 4. Recovery restores a completed checkpoint and source positions. A checkpoint-coordinated transactional sink or idempotent application handles replayed output."
+
+| Sink crash point | Required recovery contract |
+| :--- | :--- |
+| Before sink effect | Replay records from recovered source/state positions |
+| Sink effect succeeds, completion/checkpoint is lost | Replay may duplicate it; use recoverable sink transactions or stable effect identities |
+| Prepared transaction exists at recovery | Connector resolves it using the durable checkpoint decision |
+| Completed checkpoint is recovered | Restore its matching source, state and sink progress; reconcile external systems outside that boundary |
+
+Sources: [Flink end-to-end coordination](https://flink.apache.org/2018/02/28/an-overview-of-end-to-end-exactly-once-processing-in-apache-flink-with-apache-kafka-too/), [Temporal activity idempotency](https://docs.temporal.io/activity-definition).
 
 #### Trap 2: *"Why can't we just write a simple while-loop in a Go or Node.js service to consume Kafka instead of running Flink?"*
 *   **The Trap:** Probing whether you appreciate the massive complexity of stateful stream processing.
@@ -205,17 +216,17 @@ Many candidates propose Airflow for order processing or payment sagas. **This is
 
 | Chapter / Architecture | Compute / Engine Selected | Specific Architectural Role |
 | :--- | :--- | :--- |
-| [**14. Youtube**](file:///Users/abhinnaagarwal/Documents/system-design-notes/14.%20Youtube/README.md) | **DAG Task Engine (Temporal / SQS Workers)** | Orchestrates video chunking, parallel multi-resolution encoding, watermarking, and CDN upload. |
-| [**20. Metrics Monitoring**](file:///Users/abhinnaagarwal/Documents/system-design-notes/20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.md) | **Flink / Custom Stream Engine** | Evaluates sliding alert rules over metric streams; triggers PagerDuty alerts. |
-| [**21. Ad Click Aggregation**](file:///Users/abhinnaagarwal/Documents/system-design-notes/21.%20Ad%20Click%20Event%20Aggregation/README.md) | **Apache Flink + RocksDB** | Sliding window aggregations of ad click events with watermarking. |
-| [**26. Payment System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/README.md) | **Temporal Saga Orchestrator** | Coordinates distributed payments across payment gateways, double-entry ledger, and external banks. |
-| [**31. Distributed Job Scheduler**](file:///Users/abhinnaagarwal/Documents/system-design-notes/31.%20Distributed%20Job%20Scheduler/README.md) | **Distributed Worker Pool (K8s / Celery)** | Pulls scheduled jobs from etcd/Kafka; executes tasks with resource isolation. |
+| [**14. Youtube**](../14.%20Youtube/Readme.md) | **DAG Task Engine (Temporal / SQS Workers)** | Orchestrates video chunking, parallel multi-resolution encoding, watermarking, and CDN upload. |
+| [**20. Metrics Monitoring**](../20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.md) | **Flink / Custom Stream Engine** | Evaluates sliding alert rules over metric streams; triggers PagerDuty alerts. |
+| [**21. Ad Click Aggregation**](../21.%20Ad%20Click%20Event%20Aggregation/README.md) | **Apache Flink + RocksDB** | Sliding window aggregations of ad click events with watermarking. |
+| [**26. Payment System**](../26.%20Payment%20System/README.md) | **Temporal Saga Orchestrator** | Coordinates distributed payments across payment gateways, double-entry ledger, and external banks. |
+| [**31. Distributed Job Scheduler**](../31.%20Distributed%20Job%20Scheduler/README.md) | **Distributed Worker Pool (K8s / Celery)** | Pulls scheduled jobs from etcd/Kafka; executes tasks with resource isolation. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   Apache Flink Architecture: [`coding-practice: compute/flink.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/compute/flink.md)
-*   Apache Spark Internals: [`coding-practice: compute/spark.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/compute/spark.md)
-*   Airflow Internals: [`coding-practice: orchestration/airflow-internals.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/orchestration/airflow-internals.md)
-*   Argo Workflows: [`coding-practice: orchestration/argo-workflows.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/orchestration/argo-workflows.md)
-*   Kubernetes Autoscaling (Keda & Karpenter): [`coding-practice: orchestration/keda.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/orchestration/keda.md)
+*   Apache Flink Architecture: [`coding-practice: compute/flink.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/compute/flink.md)
+*   Apache Spark Internals: [`coding-practice: compute/spark.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/compute/spark.md)
+*   Airflow Internals: [`coding-practice: orchestration/airflow-internals.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/orchestration/airflow-internals.md)
+*   Argo Workflows: [`coding-practice: orchestration/argo-workflows.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/orchestration/argo-workflows.md)
+*   Kubernetes Autoscaling (Keda & Karpenter): [`coding-practice: orchestration/keda.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/orchestration/keda.md)

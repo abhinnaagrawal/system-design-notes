@@ -1,11 +1,11 @@
 # Appendix C - The Spark Acceleration Landscape (Proprietary & Native Engines)
 
 **Priority:** P1 (ecosystem context)
-**Versions:** Spark 3.x-4.x; vendor status and claims as of October 2026
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - every vendor claim below is dated and labeled vendor-reported.
 **See also:** [03 - Tungsten, Serialization & Data Representation](03%20-%20Tungsten,%20Serialization%20&%20Data%20Representation.md), [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md), [06 - Query Planning (Catalyst & AQE)](06%20-%20Query%20Planning%20%28Catalyst%20&%20AQE%29.md), [Appendix B - Optimization Evolution Map](Appendix%20B%20-%20Optimization%20Evolution%20Map.md).
 
-**TL;DR:** "Tungsten" is not an optimizer; it is an execution backend. The commercial landscape has **four proprietary Spark acceleration products with public technical detail**: Databricks **Photon** (a from-scratch C++ execution engine), Google **Lightning Engine** (a multilayer bundle whose Native Query Execution is Apache Gluten + Velox), Amazon **EMR runtime for Apache Spark** (a patched Spark runtime), and Microsoft's **Synapse runtime / Fabric Native Execution Engine** (runtime patches plus a managed Gluten + Velox engine). Only Photon is a ground-up, closed-source engine. Everything else is a proprietary wrapper, patch set, or managed bundle around open-source execution. **Uber has no proprietary Spark engine**; its gains come from platform control (uSCS, Sparkle), version upgrades, and Gluten/Velox adoption. Judge accelerators by operator coverage, fallback behavior, and end-to-end cost - not by the headline multiplier.
+**TL;DR:** Tungsten supplies representation/execution machinery; Catalyst supplies query planning. This appendix compares four vendor families: Photon (C++ engine), Lightning (a multilayer bundle including Gluten/Velox NQE), EMR (patched runtime), and Synapse/Fabric (optimizer/runtime work and native offload). It also covers Uber's platform control, upgrades and Gluten/Velox plans.
 
 ---
 
@@ -31,7 +31,7 @@ flowchart LR
 
 This is why the phrase "Tungsten is just one optimizer" needs correcting. Tungsten is a **data representation and execution backend**: `UnsafeRow`, cache-aware operators, and whole-stage codegen. Catalyst is the optimizer. AQE is runtime re-optimization. Photon and Gluten replace the execution layer; EMR and Synapse patch the whole runtime; Lightning bundles all of the above.
 
-**So how many are there?** There is no canonical count, because the category is fuzzy. If the definition is "commercially available, proprietary Spark execution engine or runtime with public technical detail," the answer is **four**: Photon, Lightning, EMR runtime, and the Synapse/Fabric family. If the definition widens to "any proprietary performance feature," the list is unbounded - caching layers, indexing subsystems, connectors, and tuned defaults all qualify. The useful distinction is not the count; it is **what layer each product replaces**.
+The comparison below groups products by **which layer they change**: planning, execution, runtime or platform.
 
 | Product | Owner | Layer it really occupies | Is it a new engine? |
 |---------|-------|--------------------------|---------------------|
@@ -76,19 +76,19 @@ But codegen does not remove every boundary. It cannot fuse across a shuffle, a P
 | Adaptation | Whole-stage codegen per plan | Runtime-specialized kernels per batch | Adapts to data quality without recompiling the query |
 | Boundary | JVM only | JNI/Arrow boundary to Spark | Columnar conversion cost at the edge |
 
-The last row is the catch. A native engine is not free: every unsupported operator forces a conversion back to Spark's row format, and every supported subtree needs a path across the JNI boundary. That is why **fallback coverage** matters more than the peak speedup on a benchmark query.
+The last row is the catch. Unsupported operations may leave a whole plan on the JVM or split it into fragments; only actual row/columnar transitions pay that conversion cost. Columnar-compatible JVM operators may consume batches directly. JNI and memory-sharing details vary by engine; inspect the actual plan rather than assuming every unsupported operator causes conversion.
 
 ### C. The fallback contract
 
-Every product in this appendix follows the same architecture:
+Photon, Gluten-based engines, Comet/Auron and RAPIDS use variants of this **native-offload** pattern:
 
 1. Spark parses, analyzes, and optimizes the plan with Catalyst.
 2. The accelerator intercepts the **physical** plan and identifies supported subtrees.
 3. Supported operators run in the native engine; the rest stay in the JVM.
 4. Results cross the boundary as columnar batches (Arrow or a proprietary format).
-5. Spark still owns scheduling, shuffle services, fault tolerance, and the UI.
+5. Spark generally retains task scheduling/retry orchestration and UI; plugins can replace shuffle, memory and I/O paths.
 
-This is why vendors can claim "no code changes" and "Spark API compatibility." The contract is not "we replaced Spark"; it is **"we replaced the hot loops Spark can prove are safe to offload."** A fallback is not a failure, but a high fallback rate silently turns a 4x engine into a 1.2x engine.
+**EMR and the Synapse paper's engine** also improve Spark through runtime patches. Native-offload plugins validate supported plan fragments and use fallback for unsupported work; conversion costs and the fraction offloaded determine the resulting speedup.
 
 ### D. The rest of the stack
 
@@ -102,11 +102,11 @@ The engine is only one lever. Lightning and Synapse show that planner rules and 
 
 ### E. The three conversion boundaries
 
-Every accelerator pays a tax at a boundary, and the boundary explains most of the performance variance between "benchmark" and "production."
+These costs arise at native-offload boundaries:
 
 | Boundary | What crosses | Why it costs | Where you see it |
 |----------|--------------|--------------|------------------|
-| Row <-> columnar | Spark `UnsafeRow` <-> Arrow/native batches | Transpose, copy, null handling, variable-width layout | Every fallback and every native scan output |
+| Row <-> columnar | Spark `UnsafeRow` <-> Arrow/native batches | Transpose, copy, null handling, variable-width layout | Actual format transitions, not every fallback/native scan |
 | JVM <-> native | Plan, pointers, metrics over JNI | Serialization, call overhead, lifecycle management | Photon plan handoff; Gluten/Comet/Auron JNI gateways |
 | CPU <-> GPU | Host memory <-> device memory | PCIe/NVLink transfer, smaller GPU memory, kernel launch | RAPIDS scans, joins, shuffles |
 
@@ -150,7 +150,7 @@ It is equally important to see what these products **do not** replace. Their "no
 | Cluster management and UI | Spark / platform | Native metrics are surfaced in the Spark UI, not a separate scheduler |
 | Unsupported operators, UDFs, stateful streaming | Spark JVM | This is the fallback surface, and it varies by product |
 
-Three patterns jump out. First, **most "proprietary engines" are not engines** - they are proprietary runtimes or managed bundles. Second, **Apache Gluten is the common substratum** for both Google's NQE and Microsoft's Fabric NEE, which means their differentiation is in planning, I/O, connectors, and operations rather than in the operator kernels. Third, **every product falls back to Spark**, so compatibility is a spectrum, not a binary.
+Three patterns: the sampled products span engines, runtimes and managed bundles; Gluten is shared by the described NQE/NEE designs; and **native engines have product-specific fallback surfaces**, whereas patched EMR/Synapse runtimes need not offload at all. Compatibility still needs workload-level testing.
 
 A status timeline prevents the most common factual error - treating a 2022 result as a current product:
 
@@ -320,7 +320,7 @@ The architecture walkthrough:
 2. **Substrait serialization.** The subtree becomes a Substrait plan - a language-neutral representation of relational operations - rather than Spark-specific code.
 3. **Backend planning.** The native backend (Velox or ClickHouse) translates Substrait into its own operator plan.
 4. **Native execution.** Operators run over Arrow columnar batches, with Gluten's memory pool managing allocation and spill.
-5. **Columnar return.** Results return to Spark as `ColumnarBatch`; a `ColumnarToRow` conversion happens only when the next operator is a JVM operator.
+5. **Columnar return.** Results return as `ColumnarBatch`; `ColumnarToRow` converts them when the next operator consumes rows.
 6. **Fallback and metrics.** Unsupported nodes stay in Spark; native metrics and fallback reasons surface in the Spark UI.
 
 The **backend choice** is a real architectural decision, not a brand detail. Velox is a general-purpose C++ execution library with broad operator coverage and heavy investment from Meta and the wider ecosystem; ClickHouse brings a mature analytical engine but a different execution and type model. Gluten's value is the bridge: it lets a Spark cluster use either backend without changing user code. In practice, Velox is the default choice for most deployments because it was designed as an embeddable library rather than a full database server.
@@ -329,7 +329,7 @@ The **backend choice** is a real architectural decision, not a brand detail. Vel
 
 **The numbers.** Gluten's own benchmark, on TPC-H and TPC-DS at 3TB with Spark 3.3.1 on Intel Xeon Platinum 8592+, reports **3.34x on TPC-H** and **3.02x on TPC-DS**, with individual queries reaching **23.45x** and **13.75x** respectively [S38]. Those are community/vendor benchmarks, not independent audits, and the per-query tail is much larger than the average - a familiar pattern.
 
-**The limits.** Coverage is the whole game: functions, types, and operators not yet native fall back, and each fallback pays a row/column conversion. Native memory needs tuning, the version matrix is explicit (the current docs list Spark 3.4.4, 3.5.5, 4.0.2, and 4.1.1), and operating a plugin plus native libraries is more work than flipping a managed checkbox [S39]. Gluten is the right choice when you control the platform and want an open, portable engine; it is the wrong choice if you want zero operations.
+**Integration requirements.** Unsupported functions/types/operators use fallback, and actual row/columnar transitions add conversion cost. Tune native memory and use the plugin release's Spark compatibility matrix [S39]. Native libraries also add packaging and operational work.
 
 ### B. Apache DataFusion Comet
 
@@ -581,7 +581,7 @@ If any answer is "no," the right next step is usually to fix the platform, data 
 Separate the claim from the workload. Photon's headline includes customer SQL/DataFrame workloads against an old DBR baseline; the TPC-DS number is 2x. Ask how much of your estate is SQL/DataFrame versus UDF-heavy, stateful streaming, or RDD code, and measure fallback before committing. The right answer is usually "enable it where it is already available, measure, then expand" - not "rewrite the platform for a multiplier."
 
 **"We are on EMR and only see 1.3x, not 4.5x."**
-That is normal. The 4.5x claim is a derived TPC-DS 3TB result against a specific Spark 3.5.6 + Iceberg 1.10 baseline on a nine-node cluster. Your job may be connector-bound, have small files, use an older EMR release, or spend its time in a fallback path. Check the runtime version, file layout, shuffle configuration, and operator coverage before concluding the runtime is not working.
+The reported 4.5x result used derived TPC-DS 3TB against Spark 3.5.6 + Iceberg 1.10 on a nine-node cluster. Compare release/default differences, connectors, file layout and shuffle profile. If an offload plugin is enabled, inspect its fallback path as well.
 
 **"Should we use Gluten or Photon?"**
 If you are on Databricks, Photon is the zero-operations default and Gluten's portability buys you little. If you are on-prem or multi-cloud, Gluten (or Comet/Auron) is the open path, but you own the compatibility matrix, native memory tuning, shuffle configuration, and upgrade cadence. The decision is less about kernel speed than about who operates the plugin.
@@ -621,7 +621,7 @@ The build-vs-buy trade-off is straightforward. Managed products (Photon, Lightni
 ## 9. One-Page Recap
 
 1. **Four layers, not one:** planner (Catalyst/CBO/AQE), execution engine (Tungsten/Photon/Gluten/DataFusion/cuDF), runtime (DBR/EMR/Synapse/Lightning/Fabric), platform (uSCS/Sparkle/Jobs).
-2. **Four proprietary products have public detail:** Photon, Lightning Engine, EMR runtime, and Synapse/Fabric. Only Photon is a from-scratch closed-source engine.
+2. **Four vendor families:** Photon, Lightning, EMR and Synapse/Fabric span native engines, runtime patches and managed bundles.
 3. **Photon** is a C++ vectorized, pull-based engine inside the JVM process; Catalyst still plans, Photon executes supported subtrees, Spark keeps the rest. 2x TPC-DS 1TB vs DBR 8.0; avg 3x, max >10x customer workloads.
 4. **Lightning** is a stack: F1/Spanner-inspired optimizer + Gluten/Velox NQE + columnar shuffle + GCS/BigQuery connectors. GA June 2026; up to 4.9x vs OSS Spark, premium tier.
 5. **EMR runtime** is a patched Spark runtime, not a new engine: 100% API compatible, default on EMR/Glue/Serverless, 4.5x TPC-DS 3TB vs Spark 3.5.6 + Iceberg.
@@ -631,7 +631,7 @@ The build-vs-buy trade-off is straightforward. Managed products (Photon, Lightni
 9. **Uber has no engine:** uSCS (control plane), Sparkle (ETL framework), version upgrades (85% in six months), and Gluten/Velox adoption drove its results.
 10. **Benchmarks are ratios:** baseline, scale, format, hardware, fallback, cost, and date decide whether a 4x claim applies to you. Measure your own workload.
 
-**Memory hook:** *"Plan in Spark, execute in native, package in a runtime, operate on a platform - and always ask what fell back."*
+**Memory hook:** *"Separate planning, execution, runtime and platform; for native offload inspect transitions, for runtime patches inspect changed code/defaults."*
 
 ---
 
@@ -645,14 +645,14 @@ The build-vs-buy trade-off is straightforward. Managed products (Photon, Lightni
 | 4 | What does Lightning's NQE use underneath? | Apache Gluten + Velox, with Google enhancements |
 | 5 | Is the EMR runtime a new engine? | No - a performance-optimized, API-compatible Spark runtime |
 | 6 | What is Fabric NEE? | A managed Gluten + Velox engine enabled with `spark.native.enabled` |
-| 7 | Why can these products claim "no code changes"? | They intercept the physical plan, keep Spark APIs, and fall back unsupported operators to Spark |
+| 7 | Do all products intercept native subtrees? | No; native engines offload supported fragments, while EMR/Synapse runtime patches can preserve Spark APIs without native fallback |
 | 8 | Describe Photon's execution model. | Vectorized, pull-based C++ engine in the JVM process via JNI; executes supported subtrees only |
 | 9 | Why did Photon choose vectorized interpretation over codegen? | Easier to build/profile/debug/operate; operator boundaries preserve metrics; runtime specialization closes the gap |
 | 10 | What is Gluten's plan path? | Spark physical plan -> Substrait -> Velox/ClickHouse -> Arrow batches back to Spark |
 | 11 | What engine does Comet use? | Apache DataFusion (Rust), Arrow-native, with native columnar shuffle |
 | 12 | What was Auron formerly called? | Blaze (`blaze-init/blaze` now redirects to `apache/auron`) |
 | 13 | How does RAPIDS accelerate Spark? | GPU SQL plugin (cuDF) for supported operators + optional UCX shuffle; CPU fallback |
-| 14 | What does fallback cost? | Row/column conversions and lost native acceleration; measure the fallback rate |
+| 14 | What does fallback cost? | Lost native acceleration plus conversions only at actual format transitions; whole JVM plans and columnar-compatible boundaries differ |
 | 15 | Why are vendor speedups not directly comparable? | Different baselines, scales, formats, hardware, cost models, dates, and fallback coverage |
 | 16 | What did Uber actually build? | A platform/control plane (uSCS), an ETL framework (Sparkle), upgrade automation, and Gluten/Velox adoption - not an engine |
 | 17 | When choose Gluten/Comet over Photon? | When you need open, portable, on-prem/multi-cloud execution and can operate the plugin |

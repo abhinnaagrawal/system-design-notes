@@ -1,5 +1,7 @@
 # Pattern 05: Scaling Writes
 
+> **Write contract:** Define success at durable log acceptance or database commit. Preserve operation IDs and ordering through retries, replication and shard migration.
+
 > **The System Design Interview Lens:** Scaling writes is fundamentally more difficult than scaling reads. While reads can be scaled by adding replicas, writes must modify the single source of truth, maintain durability (fsync to disk), enforce constraints, and update indexes. A Staff engineer articulates how to choose write-optimized storage engines (LSM Trees vs. B+ Trees), buffer spikes using message queues, apply micro-batching, and partition hot keys using salting.
 
 ---
@@ -136,11 +138,12 @@ When write spikes threaten database availability, use rate limiters to enforce b
 
 ### Deep Dive 1: Zero-Downtime Resharding
 * **The Problem:** Your 4-node sharded cluster is at 85% capacity. You need to expand to 8 nodes without dropping writes or taking the system offline.
-* **The 4-Step Resharding Runbook:**
-  1. **Dual-Writing:** Modify the application layer to write new data to both the old cluster and the new 8-node cluster.
-  2. **Backfill Historical Data:** Run offline batch migration jobs (e.g., Spark / Airflow) to copy historical records to the new cluster.
-  3. **Verification & Diff:** Run an asynchronous reconciliation worker comparing row counts and checksums across both clusters until delta $= 0$.
-  4. **Cutover Reads & Stop Old Writes:** Flip feature flag to route reads to the 8-node cluster; decommission the old cluster.
+* **Versioned Snapshot + Change-Log Runbook:**
+  1. **Declare authority:** Keep the old cluster authoritative. Establish a consistent snapshot and its change-log position; retain the log long enough for backfill and recovery.
+  2. **Backfill and replay:** Copy the snapshot, then replay ordered changes. Guard destination writes with source versions so stale backfill cannot overwrite a newer update; carry delete tombstones and stable operation IDs. Naive application dual-writes alone leave a partial-failure gap.
+  3. **Verify at a barrier:** Catch up to an explicit source position, compare version-aware checksums and sampled queries, and shadow reads.
+  4. **Cut over ownership:** Briefly fence or drain old writers as required, apply through the cutover barrier and change routing with an epoch. Reject old-epoch writes and ensure clients cannot keep writing to both authorities.
+  5. **Keep a rollback window:** Define whether rollback needs reverse replication; retain the old cluster and logs until compatibility, reconciliation and recovery checks pass. Assign the cutover/rollback owner before starting.
 
 ---
 

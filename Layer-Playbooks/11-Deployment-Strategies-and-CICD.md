@@ -1,5 +1,7 @@
 # Layer 11: Deployment Strategies, Release Engineering & CI/CD Playbook
 
+> **Design inputs:** Version skew, schema compatibility, migration checkpoints, release gates, data recovery and rollback/roll-forward ownership.
+
 > **The System Design Interview Lens:** In Staff and Principal (L6/L7+) interviews, deployment is not a casual comment like *"I will push Docker containers with Jenkins."* Mid-level engineers treat deployments as an operational afterthought. Staff and Principal engineers treat release engineering as an **architectural pillar (Pillar 4: Operational Mindset)**: they plan for **continuous API version skew**, design **zero-downtime database schema migrations via the Expand/Contract pattern**, automate **statistically grounded Canary Analysis (ACA)** tied directly to Error Budget burn rates, and implement **GitOps and dark launching (traffic shadowing)** to de-risk high-throughput distributed systems.
 
 ---
@@ -249,9 +251,9 @@ When the interviewer asks: *"How do you deploy updates to this service safely wi
 
 | System Design Chapter | Direct Deployment & CI/CD Application |
 | :--- | :--- |
-| **[Chapter 01: Scaling From Zero to Millions](file:///Users/abhinnaagarwal/Documents/system-design-notes/01.%20Scaling/Readme.md)** | Transitioning from single-server manual SCP deploys to automated immutable containers and Blue/Green routing. |
-| **[Chapter 08: URL Shortener](file:///Users/abhinnaagarwal/Documents/system-design-notes/08.%20URL%20Shortener/Readme.md)** | Upgrading Base62 token generation logic using dark launch traffic shadowing to verify collision rates without user impact. |
-| **[Chapter 11: News Feed System](file:///Users/abhinnaagarwal/Documents/system-design-notes/11.%20News%20Feed%20System/Readme.md)** | Migrating feed hydration schemas in Cassandra using Expand/Contract without causing cluster-wide partition read latency spikes. |
-| **[Chapter 19: Message Queue](file:///Users/abhinnaagarwal/Documents/system-design-notes/19.%20Distributed%20Message%20Queue/Readme.md)** | Upgrading Kafka broker software and storage protocols via rolling restarts with partition ISR rebalancing. |
-| **[Chapter 22: Hotel Reservation System](file:///Users/abhinnaagarwal/Documents/system-design-notes/22.%20Hotel%20Reservation%20System/Readme.md)** | Altering room inventory relational tables and locking logic using online DDL (`gh-ost`) to prevent blocking booking transactions. |
-| **[Chapter 26: Payment System](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/Readme.md)** | Releasing double-entry ledger updates with strict canary verification and kill-switch feature flags; zero tolerance for version skew in ledger accounting. |
+| **[Chapter 01: Scaling From Zero to Millions](../01.%20Scaling/Readme.md)** | Transitioning from single-server manual SCP deploys to automated immutable containers and Blue/Green routing. |
+| **[Chapter 08: URL Shortener](../08.%20URL%20Shortener/Readme.md)** | Upgrading Base62 token generation logic using dark launch traffic shadowing to verify collision rates without user impact. |
+| **[Chapter 11: News Feed System](../11.%20News%20Feed%20System/Readme.md)** | Migrating feed hydration schemas in Cassandra using Expand/Contract without causing cluster-wide partition read latency spikes. |
+| **[Chapter 19: Message Queue](../19.%20Distributed%20Message%20Queue/README.md)** | Upgrading Kafka broker software and storage protocols via rolling restarts with partition ISR rebalancing. |
+| **[Chapter 22: Hotel Reservation System](../22.%20Hotel%20Reservation%20System/README.md)** | Altering room inventory relational tables and locking logic using online DDL (`gh-ost`) to prevent blocking booking transactions. |
+| **[Chapter 26: Payment System](../26.%20Payment%20System/README.md)** | Releasing double-entry ledger updates with strict canary verification and kill-switch feature flags; zero tolerance for version skew in ledger accounting. |

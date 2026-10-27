@@ -8,6 +8,13 @@
 
 **Status:** Complete first draft. Appendix B, Appendix C, chapters 01-11, and Appendix A are written; next step is verification (numbers re-read, code refs re-pinned) before "verified" status.
 
+## Guarantees, Assumptions & Version Scope
+
+- **Baseline:** Apache Spark **3.5.0**, using micro-batch processing; Delta protocol examples use **3.0.0**.
+- Recovery uses replayable inputs, durable checkpoints and sink replay deduplication. See [streaming](10%20-%20Structured%20Streaming%20Internals.md) and [Delta transaction identifiers](11%20-%20Delta%20Lake%20&%20Connector%20Internals.md).
+- Memory management protects occupied storage within `R = M × storageFraction`; spill behavior depends on the consumer. AQE adapts remaining work and can reuse materialized shuffle output. See [memory](02%20-%20Memory%20Management%20&%20Disk%20Spilling.md) and [planning](06%20-%20Query%20Planning%20%28Catalyst%20&%20AQE%29.md).
+- The [source registry](SOURCES.md) lists release-tagged code, papers and benchmark sources.
+
 ## Start Here
 
 - [Appendix B - The Story of Spark Performance (1.2 -> 4.2)](./Appendix%20B%20-%20Optimization%20Evolution%20Map.md) - story-style version map built for retention: 6 performance campaigns, timeline cheat sheet, cheat cards, 30-second interview answers, and rapid-fire drills.

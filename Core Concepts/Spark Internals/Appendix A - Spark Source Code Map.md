@@ -1,7 +1,7 @@
 # Appendix A - Spark Source Code Map
 
 **Priority:** P2
-**Versions:** paths valid for 3.x/4.x layouts (pin a tag, e.g. `apache/spark@v3.5.0`)
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - apache/spark repository structure.
 
 **TL;DR:** A navigation guide for reading Spark: the repository's module layout, which directories answer which interview question, the per-chapter class anchors, and a recommended first-pass reading order. Rule of the house: **always pin a release tag**, never read `master` when explaining a released behavior.
@@ -47,8 +47,8 @@ GitHub links below are pinned to `v3.5.0`; swap the tag for the version you're d
 
 | Class | Path |
 |-------|------|
-| `MemoryManager`, `UnifiedMemoryManager`, `MemoryConsumer` | [core/.../memory/](https://github.com/apache/spark/tree/v3.5.0/core/src/main/scala/org/apache/spark/memory) |
-| `TaskMemoryManager`, `MemoryAllocator` | [core/src/main/java/.../memory/](https://github.com/apache/spark/tree/v3.5.0/core/src/main/java/org/apache/spark/memory) |
+| `MemoryManager`, `UnifiedMemoryManager` | [core/.../memory/](https://github.com/apache/spark/tree/v3.5.0/core/src/main/scala/org/apache/spark/memory) (protected storage R) |
+| `TaskMemoryManager`, `MemoryConsumer` | [core/src/main/java/.../memory/](https://github.com/apache/spark/tree/v3.5.0/core/src/main/java/org/apache/spark/memory) (spill callback may reclaim zero) |
 | `ExternalSorter`, `ExternalAppendOnlyMap` | [core/.../util/collection/](https://github.com/apache/spark/tree/v3.5.0/core/src/main/scala/org/apache/spark/util/collection) |
 | `MemoryStore`, `DiskStore` | [core/.../storage/](https://github.com/apache/spark/tree/v3.5.0/core/src/main/scala/org/apache/spark/storage) |
 
@@ -80,7 +80,7 @@ GitHub links below are pinned to `v3.5.0`; swap the tag for the version you're d
 |-------|------|
 | Joins: `BroadcastHashJoinExec`, `ShuffledHashJoinExec`, `SortMergeJoinExec`, `BroadcastNestedLoopJoinExec` | [sql/core/.../execution/joins/](https://github.com/apache/spark/tree/v3.5.0/sql/core/src/main/scala/org/apache/spark/sql/execution/joins) |
 | Aggregates: `HashAggregateExec`, `ObjectHashAggregateExec`, `SortAggregateExec` | [sql/core/.../execution/aggregate/](https://github.com/apache/spark/tree/v3.5.0/sql/core/src/main/scala/org/apache/spark/sql/execution/aggregate) |
-| `SortExec`, `TakeOrderedAndProjectExec` | sql/core/.../execution/ |
+| `SortExec`, `BlockingOperatorWithCodegen`, `TakeOrderedAndProjectExec` | sql/core/.../execution/ (blocking is distinct from codegen exclusion) |
 | `WindowExec` | [sql/core/.../execution/window/](https://github.com/apache/spark/tree/v3.5.0/sql/core/src/main/scala/org/apache/spark/sql/execution/window) |
 
 ### 06 - Query Planning (Catalyst & AQE)

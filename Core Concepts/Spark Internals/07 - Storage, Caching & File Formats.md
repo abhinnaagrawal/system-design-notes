@@ -1,7 +1,7 @@
 # 07 - Storage, Caching & File Formats
 
 **Priority:** P1
-**Versions:** 1.6 (columnar cache) -> 4.2
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [02 - Memory Management & Disk Spilling](02%20-%20Memory%20Management%20&%20Disk%20Spilling.md), [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md), [11 - Delta Lake & Connector Internals](11%20-%20Delta%20Lake%20&%20Connector%20Internals.md).
 
@@ -64,9 +64,9 @@ Choosing a storage level is really choosing what happens when memory runs out. T
 |-------|--------|------|-----------|------------------------|----------|
 | `MEMORY_ONLY` (`RDD.cache()`) | Yes | No | No | **Yes** (block dropped) | Recompute is cheap; dataset fits |
 | `MEMORY_AND_DISK` (`Dataset.cache()`) | Yes | Yes | No | No (evicts to disk) | Default safe choice for reused data |
-| `MEMORY_ONLY_SER` / `MEMORY_AND_DISK_SER` | Yes | Yes | Yes | Same as above | Memory-constrained; CPU available |
+| `MEMORY_ONLY_SER` / `MEMORY_AND_DISK_SER` | Yes | No / Yes | Yes | Recompute / disk fallback respectively | Memory-constrained; CPU available (JVM RDD names) |
 | `DISK_ONLY` | No | Yes | Yes | No | Huge data reused a few times |
-| `OFF_HEAP` | Off-heap | No | Yes | Yes | Escape GC for cached bytes |
+| `OFF_HEAP` | Off-heap | Yes | Yes | Disk fallback on eviction; recompute if all copies lost | Reduce cached-byte GC; explicitly enable/size managed off-heap memory |
 | `_2` / `_3` variants | Replicated | Replicated | - | No (peer copy) | Fault tolerance without recompute |
 
 Facts that show up in interviews:
@@ -78,6 +78,8 @@ Facts that show up in interviews:
 5. **Cached columnar batches** matter: `spark.sql.inMemoryColumnarStorage.compressed` (default true) and `batchSize` (default 10,000 rows) control footprint vs decode cost. 1.6's columnar cache delivered up to 14x on complex-type queries [S14].
 
 **Memory hook:** *"MEMORY_ONLY = evict and recompute; MEMORY_AND_DISK = evict and read back; replication = survive the executor."*
+
+In Spark 3.5.0, `StorageLevel.OFF_HEAP` has `useDisk=true`, `useMemory=true`, `useOffHeap=true`, `deserialized=false`, replication 1. Losing the node loses its local disk copy; lineage or another replica supplies recovery.
 
 ---
 

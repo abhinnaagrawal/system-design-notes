@@ -1,5 +1,7 @@
 # Layer 05: Distributed Coordination, Consensus & Identity Playbook
 
+> **Design inputs:** Quorum membership, failure model, durable tokens and worker-ID reuse. Protected resources validate ownership/fencing on every mutation.
+
 > **The System Design Interview Lens:** Distributed coordination is where subtle bugs bring down entire systems: split-brain, clock drift, and phantom lock releases during Garbage Collection pauses. In Staff/Principal interviews, you must prove mastery over **quorum math ($N/2 + 1$)**, **linearizable consensus (Raft vs Paxos)**, **monotonic fencing tokens**, and **collision-free ID generation**.
 
 ---
@@ -224,16 +226,16 @@ THE FENCING TOKEN SOLUTION:
 
 | Chapter / Architecture | Technology Selected | Specific Functionality |
 | :--- | :--- | :--- |
-| [**07. Unique-Id Generator**](file:///Users/abhinnaagarwal/Documents/system-design-notes/07.%20Unique-Id%20Generator/README.md) | **Twitter Snowflake (64-bit)** | Central-free ordered ID generation; 4,096 IDs per ms per node. |
-| [**19. Distributed Message Queue**](file:///Users/abhinnaagarwal/Documents/system-design-notes/19.%20Distributed%20Message%20Queue/README.md) | **KRaft / ZooKeeper** | Metadata controller, partition leader election, and broker cluster registration. |
-| [**22. Hotel Reservation System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/22.%20Hotel%20Reservation%20System/README.md) | **Pessimistic DB Locks / etcd** | Prevents concurrent overbooking of rooms during booking confirmation workflows. |
-| [**27. Digital Wallet**](file:///Users/abhinnaagarwal/Documents/system-design-notes/27.%20%20Digital%20Wallet/README.md) | **Distributed Sagas + Fencing** | Coordinates balance updates across accounts without distributed deadlock. |
-| [**31. Distributed Job Scheduler**](file:///Users/abhinnaagarwal/Documents/system-design-notes/31.%20Distributed%20Job%20Scheduler/README.md) | **etcd Leases & Watches** | Active-passive scheduler leader election and job execution state tracking. |
+| [**07. Unique-Id Generator**](../07.%20Unique-Id%20Generator/Readme.md) | **Twitter Snowflake (64-bit)** | Central-free ordered ID generation; 4,096 IDs per ms per node. |
+| [**19. Distributed Message Queue**](../19.%20Distributed%20Message%20Queue/README.md) | **KRaft / ZooKeeper** | Metadata controller, partition leader election, and broker cluster registration. |
+| [**22. Hotel Reservation System**](../22.%20Hotel%20Reservation%20System/README.md) | **Pessimistic DB Locks / etcd** | Prevents concurrent overbooking of rooms during booking confirmation workflows. |
+| [**27. Digital Wallet**](../27.%20%20Digital%20Wallet/README.md) | **Distributed Sagas + Fencing** | Coordinates balance updates across accounts without distributed deadlock. |
+| [**31. Distributed Job Scheduler**](../31.%20Distributed%20Job%20Scheduler/README.md) | **etcd Leases & Watches** | Active-passive scheduler leader election and job execution state tracking. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   etcd Architecture & Mechanics: [`coding-practice: coordination/etcd.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/coordination/etcd.md)
-*   Consensus (Raft vs Paxos): [`coding-practice: distributed-systems/consensus-raft-vs-paxos.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/distributed-systems/consensus-raft-vs-paxos.md)
-*   Clocks & Ordering in Distributed Systems: [`coding-practice: distributed-systems/clocks-and-ordering.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/distributed-systems/clocks-and-ordering.md)
-*   Distributed Transactions & Sagas: [`Core Concepts/Distributed Transactions/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Distributed%20Transactions/README.md)
+*   etcd Architecture & Mechanics: [`coding-practice: coordination/etcd.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/coordination/etcd.md)
+*   Consensus (Raft vs Paxos): [`coding-practice: distributed-systems/consensus-raft-vs-paxos.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/distributed-systems/consensus-raft-vs-paxos.md)
+*   Clocks & Ordering in Distributed Systems: [`coding-practice: distributed-systems/clocks-and-ordering.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/distributed-systems/clocks-and-ordering.md)
+*   Distributed Transactions & Sagas: [`Core Concepts/Distributed Transactions/README.md`](../Core%20Concepts/Distributed%20Transactions/README.md)

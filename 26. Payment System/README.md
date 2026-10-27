@@ -1,5 +1,9 @@
 # Chapter 26: Design a Mission-Critical Payment System (Stripe / PayPal / Square)
 
+## Guarantees and assumptions
+Payment acceptance, PSP authorization/capture and ledger posting have separate commit points. Durable payment/provider keys support retries and reconciliation. Ledger posting atomically validates positive minor-unit amounts and balanced per-currency entries before publishing immutable POSTED records.
+**Principal IC exercise:** Capture succeeds but its reply is lost: prove that recovery neither double-charges nor posts money without verifiable provider evidence.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Designing Data-Intensive Applications (Martin Kleppmann)](https://dataintensive.net/)
@@ -182,7 +186,7 @@ When a buyer purchases a $100 item from a merchant with a $10 platform fee:
 └───────────────────────────────────┴───────────────┴────────────────┴───────────────────┘
 ```
 
-### 6.3 Relational SQL Schema with Zero-Balance Invariant
+### 6.3 Relational SQL Skeleton and the Posting Boundary
 
 ```sql
 -- 1. Chart of Accounts Table
@@ -199,7 +203,8 @@ CREATE TABLE journal_entries (
     entry_id UUID PRIMARY KEY,
     transaction_ref VARCHAR(128) NOT NULL UNIQUE, -- Idempotency key from Payment Order
     description TEXT NOT NULL,
-    posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    status VARCHAR(8) NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'POSTED')),
+    posted_at TIMESTAMPTZ
 );
 
 -- 3. Individual Postings (Legs) - APPEND ONLY, NO UPDATE, NO DELETE ALLOWED
@@ -207,13 +212,30 @@ CREATE TABLE journal_postings (
     posting_id BIGSERIAL PRIMARY KEY,
     entry_id UUID NOT NULL REFERENCES journal_entries(entry_id),
     account_id UUID NOT NULL REFERENCES accounts(account_id),
-    amount_cents BIGINT NOT NULL, -- Stored in CENTS as BIGINT (Fixed-Point)
+    amount_cents BIGINT NOT NULL CHECK (amount_cents > 0), -- Minor units; cents only for cent-based currencies
     direction VARCHAR(6) NOT NULL CHECK (direction IN ('DEBIT', 'CREDIT')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_postings_account ON journal_postings(account_id, created_at);
 ```
+
+Post ledger entries through a restricted procedure or deferred constraint triggers. Row-level `CHECK` constraints validate individual amounts; the posting transaction enforces the cross-row balance:
+1. Locks the journal header, rejects an already-posted mutation, and validates all legs/accounts, positive minor-unit amounts, and currency scale.
+2. Requires at least two legs and equal debit/credit totals **separately for each account currency**; cross-currency exchange needs balanced clearing/FX legs, not sums across currencies.
+3. Marks the entry `POSTED` and sets `posted_at` only after validation. Readers include only POSTED entries.
+4. Denies direct application DML bypassing this boundary; triggers/permissions prohibit adding, changing, or deleting legs of posted entries. Corrections are new balanced reversal entries.
+
+The unique `transaction_ref` makes posting retries return the existing outcome; reject reuse with a different payload. PostgreSQL behavior is release-sensitive: see [PostgreSQL CHECK limitations](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-CHECK-CONSTRAINTS). This is an enforcement contract, not executable posting-procedure DDL.
+
+### Crash/recovery timeline: PSP and ledger
+| Crash point | Durable evidence | Recovery / retry outcome |
+| :--- | :--- | :--- |
+| Payment intent committed, before PSP request | Payment ID, immutable amount/currency, provider key | Outbox worker sends the same keyed request; no new payment ID. |
+| PSP capture succeeded, response/ACK lost | Local CAPTURE_PENDING; provider may already have captured | Query/retry using the same provider key within its supported scope; reconcile by provider reference. Do not mark FAILED or charge with a fresh key. |
+| Capture known, before ledger commit | Durable provider capture reference | Retry restricted balanced posting with the same transaction reference. |
+| Ledger commit succeeded, client ACK lost | POSTED entry and committed payment state/outbox | Return existing result; publish deduplicated downstream events. No second posting. |
+| Refund succeeded, ACK lost | Durable refund ID/provider key | Resolve that refund before another refund attempt; reversal entries remain separately identifiable. |
 
 > [!IMPORTANT]
 > **Staff Rule on Money Representation:** Never use floating-point types (`FLOAT`, `DOUBLE`) for financial amounts. IEEE 754 floating-point numbers cannot accurately represent base-10 decimals (`0.1 + 0.2 = 0.30000000000000004`). Always store currency as **fixed-point integers in the smallest unit** (`BIGINT` in cents or micro-units) alongside an ISO 4217 three-letter currency code (`USD`, `EUR`).

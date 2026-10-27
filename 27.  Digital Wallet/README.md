@@ -1,5 +1,9 @@
 # Chapter 27: Design an Ultra-High-Throughput Digital Wallet (1M+ TPS, Event Sourcing, Raft, TC/C)
 
+## Guarantees and assumptions
+Financial commit ACK follows a durable Raft quorum with stable-storage barriers. Cross-shard transfers retain a transfer ID and monotonic TCC decision; recovery retries Confirm after a committed decision and resolves stranded holds.
+**Principal IC exercise:** Deliver Cancel before a delayed Try, then crash the coordinator after commit decision but before Confirm ACK; demonstrate no late hold and no double credit.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Designing Data-Intensive Applications (Martin Kleppmann)](https://dataintensive.net/)
@@ -147,7 +151,7 @@ Unlike 2PC, which holds low-level database locks, TC/C operates at the **busines
    - Both shards confirm readiness.
    - Move $100 from hold into Account $B$.
 3. **Cancel Phase (Failure / Abort):**
-   - If Account $B$ is frozen or unreachable, release the $100 from the pending hold back to Account $A$.
+   - Before a commit decision, if Account $B$ cannot prepare, durably choose CANCEL and release Account $A$'s hold idempotently. After a durable CONFIRM decision, timeout is not permission to cancel: retry Confirm to completion.
 
 ```mermaid
 sequenceDiagram
@@ -169,7 +173,7 @@ sequenceDiagram
     end
 
     alt Both Try steps succeeded
-        Coord->>Coord: Update Status: 'CONFIRMING'
+        Coord->>Coord: Durably choose CONFIRM (monotonic decision)
         par Phase 2a: Confirm
             Coord->>ShardA: Confirm: Release PendingHold
             ShardA-->>Coord: OK
@@ -180,9 +184,11 @@ sequenceDiagram
         Coord->>Coord: Update Status: 'SUCCESS'
         Coord-->>Client: Transfer Complete ($100 moved)
     else Any Try step failed
-        Coord->>Coord: Update Status: 'CANCELLING'
+        Coord->>Coord: Durably choose CANCEL (only before CONFIRM decision)
         Coord->>ShardA: Cancel: Refund $100 from PendingHold back to Balance
         ShardA-->>Coord: OK
+        Coord->>ShardB: Cancel: Release preparation / record tombstone
+        ShardB-->>Coord: OK
         Coord->>Coord: Update Status: 'FAILED'
         Coord-->>Client: Transfer Aborted
     end
@@ -191,6 +197,20 @@ sequenceDiagram
 ### 5.2 The Out-of-Order Execution Trap
 In distributed networks, packet reordering can cause a `Cancel` request to arrive at Shard $A$ **before** the `Try` request!
 * **Staff Defense:** Every shard maintains a persistent `phase_status` table. If a shard receives `Cancel` for an unknown transaction ID, it writes a tombstone record with `is_out_of_order = true`. When the delayed `Try` request subsequently arrives, it inspects the flag, rejects the operation immediately, and prevents phantom funds deduction!
+
+Each participant atomically records `(transfer_id, payload_hash, phase)` with its balance/hold change. Permitted transitions are `ABSENT → TRIED → CONFIRMED` or `ABSENT/TRIED → CANCELLED`; terminal states never reverse. Repeated phases return the stored result, mismatched payloads are rejected, and CANCEL-before-TRY creates a durable terminal tombstone (anti-suspension). Confirmation requires evidence of the coordinator's durable commit decision. Cancellation is sent to **all** prepared/possibly-prepared participants, including B.
+
+The recovery worker owns stranded holds and retries the durable decision. Hold expiry alone cannot release funds after a possible commit; consult/resolve the coordinator decision first. Retain tombstones and retry identities beyond the maximum delayed-message/replay horizon, or reject old epochs permanently.
+
+### Crash/recovery timeline: cross-shard transfer
+| Crash point | Durable evidence | Recovery / retry outcome |
+| :--- | :--- | :--- |
+| Try(A) held funds, ACK lost | A's TRIED record and hold | Repeat Try with the same transfer ID; return existing hold, do not debit twice. |
+| Cancel arrives before delayed Try | CANCELLED tombstone | Reject late Try; no suspended hold is created. |
+| Both participants prepared, coordinator crashes | TRYING or durable terminal decision | Recovery resolves one durable monotonic decision; participants do not guess from timeouts. |
+| CONFIRM chosen; B credits, ACK lost | Coordinator CONFIRM and B's CONFIRMED record | Retry Confirm on A and B; B returns stored outcome. Never refund A because B timed out. |
+| Durable quorum commit, client ACK lost | Committed transfer/phase ID in replicated log | New leader returns recovered result for that ID; replay applies each phase once. |
+| Node/power loss before durable quorum | No success ACK permitted | Recover committed prefix; an uncommitted attempt may be retried under the same ID. |
 
 ---
 
@@ -233,7 +253,7 @@ flowchart TD
 
 ## 7. Scaling to 1M+ TPS: Sharded Raft Groups & Storage Optimization
 
-To achieve 1M+ TPS with absolute durability, we cannot store the event log in a central database or external Kafka cluster (network RTTs alone would introduce 5–10ms per transfer).
+For the 1M+ TPS target, compare sharded replicated logs, database and Kafka designs using the same workload, durable-commit latency and failure model.
 
 We deploy **Sharded Raft Groups with Local Append-Only Storage**:
 
@@ -261,9 +281,9 @@ flowchart TD
 
 ### 7.1 Local Storage Physics: `mmap` + RocksDB
 Inside each Raft node:
-1. **Memory-Mapped Append-Only Log (`mmap`):** Events are appended to disk using the Linux `mmap` system call. The OS caches log pages in physical RAM and asynchronously flushes dirty pages to NVMe SSD in the background, achieving **sub-microsecond write latency**!
+1. **Memory-Mapped Append-Only Log (`mmap`):** Persist Raft state/log entries before the corresponding protocol responses (Raft Figure 2), using fsync/msync or an equivalent storage barrier with correct ordering and power-loss-safe hardware. The leader acknowledges a financial commit after the durable quorum and commit/application boundary. Track memory append, replication RTT, fsync/group commit and client commit latency separately.
 2. **RocksDB Embedded State Store:** Account balances are maintained in an embedded **RocksDB LSM-Tree** on the local host. Reads hit the block cache; writes append sequentially to the memtable.
-3. **Periodic Distributed Snapshots:** Every 100,000 transactions, the state machine freezes a point-in-time RocksDB snapshot and uploads the compressed binary checkpoint to Amazon S3. When a node restarts, it loads the snapshot in 5 seconds and only replays the small tail of events committed after the snapshot!
+3. **Periodic Distributed Snapshots:** For example, snapshot every 100,000 transactions. Record the applied Raft index/term and checksum, durably publish the snapshot before truncating covered logs, and replay the committed tail on recovery. Size snapshot transfer and tail replay against the 5-second restore target.
 
 ---
 
@@ -271,9 +291,9 @@ Inside each Raft node:
 
 ### Curveball 1: "The leader of Raft Group 1 crashes midway through executing Phase 2 (Confirm) of a $50,000 transfer. What happens to the money?"
 * **Staff Answer:**
-  1. **Raft Term Election:** The two surviving follower nodes detect missed heartbeats and elect a new Raft leader within $150\text{ms}$.
-  2. **Consensus Commit Invariant:** Because the prior leader committed the transaction to the Raft log before responding, the log entry was replicated to at least 1 follower. The new leader's log contains the exact transaction.
-  3. **Coordinator Retry:** The Saga coordinator observes a temporary network timeout, polls the new leader using the original `idempotency_key`, and the new leader confirms the transaction was already applied. **Zero money is lost or duplicated.**
+  1. **Raft Term Election:** Surviving nodes elect a leader when a communicating quorum exists. The $150\text{ms}$ recovery target depends on election timeouts and network conditions.
+  2. **Consensus Commit Invariant:** An acknowledged entry was committed on the configured durable majority. Raft election/log rules preserve that committed prefix under the stated storage and failure assumptions; an uncommitted entry may disappear.
+  3. **Coordinator Retry:** Query/retry with the original transfer/phase `idempotency_key`. The new leader recovers the recorded outcome; after a durable CONFIRM decision the coordinator retries remaining Confirms. Deduplication prevents repeated credit/debit within the retained identity horizon.
 
 ### Curveball 2: "A user tries to drain their account by rapidly firing 50 concurrent $1,000 transfer requests in parallel when their balance is only $1,000. How do you prevent overdraft?"
 * **Staff Answer:**

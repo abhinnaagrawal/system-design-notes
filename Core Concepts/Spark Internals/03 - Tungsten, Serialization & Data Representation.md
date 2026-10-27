@@ -1,7 +1,7 @@
 # 03 - Tungsten, Serialization & Data Representation
 
 **Priority:** P0
-**Versions:** 1.4 (phase 1) -> 4.2
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [02 - Memory Management & Disk Spilling](02%20-%20Memory%20Management%20&%20Disk%20Spilling.md), [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md), [06 - Query Planning (Catalyst & AQE)](06%20-%20Query%20Planning%20%28Catalyst%20&%20AQE%29.md), [Appendix C - The Spark Acceleration Landscape](Appendix%20C%20-%20The%20Spark%20Acceleration%20Landscape.md) (what replaces Tungsten's hot loops in native engines).
 
@@ -151,10 +151,21 @@ Mechanics:
 
 - `WholeStageCodegenExec` wraps a codegen-able subtree; `CodeGenerator` emits Java; Janino compiles it at runtime.
 - Generated code keeps primitive values in locals/registers, avoids boxing, and inlines predicate checks.
-- **Not everything fuses**: operators with blocking behavior (`Sort`, `Exchange`), unsupported expressions, and boundaries (Python UDFs, RDD interop) split the pipeline into multiple codegen stages - which is why the SQL tab shows *several* `WholeStageCodegen (n)` boxes rather than one.
+- **Codegen boundaries:** Exchanges, unsupported operators/expressions, Python evaluation and RDD interop can divide generated stages. `SortExec` implements `BlockingOperatorWithCodegen` in 3.5.0 and can fuse while consuming input before producing sorted output.
 - Fallback: if a subtree can't be generated, it runs interpreted (`spark.sql.codegen.wholeStage=false` disables the whole thing for debugging). Long generated methods are split to stay under JVM method-size limits.
 
-Interview trap: *"Codegen makes everything faster."* No - it removes per-row overhead in **CPU-bound, expression-heavy** pipelines. I/O-bound scans, spills, shuffles, and Python boundaries don't get faster from codegen; that's why the modern bottleneck story moved to shuffle, readers, and planning.
+**Inspecting codegen.** In a Spark 3.5.0 SQL session, disable AQE temporarily to inspect pre-execution codegen; restore it afterward:
+
+```sql
+SET spark.sql.adaptive.enabled=false;
+EXPLAIN CODEGEN SELECT id + 1 AS x FROM range(0, 100, 1, 2) WHERE id > 10;
+EXPLAIN CODEGEN SELECT id FROM range(0, 100, 1, 2) ORDER BY id DESC;
+SET spark.sql.adaptive.enabled=true;
+```
+
+The first can fuse Range/Filter/Project. The second requires global ordering through a range exchange and sort; its generated subtree can include `SortExec`. The subtree listing and generated sorter calls show the fusion boundaries. Exchanges materialize data; `SortExec` can participate in codegen while blocking for input.
+
+Codegen reduces per-row CPU overhead. I/O, spilling, shuffle and Python evaluation have separate execution paths and costs.
 
 ---
 
@@ -187,7 +198,7 @@ Rules of thumb:
 |----------|----------------------------------|--------------------|
 | Python UDF (row-at-a-time) | Data leaves the JVM per row | Arrow batching / Pandas UDFs |
 | Unsupported expression/operator | No codegen template | Interpreted fallback; still `UnsafeRow` |
-| Aggregation with map-side combine | Tungsten shuffle writer cannot compare keys | Classic sort writer (chapter 04) |
+| RDD dependency mapSideCombine=true | Key combining uses the classic sort writer | SQL partial HashAggregate runs upstream of the exchange with independent writer selection (chapter 04) |
 | Sort under `RepartitionByExpression` | Planner-specific | Removed in 3.4 [RN 3.4] |
 | I/O (Parquet/ORC scans) | Bytes still must be decoded | Vectorized readers (chapter 07) |
 | Shuffle network | Bytes still travel | Contiguous fetch / push-based shuffle (chapter 04) |
@@ -203,7 +214,7 @@ Tungsten is not magic; it has a small set of failure modes that are easy to reco
 
 | Symptom | Cause | What to do |
 |---------|-------|------------|
-| "Whole stage codegen" absent in SQL tab | Codegen disabled/unsupported subtree (UDF, blocking op) | Inspect the plan; replace UDFs with built-ins where possible |
+| "Whole stage codegen" absent in SQL tab | Codegen disabled/unsupported subtree or adaptive display | Inspect the final plan's generated subtrees and supported operators |
 | Codegen compile error at runtime | Unsupported expression/code size | Falls back to interpreted (slower but correct); check driver logs |
 | Wrong data after custom `UnsafeRow` handling | Retained a pointer into a reused buffer | `copy()` before storing past the operator call |
 | Kryo `ClassNotFoundException` / registration error | Classes not registered / version mismatch | Register classes; keep driver/executor jars identical |
@@ -218,7 +229,7 @@ Most of this chapter can be verified directly in the UI without reading any code
 
 | Signal | Where | Meaning |
 |--------|-------|---------|
-| `WholeStageCodegen (n)` boxes in the plan | SQL tab -> plan visualization | How many fused pipelines; gaps mark boundaries (Exchange/Sort/UDF) |
+| `WholeStageCodegen (n)` boxes in the plan | SQL tab -> plan visualization | Generated stages; distinguish Exchange/unsupported-codegen boundaries from blocking SortExec |
 | Codegen compile time in driver logs | Driver log | One-time per query shape (Janino); repeated shapes add up |
 | GC time drop after 1.5/2.0 | Executors tab | The object->bytes shift visible in production |
 | Spill bytes drop with Tungsten sort | Stage page | Fewer/leaner allocations, better packing - but not zero (spills still happen) |
@@ -264,7 +275,7 @@ The three-pillar model only gets stronger over time; the version history is most
 | 3 | How are variable-length fields stored? | Offset and length (two 32-bit ints) in one 8-byte fixed slot; payload in the variable-length region |
 | 4 | Why does sort move pointers, not records? | Avoids copying large byte buffers; pointer array fits cache better |
 | 5 | What does whole-stage codegen generate? | One Java function per fusable pipeline; removes virtual `next()` calls and boxing |
-| 6 | Why do multiple `WholeStageCodegen` boxes appear? | Blocking/unsupported operators (Exchange, Sort, UDFs) break fusion into separate stages |
+| 6 | Does blocking Sort imply no codegen? | No; SortExec supports blocking codegen. Exchange materialization and unsupported codegen are different boundary reasons |
 | 7 | When does codegen *not* help? | I/O-bound scans, shuffles/network, Python boundaries, small queries where compile cost dominates |
 | 8 | Why does the tungsten shuffle writer need relocation-capable serializers? | It moves raw bytes between pages and spills without deserializing (chapter 04) |
 | 9 | Kryo vs Java serialization? | Kryo is faster/smaller; registration recommended, and required for tungsten-sort eligibility |

@@ -2,6 +2,8 @@
 
 **Sources:** Databricks engineering blogs, apache.org release notes and docs, the papers and books listed in [SOURCES.md](SOURCES.md). Every number below is attributed to the source that measured it.
 
+**Mechanism baseline:** Apache Spark **3.5.0**.
+
 **See also:** [Appendix C - The Spark Acceleration Landscape](Appendix%20C%20-%20The%20Spark%20Acceleration%20Landscape.md) - what happens after the JVM-era optimizations: native engines and vendor runtimes.
 
 **TL;DR:** Spark's bottleneck kept moving, and each era fixed the previous one's bottleneck. If you remember one sentence: **"Shuffle got cheaper (1.x), rows got cheaper (2.x), plans got smarter (3.x), and the engine got open (4.x)."**
@@ -10,7 +12,7 @@
 |-----|-------|-------------------------|
 | 1.x | Make it scale | Sort shuffle + unified memory: jobs stopped dying on file handles, spills, and GC |
 | 2.x | Make the CPU cheap | UnsafeRow + whole-stage codegen: per-row costs dropped 10-100x |
-| 3.x | Make plans smart | CBO -> AQE: re-plan at every shuffle with measured data; partition tuning became obsolete |
+| 3.x | Make plans smart | CBO -> AQE: measured sizes reduce manual partition tuning, but initial parallelism still matters |
 | 4.x | Open the engine | ANSI by default, VARIANT, Arrow by default, Spark Connect, real-time streaming |
 
 How to use this doc: read the story once, then revise from **Section 8 (Cheat Cards)**, **Section 9 (Say It In 30 Seconds)**, and **Section 10 (Drills)**. The same facts repeat in all three formats on purpose.
@@ -53,7 +55,7 @@ One memorable fact per version, with its number where one exists. Don't try to m
 | 2.3 | CPU | Vectorized ORC reader; CBO histograms; Zstd; spill-reader read-ahead | ORC scan **2-5x** |
 | 3.0 | Runtime | **AQE** (coalesce partitions, switch joins, handle skew), **DPP**, local shuffle reader, contiguous block fetch | **~2x** vs 2.4 on TPC-DS; AQE up to **8x** per query; DPP **2-18x** on 60/102 queries (Databricks, 2020) |
 | 3.1 | Runtime | Host-local shuffle reads without shuffle service; rules that delete unnecessary shuffles/sorts; char/varchar | "Fewer Exchanges in the plan" |
-| 3.2 | Runtime | **Push-based shuffle** (merge at the shuffle service); **AQE on by default**; RocksDB state store; ANSI GA | "AQE default = tuning knob retired" |
+| 3.2 | Runtime | **Push-based shuffle** (merge at the shuffle service); **AQE on by default**; RocksDB state store; ANSI GA | "AQE reduces tuning, not initial-sizing responsibility" |
 | 3.3 | Runtime | Runtime **Bloom filter joins**; vectorized nested Parquet; full-outer join codegen; ANSI intervals | Bloom joins up to **10x**; struct scans **~15x** (Databricks, 2022) |
 | 3.4 | Runtime | Spark Connect Python client; AQE caches partitioning/ordering and reuses stage stats | "Stats computed once, reused" |
 | 3.5 | Open | Spark Connect GA (Scala/Go clients); Arrow Python UDFs | "Python UDFs without Pandas conversion" |
@@ -73,10 +75,10 @@ One memorable fact per version, with its number where one exists. Don't try to m
 |-----------|---------|-------|--------------|
 | 1. Sort shuffle | 1.2 (default) | Partition records by reduce id, sort, spill + merge; write one data file + one index file per map task | "Trade CPU sorting for bounded memory and O(1) files" |
 | 2. Tungsten shuffle | 1.4-1.5 | Write serialized bytes; sort *pointers* by partition id (radix, no object dereference); spill binary runs; reuse serialized upstream data without round-tripping through objects | "Never deserialize just to sort" |
-| 3. Local reads | 3.0-3.1 | Contiguous block fetches (one request per range, not per block); AQE local shuffle reader skips the network when data is already correctly partitioned; host-local disk reads without a shuffle service | "Don't move data you don't have to" |
+| 3. Local reads | 3.0-3.1 | Contiguous fetches; AQE locality-aware reads when downstream shuffle partitioning is no longer needed (e.g. SMJ -> BHJ); host-local disk reads | "Reuse written shuffle output; reduce remote fetches, not erase shuffle" |
 | 4. Push-based merge | 3.2 | Mappers push outputs to the shuffle service, which merges blocks per partition; reducers fetch fewer, larger blocks | "Merge before fetch, not after" |
 
-**Detail that earns points:** the tungsten writer is only chosen when the shuffle has **no map-side combine** (no aggregation), the serializer supports relocation, and partition counts are moderate; otherwise Spark falls back to the classic sort writer or the bypass writer. So "tungsten-sort" is a *path*, not a global mode.
+**Writer selection:** Dependency `mapSideCombine=true` (e.g. RDD reduceByKey) selects classic sort. Otherwise <=200 partitions selects bypass first; unsafe shuffle then requires a relocatable serializer and eligible partition count. SQL partial HashAggregate runs upstream, normally leaving that flag false.
 
 **Integrity (4.x):** shuffle streams got CRC32C checksums (4.0), and 4.1 can rerun an entire map stage when checksums reveal corruption instead of failing the job or returning bad data.
 
@@ -90,7 +92,7 @@ One memorable fact per version, with its number where one exists. Don't try to m
 
 **The fix (Unified Memory Manager, 1.6):**
 - One shared region; execution and storage **borrow from each other**.
-- The asymmetry is the interview point: **execution can evict cached blocks (LRU), but storage can never evict execution.** Why? Spilled execution data *will* be read back from disk; cached data *may* never be touched again. The cost of being wrong is asymmetric.
+- Execution can evict cached storage **above R = M × storageFraction**; occupied storage within R is protected. Active execution retains its allocation until release or spill. See chapter 02's spillability matrix.
 - Memory is handed out in pages per task, with per-task fair shares so one giant task can't starve the pool.
 - Off-heap: usable for execution from 1.6, for storage from 2.0.
 
@@ -131,9 +133,11 @@ One memorable fact per version, with its number where one exists. Don't try to m
 **What CBO added (2.2-2.3):** statistics collection, cardinality estimation for filters/joins/aggregates, dynamic-programming join reordering, star-schema heuristics (join dimensions first so broadcast works), histograms (2.3).
 
 **What AQE added (3.0) - three moves:**
-1. **Coalesce shuffle partitions:** start with many partitions, merge adjacent small ones at runtime (target ~64 MB). This retired the single most infamous tuning knob, `spark.sql.shuffle.partitions`.
+1. **Coalesce shuffle partitions:** start with enough partitions, merge adjacent small ones at runtime. In 3.5.0, `coalescePartitions.parallelismFirst=true` prioritizes parallelism/minimum size instead of simply targeting the 64 MiB advisory size; false makes advisory size the principal target. Initial `spark.sql.shuffle.partitions` still matters.
 2. **Switch join strategies:** sort-merge join -> broadcast hash join when the build side turns out small enough, measured not guessed.
 3. **Skew join handling:** detect partitions that are much larger than the median, split them into sub-partitions, and mirror the matching side. (Docs defaults: skewed if > 5x median and > 256 MB.)
+
+Join switching uses `spark.sql.adaptive.autoBroadcastJoinThreshold` (falls back to static `autoBroadcastJoinThreshold` when unset). Skew-join splitting handles joins; hot GROUP BY keys use partial aggregation or salting with a correct second merge. Local shuffle reading reuses materialized shuffle output.
 
 **What runtime filters added (3.3):** during a broadcast join, build a **Bloom filter** on the join key of the small side and push it into scans of the big side - row-level pruning *inside* the partitions that DPP could not eliminate. DPP prunes partitions/files; Bloom filters prune rows. Measured up to ~10x on TPC-DS, biggest gains when storage is untuned or stats are missing.
 
@@ -189,8 +193,8 @@ Revision works best in layers: first recall the decision, then the condition tha
 
 | Path | Chosen when | Essence |
 |------|-------------|---------|
-| Bypass merge-sort | Very few partitions | Write per-partition files, then concatenate |
-| Classic sort writer | Aggregation/combine or incompatible serializer | Sort + combine + spill + merge |
+| Bypass merge-sort | Dependency mapSideCombine=false and <=200 partitions by default | Write per-partition files, then concatenate (SQL partial aggregation can precede this) |
+| Classic sort writer | Dependency combine, or neither bypass nor unsafe eligible | Sort + optional combine + spill + merge |
 | Tungsten (unsafe) writer | No combine, relocatable serializer, moderate partition counts | Sort serialized pointers by partition id, spill binary runs |
 
 ### Card B - Memory managers
@@ -199,7 +203,7 @@ Revision works best in layers: first recall the decision, then the condition tha
 |---|------------------|----------------|
 | Split | Fixed execution/storage fractions | One pool, soft boundary |
 | Borrowing | None | Both directions |
-| Eviction | N/A (spills) | Execution can evict cached storage; never the reverse |
+| Eviction | N/A (spills) | Execution can evict storage above R only; occupied storage within R protected; never evict active execution |
 | Tuning | Required | Mostly unnecessary |
 
 ### Card C - Data representation
@@ -230,7 +234,7 @@ Revision works best in layers: first recall the decision, then the condition tha
 ## 10. Say It In 30 Seconds (interview openers)
 
 **Q: Walk me through Spark's performance evolution.**
-"Four eras. 1.x made the engine survive scale: sort-based shuffle replaced hash shuffle's file explosion, and unified memory ended the static execution/storage split. 2.x attacked CPU: UnsafeRow binary representation plus whole-stage codegen cut per-row costs by 10-100x. 3.x moved intelligence to runtime: CBO first, then AQE, which re-plans at every shuffle using measured partition sizes, so partition tuning and many join-strategy hints became obsolete. 4.x opened the engine: ANSI by default, VARIANT for semi-structured data, Arrow for Python, and Spark Connect as the client-server boundary."
+"The early performance campaigns build on each other: 1.x addressed shuffle and memory scale; 2.x reduced per-row CPU cost with binary rows and generated loops; 3.x added runtime AQE decisions. Later work extends SQL types, Python/Arrow integration and execution-engine interfaces."
 
 **Q: Why is AQE considered the biggest 3.x change?**
 "Because it fixes the failure mode of the storage-compute-separated world: you don't know your data until you touch it. The exchange is a natural materialization point, so AQE measures per-partition sizes there and re-plans - coalescing partitions, switching joins, splitting skew. It converted a tuning problem into an automatic one."
@@ -247,13 +251,13 @@ Revision works best in layers: first recall the decision, then the condition tha
 | 1 | Why did sort shuffle replace hash shuffle? | M x R files and buffers per task became untenable; sorting trades CPU for bounded memory and O(1) files, and enables map-side combine |
 | 2 | When is tungsten-sort chosen? | No map-side combine, relocatable serializer, moderate partition counts - otherwise fallback writers |
 | 3 | The cache-aware sort trick? | Keep sort keys next to pointers / radix sort on partition id; never dereference objects during sort (3x) |
-| 4 | Why can execution evict storage but not the reverse? | Spilled execution data always gets read back; cached data may never be reused |
+| 4 | Can execution evict all cache? | No; occupied storage within R is protected; above-R storage may be evicted, while active execution must release/spill its own structures |
 | 5 | What did whole-stage codegen buy? | No virtual dispatch or intermediate objects within a pipeline; per-row costs dropped up to 100x on measured benchmarks |
 | 6 | Why can't codegen fuse across a shuffle? | A shuffle is a materialization boundary; the data must be written and reread - which is also AQE's opportunity |
 | 7 | What does AQE fix that CBO can't? | Stale/missing statistics: AQE decides at runtime with measured partition sizes |
 | 8 | AQE's three original moves? | Coalesce shuffle partitions, switch join strategy, handle skew joins |
 | 9 | DPP vs Bloom filters? | DPP prunes partitions/files via the join key; Bloom filters prune rows inside surviving partitions |
-| 10 | Local shuffle reader vs host-local reads? | Local reader is an AQE *plan rewrite* that skips the shuffle entirely; host-local read is a *fetch path* reading local disk without the shuffle service |
+| 10 | Local shuffle reader vs host-local reads? | AQE rewrites read partitions to reuse shuffle output with better locality; host-local reads fetch blocks directly from local disk |
 | 11 | What broke by default in Spark 4.0? | ANSI mode is on: invalid casts now throw instead of returning NULL (plus JDK 17 / Scala 2.13 floors) |
 | 12 | 4.1 VARIANT shredding trade-off? | 8x-30x faster reads by extracting typed fields; 20-50% slower writes |
 | 13 | What is Real-Time Mode? | 4.1 continuous Structured Streaming for stateless Scala queries: sub-second, single-digit ms latency |

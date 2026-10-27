@@ -1,5 +1,7 @@
 # Pattern 02: Dealing with Contention
 
+> **Concurrency contract:** Conditional mutations serialize updates; affected-row counts identify successful transitions. Row locks last through transaction end, and leased owners use fencing at the protected resource.
+
 > **The System Design Interview Lens:** Contention occurs when multiple concurrent requests attempt to mutate the exact same finite resource at the exact same millisecond (e.g., the last concert ticket on Ticketmaster, inventory in a flash sale, hotel room booking, or bidding in an online auction). A Staff engineer does not jump to heavy distributed locks (Redis Redlock) for a simple database counter; they escalate through an architectural hierarchy of concurrency primitives, evaluate collision probability, and handle hot-spot database lock contention.
 
 ---
@@ -69,7 +71,7 @@ UPDATE inventory
 SET available_count = available_count - 1 
 WHERE item_id = 'CONCERT_101' AND available_count > 0;
 ```
-* **How it works:** The database acquires an exclusive row latch, evaluates `available_count > 0`, decrements if true, and releases the latch immediately.
+* **How it works:** A conditional UPDATE atomically checks and modifies the row under the database's concurrency rules. Short-lived internal latches differ from transactional row locks: conflicting updates are typically serialized until transaction end (statement end in autocommit). Check affected rows; no row updated means the precondition did not hold.
 * **Application logic:** Check the rows affected:
   * If `rows_affected == 1`: Success! Proceed to payment.
   * If `rows_affected == 0`: Sold out! Return clean out-of-stock response without rolling back a complex transaction.

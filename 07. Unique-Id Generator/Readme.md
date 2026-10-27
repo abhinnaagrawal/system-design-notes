@@ -1,5 +1,9 @@
 # Chapter 07: Design a Distributed Unique ID Generator (Snowflake / UUIDv7)
 
+## Guarantees and assumptions
+Worker/time/sequence IDs use exclusive worker ownership, a durable timestamp high-water mark and safe worker-ID reuse. Business-operation retries return the stored request-to-ID mapping.
+**Principal IC exercise:** Recover after a worker lease expires during a network partition without letting the old and new processes emit overlapping IDs.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -185,14 +189,14 @@ flowchart TD
     SpinWait --> GenID
     
     CheckDrift -->|Large Drift > 5ms| FailSafe{"Has Backup<br/>Worker ID?"}
-    FailSafe -->|Yes| SwitchID["Switch to Alternate Worker ID<br/>Continue generating safely"]
+    FailSafe -->|Yes| SwitchID["Acquire disjoint reserved ID<br/>Check durable timestamp high-water mark"]
     FailSafe -->|No| Reject["Reject with SystemClockException<br/>Emit Critical PagerDuty Alert!"]
 ```
 
 #### Production Clock Skew Defenses
-1. **Configure Slew Mode instead of Step Mode:** Configure NTP / Chrony with `makestep 0` to gradually slew clock adjustments (stretching microseconds) rather than making sudden backward jumps.
+1. **Configure Clock Policy:** In chrony 4.x, `makestep` takes threshold and update-limit arguments. Perform startup stepping before the ID service starts, then use slewing during service. Generator checks also handle hypervisor/manual clock changes. See the [chrony configuration reference](https://chrony-project.org/doc/4.6/chrony.conf.html).
 2. **Small Drift Spin-Wait ($\le 5\text{ms}$):** If the clock moved backward by a tiny delta, spin-wait or sleep until `now >= last_timestamp`.
-3. **Alternate Worker ID Failover ($> 5\text{ms}$):** If the clock moved backward significantly, the node immediately switches its 10-bit Worker ID to a pre-allocated backup ID (e.g. `Worker_ID + 512`), guaranteeing non-overlapping IDs.
+3. **Alternate Worker ID Failover ($> 5\text{ms}$):** Switching is safe only with exclusive disjoint allocation and a durable timestamp high-water mark for **each** ID. `Worker_ID + 512` works only if primaries are restricted to `0..511` and `512..1023` are reserved backups, not independently allocated primaries. Prevent overflow and repeated rollback reuse; if the backup timestamp space is unsafe/exhausted, stop rather than mint duplicates.
 
 ---
 
@@ -215,8 +219,10 @@ sequenceDiagram
     end
 
     Note over Pod: Pod crashes or terminated by K8s
-    Note over etcd: After 10s heartbeat loss, etcd expires lease.<br/>Worker ID 412 is returned to pool for reuse!
+    Note over etcd: Lease expiry revokes ownership, not timestamp history.<br/>Reuse only after old worker exclusion and durable high-water checks.
 ```
+
+Lease expiry alone cannot stop a partitioned old worker from emitting IDs. Stop generation before the local safe lease deadline, bound clock uncertainty, and fence/exclude old owners before reuse; if that cannot be guaranteed, avoid reuse or include an allocation epoch in a revised bit layout. Persist a reserved timestamp upper bound **before** emitting IDs from that range; on restart/new ownership wait past that bound (or continue with a valid logical-time design). Merely saving `last_timestamp` asynchronously after emission leaves a crash reuse window. Treat sequence overflow and exhausted backup IDs as backpressure/failure, not permission to wrap.
 
 ---
 

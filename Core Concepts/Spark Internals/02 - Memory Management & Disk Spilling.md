@@ -1,11 +1,11 @@
 # 02 - Memory Management & Disk Spilling
 
 **Priority:** P0
-**Versions:** 1.6 (unified memory) -> 4.2; pre-1.6 static memory for context
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [03 - Tungsten, Serialization & Data Representation](03%20-%20Tungsten,%20Serialization%20&%20Data%20Representation.md), [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md).
 
-**TL;DR:** Executors run fixed-size JVMs against unbounded data, so Spark needs a memory policy that (a) never crashes a task just because data is big, and (b) ends most tasks without spilling. The modern answer (1.6+, "unified memory") is: one shared pool where **execution and storage borrow from each other**, with eviction as the pressure valve - storage evicts to disk/drops, execution **never evicts - it spills to disk**. Interview skill: draw the pool layout (reserved / user / unified / off-heap), explain borrowing + eviction + spill, and diagnose "spill to disk" and "executor OOM" as different failures with different fixes.
+**TL;DR:** Executors share managed memory between execution and storage. Both borrow unused memory; execution can evict cached storage **above protected R**, while active execution structures release or spill their own data. Draw reserved / user / unified / off-heap regions and use the spillability matrix to diagnose memory pressure.
 
 ---
 
@@ -18,9 +18,9 @@ Two workloads use memory in opposite ways:
 
 The pre-1.6 design gave each region a **fixed fraction** of the heap. The problem: a sort-heavy stage starves while unused cache sits nearby (and vice versa). Unified memory (1.6) [S14, RN 1.6] replaced the split with:
 
-> One shared pool. Either side may borrow idle memory from the other. On pressure: **storage gives memory back (evict/drop); execution never gives memory back (it spills).**
+> One shared pool. Both sides borrow idle memory. Execution can evict occupied storage above R, but not within R; active execution must release/spill its own structures, or allocation may fail.
 
-**Memory hook:** *"Storage is a guest in execution's house: it borrows spare room, and gets evicted when the owner needs it back."*
+**Memory hook:** *"Borrow idle memory both ways; execution can evict storage above R, never the occupied protected region."*
 
 ---
 
@@ -49,8 +49,8 @@ flowchart TB
         RES["Reserved: 300 MB<br/>(safety margin, not usable)"]
         USR["User memory:<br/>(heap - 300MB) x<br/>(1 - spark.memory.fraction)"]
         subgraph SPARK["Unified Spark memory =<br/>(heap - 300MB) x spark.memory.fraction<br/>(0.6 by default)"]
-            EXE["Execution memory<br/>(sorts, joins, agg)<br/>never evicted - spills"]
-            STO["Storage memory<br/>(cache, broadcast)<br/>evictable"]
+            EXE["Execution memory<br/>(sorts, joins, agg)<br/>spill if capable; allocation may fail"]
+            STO["Storage memory<br/>(cache, broadcast)<br/>occupied within R protected from execution"]
             EXE <-->|"borrow from idle pool"| STO
         end
     end
@@ -60,13 +60,13 @@ flowchart TB
     end
     SPILL[("Local disk spills<br/>spark.local.dir")]
     EXE -->|"pressure: spill"| SPILL
-    STO -->|"pressure: evict to disk or drop"| SPILL
+    STO -->|"execution pressure: evict only above R; disk or drop"| SPILL
 ```
 
 | Config | Default | Meaning |
 |--------|---------|---------|
 | `spark.memory.fraction` | 0.6 | Share of `(heap - 300 MB)` for the unified Spark pool |
-| `spark.memory.storageFraction` | 0.5 | Minimum guarantee for storage inside the pool ("borrowable floor") |
+| `spark.memory.storageFraction` | 0.5 | Defines R = M × storageFraction: occupied storage within R is protected from execution-induced eviction |
 | `spark.memory.offHeap.enabled` / `.size` | false / 0 | Explicit off-heap pool (not sized automatically - you must set it) |
 | `spark.executor.memoryOverhead` | max(10% of executor memory, 384 MB) | Container overhead outside the JVM, for YARN/K8s physical limits |
 | `spark.local.dir` | temp dir | Where spills (and shuffle files) physically land |
@@ -82,22 +82,31 @@ flowchart TB
 | Direction | Allowed? | Mechanism |
 |-----------|----------|-----------|
 | Execution borrows free storage | Yes | Execution grabs memory not backing any block, up to the available pool |
-| Execution evicts *used* storage | Yes, if the block is evictable | Evicted block -> disk (MEMORY_AND_DISK) or dropped (MEMORY_ONLY -> recompute) |
+| Execution evicts *used* storage | Only usage above R = M × storageFraction | Evicted block -> disk (MEMORY_AND_DISK) or dropped (MEMORY_ONLY -> recompute); occupied usage within R is protected |
 | Storage borrows free execution | Yes | Idle execution memory can back cache blocks |
-| Storage reclaims its floor from execution | Only if that execution memory is free | The `storageFraction` floor is a *minimum, not a wall*: storage reclaims when execution isn't using it |
+| Storage expands toward R | Only if that execution memory is free | Active execution retains its allocation; R protects occupied cached blocks |
 | Execution gives back memory to storage | **Never while in use** | Execution instead spills its own data; shrinking active execution memory is impossible for a running sorter |
 
-That last row is the design's center of gravity: **sorts/joins cannot be "evicted"** - their intermediate state is a computation, not a cacheable block. So all pressure is absorbed by (1) evicting storage, (2) spilling execution, (3) finally failing the task. This ordering is what makes Spark's memory behavior predictable.
+The memory manager reclaims space through free-memory borrowing, cache eviction above R and spill-capable consumers. Allocation fails if these reclaim too little; the table below identifies which structures can spill.
 
 Also note: execution memory is divided **per task** dynamically (`ExecutionMemoryPool` tracks consumers; when a task asks for more memory, others may spill). Talk: "N concurrent tasks share execution memory, so `spark.executor.cores` interacts with memory sizing - more cores per executor = more simultaneous sorters competing for the same pool."
 
-**Concrete example: a 16 GiB executor under pressure.** With `spark.executor.memory=16g`, 300 MB is reserved, so the unified pool is `(16,384 - 300) MB x 0.6 ≈ 9,650 MB`; user memory is `(16,384 - 300) MB x 0.4 ≈ 6,434 MB`. Suppose cache holds 4 GB and two sorters need 6 GB. Free pool ≈ 5.65 GB; execution borrows that, then evicts ~0.35 GB of cache to reach 6 GB. No spill yet. If demand grows to 10 GB, even evicting the full 4 GB cache leaves 10 GB of execution against a 9.65 GB pool, so a sorter spills ~0.35 GB to `spark.local.dir`.
+**Example: a 16 GiB executor under pressure (3.5.0 defaults).** Reserved memory is 300 MiB, M = `(16,384 - 300) × 0.6 = 9,650.4 MiB`, and R = `4,825.2 MiB`. A 4 GiB cache occupies 4,096 MiB, entirely below R and protected from execution eviction. This leaves `M - 4,096 = 5,554.4 MiB` (~5.42 GiB) for two sorters, ignoring other consumers. A 6 GiB demand exceeds capacity by ~590 MiB; a 10 GiB demand exceeds it by ~4.58 GiB. The sorters must spill or release enough memory to continue.
 
 ---
 
 ## 5. Spilling: The Safety Valve Mechanics
 
-Every execution consumer is a `MemoryConsumer` that acquires pages from the `TaskMemoryManager` and **must implement spilling**:
+Managed page consumers use `MemoryConsumer`/`TaskMemoryManager`. Spill behavior depends on the structure:
+
+| Structure / allocation | Spillability in the 3.5.0 baseline | If memory remains unavailable |
+|------------------------|------------------------------------|-------------------------------|
+| External sorters, external aggregation maps | Spill runs and merge; hash aggregation may fall back to sort | Disk errors or allocation failures can still fail a task |
+| BHJ/SHJ build hash relations | No general external spill fallback for the build hash table | Build can OOM; change strategy/size/partitioning |
+| Giant single record or growing aggregate buffer (`collect_list`, etc.) | Spilling other records may not bound one value | Single-value allocation can fail |
+| Python objects, user heap, direct/native allocations | Outside this managed callback contract (native plugins have their own policies) | JVM/Python/native OOM or container kill |
+
+A consumer can return **zero reclaimed bytes**, causing the task memory manager to try other eligible consumers or fail the allocation. The following loop shows the **spill-capable sorter path**.
 
 ```mermaid
 flowchart LR
@@ -107,7 +116,7 @@ flowchart LR
     C --> D{"Granted?"}
     D -->|"yes (maybe after<br/>evicting storage)"| A
     D -->|"no"| E["Spill: serialize records,<br/>sort if needed, write to disk"]
-    E --> F["Continue with empty structures"]
+    E --> F["If enough reclaimed: continue<br/>otherwise allocation failure"]
     F --> G["At task end:<br/>merge all spills once"]
 ```
 
@@ -159,7 +168,7 @@ The cost model follows directly. Each spill writes its run once and reads it bac
 Behavioral facts to memorize:
 
 1. **Spill is per-record structure growth, not a timer**: structures check estimated size against an acquired threshold and *request permission* to grow - the MemoryManager, not the consumer, decides pressure.
-2. **Spills are files read back and merged**, so spilling hurts via **extra disk I/O and merge comparisons**, not via correctness. A task that spills 3 GB still finishes; it just runs hotter.
+2. **Spills are files read back and merged**, adding disk I/O and merge work without changing the intended result. Completion still requires sufficient disk, merge resources, and valid records.
 3. **Since 2.0 spilling is always on** for the sort/aggregate path (the old `spark.shuffle.spill=false` escape hatch is gone). There is no "don't spill" mode - only "spill less."
 4. **Compression applies to spills** - shuffle-path spills follow `spark.shuffle.compress`, other spills use `spark.shuffle.spill.compress` (default true) - trading CPU for disk bandwidth.
 5. **Merge at the end is the expensive part**: k spilled runs = O(n log k) merges; the tungsten shuffle path is the exception, where partition-sorted runs are concatenated without comparing keys.
@@ -172,7 +181,7 @@ Behavioral facts to memorize:
 
 Cached blocks (`MEMORY_ONLY`, `MEMORY_AND_DISK`, broadcast) live in `MemoryStore` and are **evictable**:
 
-- LRU block eviction when storage pressure arrives from execution.
+- LRU block eviction under storage pressure; execution-induced eviction is limited to storage usage above R.
 - `MEMORY_AND_DISK`: evict to disk, read back later (or in `MEMORY_AND_DISK_DESER` variants, keep serialized on disk).
 - `MEMORY_ONLY`: eviction means **loss** - the block is recomputed on next access (lineage saves us again, chapter 01).
 - **Columnar caching** (1.6) [S14]: caching `UnsafeRow` batches instead of objects made cached scans cheaper and cut memory footprint, especially for complex types (Databricks reported up to 14x faster on complex-type queries with the columnar cache, 1.6 announcement).
@@ -233,8 +242,8 @@ The memory model has been remarkably stable since 1.6: the interesting evolution
 The compressed version to say out loud:
 
 1. Unified pool = heap x 0.6 (default), storage floor = 0.5 of that; 300 MB reserved; off-heap is opt-in.
-2. Execution and storage borrow; **execution never gives back - it spills; storage gets evicted**.
-3. Spill = serialize + write + read + merge; always available, compressible, per-consumer. On the byte path, partition-sorted runs can merge by concatenation instead of comparison.
+2. Both borrow idle memory; execution evicts storage only above R; storage cannot evict active execution.
+3. Spill = serialize + write + read + merge for spill-capable consumers. Partition-sorted shuffle runs can merge by concatenation.
 4. Cached MEMORY_ONLY blocks are dropped (recompute), MEMORY_AND_DISK blocks go to disk.
 5. Executor OOM != spill: spill is normal behavior, OOM is a sizing/modeling bug. Container kill includes off-heap + overhead.
 6. More cores per executor = more concurrent sorters in the same pool - memory sizing and parallelism are one decision.
@@ -248,12 +257,12 @@ The compressed version to say out loud:
 |---|----------|--------|
 | 1 | What did 1.6 change about memory? | Unified pool with borrowing replaced fixed execution/storage fractions |
 | 2 | Why can't execution memory be evicted? | Intermediate sort/aggregate state is not recomputable as a cached block; consumers must spill instead |
-| 3 | Walk the pressure order. | Evict storage -> spill execution -> (task failure) |
-| 4 | What does `spark.memory.storageFraction` guarantee? | A minimum (borrowable floor) for storage, reclaimable only when execution isn't using it |
+| 3 | Walk the pressure order. | Borrow free memory / evict storage above R -> try capable spill consumers -> allocation/task failure if insufficient |
+| 4 | What does `spark.memory.storageFraction` guarantee? | Occupied storage within R is protected from execution eviction; it cannot reclaim active execution |
 | 5 | When is a MEMORY_ONLY block lost? | On eviction - it's dropped and recomputed from lineage |
 | 6 | Difference between Spill (Memory) and Spill (Disk)? | Memory = estimated bytes released from structures; Disk = bytes actually written - compare to see compression/overhead |
 | 7 | How do cores/executor interact with memory? | Each concurrent task competes for execution memory; more cores = less per sorter = earlier spills |
-| 8 | Why do spill-heavy tasks slow down, not fail? | Spilling is always-on machinery; cost is extra disk I/O + final merge |
+| 8 | What can fail after spilling starts? | Non-spillable values can exceed memory, disk space can run out, or remaining consumers can fail to reclaim enough memory |
 | 9 | Container OOMKilled but heap fine? | Off-heap + JVM overhead exceeded physical limit - raise `memoryOverhead`/size off-heap explicitly |
 | 10 | Where do spills land? | `spark.local.dir` (same family as shuffle files) |
 | 11 | What's the columnar cache win? | Cached `UnsafeRow` batches (1.6): less object overhead, faster scans; up to 14x on complex-type workloads (Databricks, 1.6) |

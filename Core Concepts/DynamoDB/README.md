@@ -87,7 +87,7 @@ flowchart TD
 ### 💡 Pro Tip: Monotonically Increasing IDs vs. Timestamps
 In a chat or order history table, you want items ordered chronologically. A naive instinct is to use `created_at` (a millisecond timestamp) as the Sort Key.
 *   **The Trap:** Timestamps are **not guaranteed to be unique**. If two users post in the same chat within the same millisecond, the second write will overwrite the first, causing silent data loss!
-*   **The Solution:** Use **Monotonically Increasing IDs** (such as Twitter Snowflake IDs, ULIDs, or KSUIDs). These 64-bit IDs embed a timestamp at the front (guaranteeing chronological sort order) combined with machine/sequence bits at the back (guaranteeing 100% collision-free uniqueness).
+* **The Solution:** Use time-sortable IDs with an explicit collision/clock contract. Snowflake is typically 64-bit with allocated worker/sequence bits; ULID is 128-bit and KSUID 160-bit with random payloads. Random uniqueness is probabilistic, worker IDs need safe allocation/reuse, and wall-clock order is not global causal or real-time order. Same-timestamp monotonicity requires implementation support. See [ULID specification](https://github.com/ulid/spec), [KSUID format](https://github.com/segmentio/ksuid) and the [ID generator design](../../07.%20Unique-Id%20Generator/Readme.md).
 
 ---
 
@@ -176,7 +176,7 @@ However, Cassandra's Clustering Key offers distinct capabilities compared to Dyn
 | **Multi-Column Range Keys** | ❌ **No** (Only 1 Sort Key allowed) | ✅ **Yes** (Compound clustering keys) | ✅ **Yes** (Any composite B-Tree index) |
 | **On-Disk Sort Direction** | Fixed (ASC only) | Configurable (`ASC` or `DESC`) | Configurable per index column |
 | **Write Hotspot on Timestamps** | 🟢 **Low** (Hashing spreads writes evenly) | 🟢 **Low** (Murmur3 scatters writes) | 🔴 **High** (Sequential writes hammer rightmost range) |
-| **Cross-Entity Joins & ACID** | ❌ No joins; Partition-level ACID | ❌ No joins; Row-level LWW | ✅ Full relational joins; Serializable ACID |
+| **Cross-Entity Joins & ACID** | No joins; multi-item/table ACID transactions within documented limits | No relational joins; LWW plus separately scoped batch/LWT facilities | Relational joins; SERIALIZABLE default, READ COMMITTED also supported |
 
 #### 6. Production Workarounds in DynamoDB for Cross-Entity Range Queries
 If an interview requires range queries across multiple entities in DynamoDB, propose these production patterns:
@@ -445,10 +445,11 @@ flowchart LR
 ```
 
 ### C. ACID Transactions (`TransactWriteItems`, `TransactGetItems`)
-*   Provides all-or-nothing atomicity across **up to 100 items or 4 MB of data** spanning multiple tables within the same AWS account and region.
+* Provides all-or-nothing atomicity across **up to 100 distinct items and at most 4 MB aggregate data**, spanning supported tables in the same AWS account and region. Global-table replicas apply changes asynchronously in other regions.
 *   Uses a **Two-Phase Commit (2PC)** protocol under the hood.
 *   **Capacity Cost:** Consumes **$2\times$ the WCUs and RCUs** (1 write prep phase + 1 commit phase).
-*   *Interview Script:* *"Historically, NoSQL meant giving up transactions. However, DynamoDB supports atomic multi-item transactions via `TransactWriteItems`, making it viable for ledger or financial transfers if item volume is under 100 items."*
+* *Interview Script:* "DynamoDB supports bounded multi-item transactions; I still enforce ledger invariants, idempotency and recovery within its account/region, item and size limits."
+* **Source (checked 2026-10-27):** [AWS transaction semantics and limits](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transactions.html).
 
 ### D. Time to Live (TTL)
 *   Automatically marks items with an expiration timestamp (`epoch_seconds`) and deletes them in the background.

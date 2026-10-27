@@ -4,6 +4,8 @@ This file is the single source of truth for everything cited in the Spark Intern
 
 ## Conventions
 
+**Baseline: Spark 3.5.0 / Delta protocol 3.0.0.** See [module version scope](README.md#guarantees-assumptions--version-scope).
+
 - Every claim in the docs should be traceable to a source in this file: papers, books, official docs/release notes, or engineering blogs. No claim without a provable source.
 - **IDs** (`S*` = primary sources, `RN *` = release notes, `V*` = videos, `W*` = wiki) are stable once assigned; chapters may also cite a source by name/URL directly for readability.
 - **Numbers** must state who measured them (e.g. "Databricks, 2020") and the benchmark context (TPC-DS scale, stats collected) at the point of use.
@@ -46,10 +48,22 @@ This file is the single source of truth for everything cited in the Spark Intern
 
 | ID | Source | Used For | Status |
 |----|--------|----------|--------|
-| S23 | [Delta Lake Protocol (PROTOCOL.md)](https://github.com/delta-io/delta/blob/master/PROTOCOL.md) | Log actions, snapshot construction, protocol versions, isolation | sources mapped |
+| S23 | [Delta Lake Protocol v3.0.0](https://github.com/delta-io/delta/blob/v3.0.0/PROTOCOL.md) | Log actions, txn appId/version, checkpoint pointer, protocol versions, isolation | pinned reference |
 | S24 | [Delta Lake Documentation](https://docs.delta.io/latest/index.html) | Time travel, VACUUM/OPTIMIZE behavior, retention defaults, conflict exceptions | sources mapped |
 
 ## Native Engines & Accelerators
+
+### Pinned mechanism references for corrections
+
+- [UnifiedMemoryManager v3.5.0](https://github.com/apache/spark/blob/v3.5.0/core/src/main/scala/org/apache/spark/memory/UnifiedMemoryManager.scala): protected occupied storage R and execution/storage borrowing.
+- [MemoryConsumer v3.5.0](https://github.com/apache/spark/blob/v3.5.0/core/src/main/java/org/apache/spark/memory/MemoryConsumer.java): spill callback can reclaim zero.
+- [ShuffleExchangeExec v3.5.0](https://github.com/apache/spark/blob/v3.5.0/sql/core/src/main/scala/org/apache/spark/sql/execution/exchange/ShuffleExchangeExec.scala) and [Dependency](https://github.com/apache/spark/blob/v3.5.0/core/src/main/scala/org/apache/spark/Dependency.scala): SQL partial aggregation differs from dependency mapSideCombine.
+- [SQL tuning v3.5.0](https://github.com/apache/spark/blob/v3.5.0/docs/sql-performance-tuning.md): AQE local reading, parallelismFirst/advisory size and adaptive broadcast threshold; [OptimizeSkewedJoin](https://github.com/apache/spark/blob/v3.5.0/sql/core/src/main/scala/org/apache/spark/sql/execution/adaptive/OptimizeSkewedJoin.scala) implements skew-join splitting.
+- [SortExec v3.5.0](https://github.com/apache/spark/blob/v3.5.0/sql/core/src/main/scala/org/apache/spark/sql/execution/SortExec.scala): BlockingOperatorWithCodegen.
+- [TaskSetManager v3.5.0](https://github.com/apache/spark/blob/v3.5.0/core/src/main/scala/org/apache/spark/scheduler/TaskSetManager.scala) and [job scheduling](https://github.com/apache/spark/blob/v3.5.0/docs/job-scheduling.md): counted failure abort and FIFO priority.
+- [StorageLevel v3.5.0](https://github.com/apache/spark/blob/v3.5.0/common/utils/src/main/scala/org/apache/spark/storage/StorageLevel.scala): OFF_HEAP includes disk.
+- [Streaming guide v3.5.0](https://github.com/apache/spark/blob/v3.5.0/docs/structured-streaming-programming-guide.md), [Kafka integration](https://github.com/apache/spark/blob/v3.5.0/docs/structured-streaming-kafka-integration.md), [MicroBatchExecution](https://github.com/apache/spark/blob/v3.5.0/sql/core/src/main/scala/org/apache/spark/sql/execution/streaming/MicroBatchExecution.scala): operator-dependent watermark/state, native sessions, Kafka at-least-once, offsets-before/completion-after ordering.
+- [Delta storage documentation](https://docs.delta.io/latest/delta-storage/): LogStore writer publication and storage requirements. `_last_checkpoint` supports reader snapshot discovery (S23).
 
 Vendor claims are vendor-reported unless marked as an independent paper; the appendix labels each number with its baseline and date.
 

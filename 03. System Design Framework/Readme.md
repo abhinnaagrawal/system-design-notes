@@ -1,5 +1,9 @@
 # Chapter 03: The Staff-Level System Design Interview Framework & 5-Pillar Assessment Rubric
 
+## Guarantees and assumptions
+For each mutation API, define the commit point, durable store, retry identity and recovery path. Use the workload and failure model to choose components.
+**Principal IC exercise:** Choose one ambiguous timeout in your design and specify the recovery owner, reconciliation evidence, and business-visible outcome.
+
 **Sources & Foundational References:**
 - [The System Design Primer (Donne Martin)](https://github.com/donnemartin/system-design-primer#how-to-approach-a-system-design-interview-question)
 - [System Design Interview – An Insider's Guide (Alex Xu, Vol 1 & 2)](https://bytebytego.com/)

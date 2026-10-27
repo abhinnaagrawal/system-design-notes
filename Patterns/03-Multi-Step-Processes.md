@@ -1,6 +1,8 @@
 # Pattern 03: Multi-Step Processes
 
-> **The System Design Interview Lens:** Distributed transactions across microservices cannot rely on standard database ACID transactions. A Staff engineer explains why Two-Phase Commit (2PC) is an anti-pattern for web-scale services, evaluates **Choreography vs. Orchestration Sagas**, and articulates how **Durable Execution Engines (Temporal / AWS Step Functions)** provide fault tolerance, deterministic replays, and guaranteed idempotency.
+> **The System Design Interview Lens:** First identify whether the participants share a supported ACID transaction boundary. Across independent services, compare participant-supported atomic commit with **Choreography vs. Orchestration Sagas** and durable workflow engines. Workflow history/replay improves recovery; activity idempotency and compensation remain application responsibilities.
+
+> **Recovery contract:** Persist intent and decisions, reuse business-operation IDs on retries, and reconcile unknown outcomes before compensation. Temporal replays deterministic workflow code and retries activities.
 
 ---
 
@@ -11,7 +13,7 @@
 | **Coordination Model** | Local DB Lock Manager | Blocking Central Coordinator | Decentralized Events / PubSub | **Durable State Machine** |
 | **System Boundary** | Single Database | Distributed Databases / XA | Multiple Microservices | Multiple Microservices & External APIs |
 | **Lock Duration** | Sub-millisecond | Holds locks across network roundtrips | **Zero locks held** (Local ACID only) | **Zero locks held** (Local ACID only) |
-| **Rollback Mechanism** | DB Undo Log (`ROLLBACK`) | Coordinator-initiated abort | Explicit Compensating Events | **Automated Compensating Activities** |
+| **Rollback Mechanism** | DB Undo Log (`ROLLBACK`) | Durable coordinator decision; abort only before commit decision | Explicit Compensating Events | **Explicitly authored retry-safe compensations** |
 | **Observability / Tracing** | Trivial (Single DB) | Moderate | **Complex & Fragile** (Event spaghetti) | **Native UI Visualizer** (Full state tree) |
 | **Scale Limit** | Single machine limits | Poor (>5 nodes stalls throughput) | High throughput, asynchronous | High throughput, scalable workers |
 | **Best Use Case** | Monolith / Single DB table updates | Legacy banking / mainframe systems | Simple 2–3 step linear fire-and-forget flows | **E-commerce checkout, payment flows, ride matching, food delivery** |
@@ -20,7 +22,7 @@
 
 ## 2. The Theoretical Paradigm Shift: ACID vs. BASE
 
-In single-node relational databases, correctness is governed by **ACID**. In distributed microservices across network boundaries, we must shift to **BASE** (Donne Martin's distributed systems model):
+ACID is not limited to one machine: distributed SQL and supported transaction participants can provide distributed transactions. **BASE** is a useful description of a deliberately asynchronous design, not a requirement imposed by microservices. Use the comparison below as a vocabulary aid and state the actual contract:
 
 | ACID (Single DB World) | BASE (Distributed Microservices World) | Architectural Implication |
 | :--- | :--- | :--- |
@@ -112,36 +114,22 @@ In modern engineering organizations (Uber, Stripe, Netflix), custom Saga orchest
 
 ### How Durable Execution Works Under the Hood:
 1. **Deterministic Workflow Code:** You write straightforward sequential code (in Go, Python, Java, or TypeScript).
-2. **Event Sourcing & Replay:** Every time an activity (e.g., `ChargeCard`) executes, Temporal records the result in an append-only event log.
+2. **Event Sourcing & Replay:** Temporal records reported activity completions in workflow history. The effect can occur before its completion reaches history.
 3. **Resilience to Crashes:** If the server executing the workflow crashes midway:
    * A new worker picks up the execution.
    * It **replays** the workflow from line 1.
    * When it reaches already-completed steps, it returns the cached result from the event log without re-executing the network call.
-   * It resumes live execution exactly at the failed or in-progress line.
+   * Recorded completions are reused; an unrecorded activity may execute again. See [Temporal activity idempotency](https://docs.temporal.io/activity-definition).
 
-```typescript
-// Temporal Workflow Definition (Deterministic Code)
-export async function checkoutWorkflow(order: Order): Promise<void> {
-  const { items, paymentDetails } = order;
-
-  // Step 1: Reserve Inventory
-  await reserveInventoryActivity(items);
-
-  try {
-    // Step 2: Charge Card (automatically retries with exponential backoff)
-    await chargeCardActivity(paymentDetails, {
-      startToCloseTimeout: '30s',
-      retryPolicy: { maximumAttempts: 3 }
-    });
-  } catch (err) {
-    // Compensation: If payment fails after retries, rollback inventory
-    await unreserveInventoryActivity(items);
-    throw new Error("Payment failed: Order aborted.");
-  }
-
-  // Step 3: Dispatch Shipping
-  await dispatchShippingActivity(order);
-}
+```text
+Workflow pseudocode:
+1. Persist checkout identity and reserve inventory with a stable reservation key.
+2. Charge using the persisted provider idempotency key.
+3. If completion is unknown, record RECONCILING and query/retry the same charge.
+   Record exhausted ambiguous retries as UNKNOWN for reconciliation.
+4. On definitive failure, execute the explicitly registered inventory compensation.
+5. On definitive success, durably advance toward shipping using a stable dispatch key.
+6. Retry failed compensations; expose unresolved age and an escalation owner.
 ```
 
 ---
@@ -161,7 +149,7 @@ In distributed systems, network calls fail in three distinct ways: **Success**, 
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
   );
   ```
-* If a worker retries with the same `idempotency_key`, the database unique constraint rejects the duplicate charge and returns the existing cached response.
+* The unique constraint serializes admission for that key. Return its completed result or in-progress/unknown status, and reject reuse with a different payload. Remote charges use the provider key; persist/reconcile their results and retain identities through the replay window.
 
 ---
 

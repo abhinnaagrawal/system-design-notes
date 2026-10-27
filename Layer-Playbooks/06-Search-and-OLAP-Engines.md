@@ -1,5 +1,7 @@
 # Layer 06: Search & OLAP Analytical Engines Playbook
 
+> **Design inputs:** Ingestion durability, searchable freshness, snapshot publication, replay identity, selectivity, file layout and compression.
+
 > **The System Design Interview Lens:** Running analytical aggregates or fuzzy search queries against an operational OLTP database is an instant red flag. In Staff/Principal interviews, you must cleanly delineate **Transactional Row Stores** from **Analytical Columnar Engines** (ClickHouse, Trino) and **Inverted Search Indexes** (Elasticsearch/Lucene), explaining the mechanics of **I/O projection pruning, SIMD vectorization, and Posting List compression**.
 
 ---
@@ -150,12 +152,13 @@ INVERTED INDEX (Term Dictionary ──> Posting Lists):
 │ Instant metadata-driven pruning   │ Requires slow S3 file `LIST` operations │
 │ Safe Schema & Partition evolution │ Renaming columns breaks old files       │
 │ Time Travel queries natively      │ Manual directory versioning required    │
-│ Eliminates S3 eventual consist lag│ Subject to file listing delays          │
+│ Atomic table snapshot publication │ Strong object GET/PUT/LIST, no table txn│
 └───────────────────────────────────┴─────────────────────────────────────────┘
 ```
 
-*   **The S3 `LIST` Bottleneck:** On an S3 bucket with 500,000 Parquet files, a query engine querying raw Parquet must issue thousands of HTTP `LIST` requests to discover which files exist. This initial listing phase alone can take 30–60 seconds before a single byte of data is read.
-*   **The Iceberg Solution:** Iceberg replaces directory-based file listing with an explicit **hierarchical metadata tree** (Snapshots $\to$ Manifest Lists $\to$ Manifest Files). The query engine reads a single tiny JSON metadata file to determine the exact list of required data files in milliseconds, completely bypassing S3 file listing.
+* **Consistency and Listing Cost:** S3 has provided strong GET/PUT/LIST consistency since December 2020. File-discovery cost depends on prefix pruning, pagination, caching and parallelism.
+* **The Iceberg Solution:** A catalog-backed atomic metadata-pointer update publishes a table snapshot. Engines traverse metadata, manifest lists and manifests to prune data files. This provides table-level atomicity, time travel and schema evolution over S3 objects.
+* **Source (checked 2026-10-27):** [AWS S3 consistency update](https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/).
 
 ---
 
@@ -204,19 +207,19 @@ INVERTED INDEX (Term Dictionary ──> Posting Lists):
 
 | Chapter / Architecture | Engine Selected | Specific Architectural Role |
 | :--- | :--- | :--- |
-| [**09. Web Crawler**](file:///Users/abhinnaagarwal/Documents/system-design-notes/09.%20Web%20Crawler/README.md) | **Inverted Index (Lucene / ES)** | Indexes crawled page text for fast keyword retrieval and PageRank ranking. |
-| [**13. Search Autocomplete**](file:///Users/abhinnaagarwal/Documents/system-design-notes/13.%20Search%20Autocomplete/README.md) | **Trie in RAM + Elasticsearch** | Serves top-5 search suggestions via prefix matching and query frequency counters. |
-| [**18. Google Maps**](file:///Users/abhinnaagarwal/Documents/system-design-notes/18.%20Google%20Maps/README.md) | **Spatial GIN / S2 Index** | Geospatial point and polyline search for addresses and business routing. |
-| [**20. Metrics Monitoring**](file:///Users/abhinnaagarwal/Documents/system-design-notes/20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.md) | **Time-Series Columnar Store** | High-cardinality metric rollups and sliding window alert threshold evaluation. |
-| [**21. Ad Click Aggregation**](file:///Users/abhinnaagarwal/Documents/system-design-notes/21.%20Ad%20Click%20Event%20Aggregation/README.md) | **ClickHouse / Apache Pinot** | Aggregates ad impressions and clicks across 1-minute, 1-hour, and 1-day windows. |
-| [**29. Tagging Service**](file:///Users/abhinnaagarwal/Documents/system-design-notes/29.%20Tagging%20Service/README.md) | **Inverted Bitmap Index** | Intersects millions of tags across media items via Roaring Bitmaps. |
+| [**09. Web Crawler**](../09.%20Web%20Crawler/Readme.md) | **Inverted Index (Lucene / ES)** | Indexes crawled page text for fast keyword retrieval and PageRank ranking. |
+| [**13. Search Autocomplete**](../13.%20Search%20Autocomplete/Readme.md) | **Trie in RAM + Elasticsearch** | Serves top-5 search suggestions via prefix matching and query frequency counters. |
+| [**18. Google Maps**](../18.%20Google%20Maps/README.md) | **Spatial GIN / S2 Index** | Geospatial point and polyline search for addresses and business routing. |
+| [**20. Metrics Monitoring**](../20.%20Metrics%20Monitoring%20and%20Alerting%20System/README.md) | **Time-Series Columnar Store** | High-cardinality metric rollups and sliding window alert threshold evaluation. |
+| [**21. Ad Click Aggregation**](../21.%20Ad%20Click%20Event%20Aggregation/README.md) | **ClickHouse / Apache Pinot** | Aggregates ad impressions and clicks across 1-minute, 1-hour, and 1-day windows. |
+| [**29. Tagging Service**](../29.%20Tagging%20Service/README.md) | **Inverted Bitmap Index** | Intersects millions of tags across media items via Roaring Bitmaps. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   ClickHouse Mechanics & MergeTree: [`coding-practice: query-engines/clickhouse.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/query-engines/clickhouse.md)
-*   OpenSearch / Elasticsearch Internals: [`coding-practice: query-engines/opensearch.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/query-engines/opensearch.md)
-*   Trino Distributed Query Engine: [`coding-practice: query-engines/trino.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/query-engines/trino.md)
-*   DuckDB Embedded Analytics: [`coding-practice: query-engines/duckdb.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/query-engines/duckdb.md)
-*   Apache Iceberg Architecture: [`coding-practice: data-formats/apache-iceberg.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/data-formats/apache-iceberg.md)
-*   Parquet & Columnar Formats: [`coding-practice: data-formats/parquet.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/data-formats/parquet.md)
+*   ClickHouse Mechanics & MergeTree: [`coding-practice: query-engines/clickhouse.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/query-engines/clickhouse.md)
+*   OpenSearch / Elasticsearch Internals: [`coding-practice: query-engines/opensearch.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/query-engines/opensearch.md)
+*   Trino Distributed Query Engine: [`coding-practice: query-engines/trino.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/query-engines/trino.md)
+*   DuckDB Embedded Analytics: [`coding-practice: query-engines/duckdb.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/query-engines/duckdb.md)
+*   Apache Iceberg Architecture: [`coding-practice: data-formats/apache-iceberg.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/data-formats/apache-iceberg.md)
+*   Parquet & Columnar Formats: [`coding-practice: data-formats/parquet.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/data-formats/parquet.md)

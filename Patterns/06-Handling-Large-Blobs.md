@@ -1,5 +1,7 @@
 # Pattern 06: Handling Large Blobs
 
+> **Publication contract:** Versioned objects move from quarantine to READY after validation. Upload sessions, checksums and conditional metadata transitions handle retries and out-of-order notifications.
+
 > **The System Design Interview Lens:** Transporting large binary files (videos, high-res photos, machine learning models, system backups) directly through your application servers is an architectural disaster. A Staff engineer enforces the cardinal rule: **application servers handle metadata and authentication, while object storage and CDNs handle raw bytes via Presigned URLs and Multipart Uploads.**
 
 ---
@@ -104,9 +106,9 @@ Never trust the client to notify the backend that an upload succeeded! The clien
 1. When the file finishes uploading, S3 triggers an **S3 Event Notification** (`s3:ObjectCreated:*`).
 2. S3 pushes the event payload to an **AWS SQS Queue** or **Kafka topic**.
 3. A background **Validation Worker** consumes the message:
-   * Validates the file magic bytes (verifies it is genuinely an MP4 video, not malware disguised with an `.mp4` extension).
+   * Checks size/checksum and format signatures in quarantine, then performs resource-limited parsing and malware scanning before publication.
    * Generates a video thumbnail and extracts duration/metadata.
-   * Updates the relational database: `UPDATE videos SET status = 'READY', s3_path = ... WHERE id = ...`.
+   * Conditionally transitions the expected upload/object version from QUARANTINED to READY after validation. Deduplicate repeated notifications and reject older/out-of-order versions; periodically reconcile missed notifications.
    * Pushes a real-time notification to the user via SSE or WebSockets: *"Your video is ready!"*
 
 ### Cleaning Up Abandoned / Dangling Uploads:

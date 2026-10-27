@@ -1,5 +1,9 @@
 # Chapter 30: Design a Distributed Rate Limiter (5+ Approaches)
 
+## Guarantees and assumptions
+The selected local/global authority commits each quota decision. Operation IDs deduplicate retries; coordinated ownership provides an exact global budget, while leased local budgets trade coordination for bounded overshoot.
+**Principal IC exercise:** Partition two regions after quota leasing; derive the maximum overshoot and define budget reclamation without double spending.
+
 Based on the system design breakdown from **[System Design Fight Club - Atlassian Interview Question: Rate Limiter (5+ Approaches)](https://www.youtube.com/watch?v=NvQXO7tleDI)** with additions for Staff/Principal-level evaluation.
 
 ---

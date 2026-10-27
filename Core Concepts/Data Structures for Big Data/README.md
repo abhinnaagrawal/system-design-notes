@@ -2,7 +2,9 @@
 
 **Sources:** [Data Structures for Big Data in Interviews (Hello Interview)](https://www.youtube.com/watch?v=IgyU0iFIoqM) | [Hello Interview Written Guide](https://www.hellointerview.com/learn/system-design/deep-dives/data-structures-for-big-data)
 
-**TL;DR:** When dataset sizes scale into billions or trillions of records, exact deterministic data structures (like HashSets, TreeMaps, or raw arrays) become physically impossible to maintain in memory or synchronize across network boundaries. Probabilistic data structures surrender absolute certainty in exchange for **orders-of-magnitude reduction in space ($O(1)$ constant bounded memory)** and sub-millisecond execution. In system design interviews, these structures solve otherwise intractable bottlenecks in web crawlers, real-time analytics, database storage engines, and latency telemetry.
+**TL;DR:** At high cardinality, exact structures can exceed a particular memory/latency/cost budget; partitioned or disk-backed exact solutions still exist. Probabilistic structures trade precision for compact summaries, but their space contracts differ. A Bloom filter needs memory proportional to cardinality at fixed false-positive rate; fixed-parameter sketches have their own error and counter/range limits. Runtime latency must be measured for the chosen hash functions, size and implementation.
+
+> **Sizing inputs:** Cardinality, error probability, hash functions, counter width and supported updates/deletions.
 
 ---
 
@@ -21,7 +23,7 @@ flowchart LR
         E1["HashSet / HashMap"]
         E2["100% Exact Precision"]
         E3["Memory scales linearly: O(N)"]
-        E4["Fails at Billions of Elements"]
+        E4["May exceed this machine's memory budget"]
         E1 --- E2 --- E3 --- E4
     end
 
@@ -29,8 +31,8 @@ flowchart LR
         direction TB
         P1["Bloom Filter / Count-Min / HLL"]
         P2["Configurable Error (1-2%)"]
-        P3["Fixed Memory Footprint: O(1)"]
-        P4["Scales to Trillions of Elements"]
+        P3["Space depends on structure and target error"]
+        P4["Check capacity, saturation and counter range"]
         P1 --- P2 --- P3 --- P4
     end
 ```
@@ -58,6 +60,9 @@ flowchart LR
 ---
 
 ## 3. Bloom Filter (Approximate Set Membership)
+
+For expected cardinality $n$ and target false-positive probability $p$, size approximately
+$m=-n\ln(p)/(\ln 2)^2$ bits and choose $k\approx(m/n)\ln2$ hashes. With fixed $p$, memory grows with $n$. Holding $m$ fixed while inserting without bound saturates the filter, driving false positives toward one. The no-false-negative property assumes correct insertion, no unsafe deletion and compatible hashes.
 
 ### A. The Intuition: "The Villager Stamps"
 Imagine a town where 1,000 villagers each have a unique rubber stamp with specific geometric grooves. When villagers attend a town meeting, they all stamp the same single piece of paper.

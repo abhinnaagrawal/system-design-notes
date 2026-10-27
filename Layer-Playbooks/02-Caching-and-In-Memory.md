@@ -1,5 +1,7 @@
 # Layer 02: Caching & In-Memory Storage Playbook
 
+> **Design inputs:** Source of truth, freshness target, working set, object overhead, hit/miss distribution and stale-fill handling.
+
 > **The System Design Interview Lens:** An interviewer asks you to add a cache to "speed up reads." Junior engineers simply say *"I'll put Redis in front of the DB."* Staff/Principal engineers specify the **caching topology (L1 local vs L2 distributed)**, defend the **invalidation lifecycle**, calculate **memory sizing and eviction pressure**, and systematically neutralize **cache stampedes, penetration, and avalanches**.
 
 ---
@@ -255,8 +257,8 @@ When a viral item (e.g., World Cup final score, breaking news article) expires, 
     *   All other threads fail to acquire the lock, sleep for 50ms, and retry reading the cache.
 *   **Mitigation Strategy B: Probabilistic Early Expiration (XFetch Algorithm)**
     *   Instead of letting the key expire passively, worker threads compute a probabilistic formula on every read:
-        $$\Delta \cdot \beta \cdot \ln(\text{random}()) > \text{TTL} - \text{currentTime}$$
-    *   As the key approaches its expiration time, the probability that a background read triggers an early asynchronous refresh from the DB increases, ensuring the cache is refreshed *before* it ever expires.
+        $$-\Delta \cdot \beta \cdot \ln(U) \ge \text{expires\_at} - \text{now}, \quad 0<U<1$$
+    * The negative sign matters: $\ln(U)<0$. Use an absolute expiry timestamp and consistent units for recomputation duration $\Delta$ and time. Early refresh reduces risk but cannot ensure refresh completion before expiry or zero misses. The [canonical read-scaling pattern](../Patterns/04-Scaling-Reads.md#deep-dive-1-cache-stampede-thundering-herd) explains coalescing and the freshness contract.
 *   **Mitigation Strategy C: Stale-While-Revalidate**
     *   Store two timestamps in the cache value: `hard_expiry` and `soft_expiry`. If `now > soft_expiry`, return the stale cached value to the client immediately, but trigger an asynchronous background thread to fetch fresh data from the DB.
 
@@ -328,17 +330,17 @@ Occurs when a massive batch of keys is cached during deployment or morning start
 
 | Chapter / Architecture | Cache Technology & Pattern | Specific Functionality |
 | :--- | :--- | :--- |
-| [**04. Rate Limiter**](file:///Users/abhinnaagarwal/Documents/system-design-notes/04.%20Rate%20Limiter/README.md) | **Redis + Lua Script** | Sliding window log / token bucket atomic decrement in RAM. |
-| [**08. URL Shortener**](file:///Users/abhinnaagarwal/Documents/system-design-notes/08.%20URL%20Shortener/README.md) | **Redis (Cache-Aside) + Bloom Filter** | Caches `short_url` $\to$ `long_url` mapping; Bloom filter prevents penetration. |
-| [**11. News Feed System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/11.%20News%20Feed%20System/README.md) | **Redis List / ZSET** | Holds pre-computed feed post IDs for active users (Fan-out on write). |
-| [**12. Chat System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/12.%20Chat%20System/README.md) | **Redis Pub/Sub & Key-Value** | Manages user online presence, connection server mapping, and unread counters. |
-| [**14. Youtube**](file:///Users/abhinnaagarwal/Documents/system-design-notes/14.%20Youtube/README.md) | **Edge CDN + Multi-Tier Cache** | Video chunks cached at CDN PoPs; video metadata cached in distributed Redis. |
-| [**25. Real-time Leaderboard**](file:///Users/abhinnaagarwal/Documents/system-design-notes/25.%20Real-time%20Gaming%20Leaderboard/README.md) | **Redis Sorted Set (ZSET)** | $O(\log N)$ point rank extraction and leaderboard range paging. |
+| [**04. Rate Limiter**](../04.%20Rate%20Limiter/Readme.md) | **Redis + Lua Script** | Sliding window log / token bucket atomic decrement in RAM. |
+| [**08. URL Shortener**](../08.%20URL%20Shortener/Readme.md) | **Redis (Cache-Aside) + Bloom Filter** | Caches `short_url` $\to$ `long_url` mapping; Bloom filter prevents penetration. |
+| [**11. News Feed System**](../11.%20News%20Feed%20System/Readme.md) | **Redis List / ZSET** | Holds pre-computed feed post IDs for active users (Fan-out on write). |
+| [**12. Chat System**](../12.%20Chat%20System/Readme.md) | **Redis Pub/Sub & Key-Value** | Manages user online presence, connection server mapping, and unread counters. |
+| [**14. Youtube**](../14.%20Youtube/Readme.md) | **Edge CDN + Multi-Tier Cache** | Video chunks cached at CDN PoPs; video metadata cached in distributed Redis. |
+| [**25. Real-time Leaderboard**](../25.%20Real-time%20Gaming%20Leaderboard/README.md) | **Redis Sorted Set (ZSET)** | $O(\log N)$ point rank extraction and leaderboard range paging. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   Redis vs Memcached Mechanics: [`coding-practice: caching/redis-vs-memcached.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/caching/redis-vs-memcached.md)
-*   Caching Strategies Core Concept: [`Core Concepts/Caching Strategies/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Caching%20Strategies/README.md)
-*   Redis Core Concept: [`Core Concepts/Redis/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Redis/README.md)
-*   CDC Cache Invalidation via Debezium: [`coding-practice: streaming/debezium.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/streaming/debezium.md)
+*   Redis vs Memcached Mechanics: [`coding-practice: caching/redis-vs-memcached.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/caching/redis-vs-memcached.md)
+*   Caching Strategies Core Concept: [`Core Concepts/Caching Strategies/README.md`](../Core%20Concepts/Caching%20Strategies/README.md)
+*   Redis Core Concept: [`Core Concepts/Redis/README.md`](../Core%20Concepts/Redis/README.md)
+*   CDC Cache Invalidation via Debezium: [`coding-practice: streaming/debezium.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/streaming/debezium.md)

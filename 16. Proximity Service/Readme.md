@@ -1,5 +1,9 @@
 # Chapter 16: Design a Proximity Service (Yelp / Google Places)
 
+## Guarantees and assumptions
+Business updates ACK at the durable catalog commit; spatial indexes update asynchronously using stable IDs and versions. Radius searches cover every intersecting cell and apply exact-distance filtering.
+**Principal IC exercise:** Prove candidate coverage for a large radius near the antimeridian and quantify fan-out when the selected precision is too fine.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -150,7 +154,7 @@ flowchart TD
         Line --- Box2["Geohash Cell: 9q8yw<br/>Point B (37.7748)<br/>(10m away, completely missed!)"]
     end
 
-    subgraph StaffSolution["The Staff Solution: 8 Neighbor Expansion"]
+    subgraph StaffSolution["3x3 example ONLY when radius and latitude fit"]
         C["Target Center Cell"]
         C --- N1["North"]
         C --- N2["North-East"]
@@ -164,7 +168,7 @@ flowchart TD
 ```
 
 > [!IMPORTANT]
-> **The Staff Geohash Rule:** Never query only the target Geohash! **Always calculate the target cell PLUS its 8 immediate neighboring cells** and execute an `IN (...)` lookup across all 9 cells, followed by a distance post-filter.
+> **Geohash coverage:** Enumerate **all cells intersecting the search region**, handle antimeridian wraparound and polar boundaries, then apply an exact-distance filter. A 3×3 neighborhood works when it covers the full region at the selected precision, radius and latitude; a 5 km radius over 100 m cells requires a larger covering.
 
 ---
 
@@ -194,7 +198,7 @@ graph TD
 * **The Result:**
   - In sparse rural areas (Montana), a single leaf spans an entire county.
   - In ultra-dense urban centers (Manhattan / Tokyo), leaf nodes split down to individual street blocks.
-  - **Memory lookup is strictly $O(\log_4 N)$** worldwide!
+  - Balanced-tree point descent has expected depth around $O(\log_4 N)$ under suitable spatial distributions; clustered/coincident points can force deep or repeated subdivision. Bound depth/minimum cell size, keep overflow buckets, and include visited cells plus returned candidates in range-query cost.
 
 ---
 

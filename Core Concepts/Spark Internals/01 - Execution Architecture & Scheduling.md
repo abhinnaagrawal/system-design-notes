@@ -1,7 +1,7 @@
 # 01 - Execution Architecture & Scheduling
 
 **Priority:** P0
-**Versions:** 1.0 -> 4.2 (Spark Connect era)
+**Versions:** Apache Spark **3.5.0**.
 **Sources:** [SOURCES.md](SOURCES.md) - full list at the end of this chapter.
 **See also:** [04 - Shuffle, Partitioning & Network Transfer](04%20-%20Shuffle,%20Partitioning%20&%20Network%20Transfer.md), [06 - Query Planning (Catalyst & AQE)](06%20-%20Query%20Planning%20%28Catalyst%20&%20AQE%29.md).
 
@@ -171,7 +171,7 @@ To avoid waiting forever for a perfect host, Spark **delays scheduling** by esca
 
 ### B. Throughput vs. fairness: FIFO and FAIR pools
 
-`spark.scheduler.mode` (default `FIFO`) or `FAIR`: FIFO runs jobs in submission order (one big job monopolizes the cluster); FAIR pools split resources between concurrently submitted jobs - the reason multi-tenant notebooks use fair scheduling.
+`spark.scheduler.mode` (default `FIFO`) or `FAIR`: FIFO gives earlier jobs priority; later jobs can use remaining slots, for example while an earlier job has one running straggler. FAIR pools share resources between concurrently submitted jobs.
 
 ### C. Speculation: fighting stragglers
 
@@ -208,7 +208,8 @@ Because scheduling is event-driven, failures are not exceptions thrown up a stac
 
 | Failure | Immediate detector | Reaction |
 |---------|--------------------|----------|
-| Task throws / crashes | Status update | TaskScheduler retries within `spark.task.maxFailures`; after that, the **stage** fails |
+| Task throws / crashes | Status update | Counted failures retry within the task set; exhausting `spark.task.maxFailures` (4 by default) normally aborts the task set/job |
+| Shuffle fetch fails | FetchFailed event | DAGScheduler may resubmit affected stages / missing map outputs; consecutive stage attempts are bounded separately |
 | Task result too large | Driver | `spark.driver.maxResultSize` error in the job |
 | Executor dies with completed map tasks (no ESS) | Heartbeat timeout / node manager | Missing map outputs -> DAGScheduler resubmits just those map partitions; reduce tasks for them wait |
 | Executor dies with cached blocks | Heartbeat timeout | Cached partitions lost -> recompute from lineage if needed (this is why cache-only faults don't change answers, only speed) |
@@ -264,7 +265,7 @@ If you are asked to summarize this chapter in an interview, say the following po
 3. `submitStage` recursion + missing-task computation = minimal recompute.
 4. `ShuffleMapTask` -> `MapStatus` to MapOutputTracker; `ResultTask` -> result to driver (cap 1 GB).
 5. Scheduling is event-driven; locality is preference + `locality.wait` delay, not a requirement.
-6. Retry units: task (4 attempts) -> stage (4 attempts); speculation races stragglers; barrier stages must start together.
+6. Counted task failures exhaust the task-set/job budget (default 4); fetch failures can resubmit stages under separate limits.
 7. Driver is a single point of failure; executors are disposable by design (lineage > replication).
 
 ---
@@ -280,12 +281,12 @@ If you are asked to summarize this chapter in an interview, say the following po
 | 5 | What happens when a map output is missing after executor loss? | Only those partitions are recomputed; reduce tasks wait; with ESS, refetch instead |
 | 6 | How are tasks counted per executor? | One thread per core; concurrency = executor cores |
 | 7 | What is delay scheduling? | Waiting up to `locality.wait` (3 s default) for a better locality level before falling back |
-| 8 | FIFO vs FAIR? | FIFO: one job at a time (starvation possible); FAIR: pools share resources |
+| 8 | FIFO vs FAIR? | FIFO: earlier-job priority, later jobs can use spare slots; FAIR: weighted resource sharing |
 | 9 | How does Spark handle stragglers? | Speculation: duplicate on another executor, first finisher wins |
 | 10 | What is a barrier stage? | All tasks must run simultaneously (2.4+), used by ML collectives; failure = whole stage retries |
 | 11 | Why is the driver a SPOF and why is that "fine"? | All scheduling state lives there; acceptable because recomputation only needs the driver to restart the job (state is lost, data is derivable) |
 | 12 | Where does `collect()` fail on big data? | `spark.driver.maxResultSize` (1 GB) - results ride the status-update path to the driver |
-| 13 | Three units of retry/recovery? | Task -> stage -> (whole) job; tasks retry up to 4, then stage attempts, then abort |
+| 13 | Task failure vs stage recovery? | Counted task failures exhaust maxFailures then normally abort the job; fetch failures can resubmit affected stages under stage-attempt limits |
 | 14 | Why does task launch latency grow in huge stages? | Driver serializes/plans all task descriptions per stage (see "delay scheduling"/driver bottleneck symptoms) |
 | 15 | Which change made spot instances cheap for Spark? | Executor decommissioning (3.1) + shuffle block migration (default 3.4) |
 

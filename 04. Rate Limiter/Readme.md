@@ -1,5 +1,9 @@
 # Chapter 04: Design an API Rate Limiter (Production & Edge Gateway)
 
+## Guarantees and assumptions
+The owning Redis primary makes each bucket decision atomically. Use server time with a monotonic accounting watermark, operation IDs for retry deduplication, and an endpoint-specific fail-open/fail-closed policy.
+**Principal IC exercise:** Specify the maximum overshoot during primary failover and decide which endpoints fail closed rather than fail open.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
@@ -238,13 +242,14 @@ By executing the logic inside a **Redis Lua Script**, Redis guarantees strict at
 -- KEYS[1]: Rate limit key (e.g., "ratelimit:user_102")
 -- ARGV[1]: Max tokens / capacity (e.g., 100)
 -- ARGV[2]: Refill rate in tokens per second (e.g., 10)
--- ARGV[3]: Current epoch timestamp in seconds
+-- ARGV[3]: Reserved (time comes from Redis, not the caller)
 -- ARGV[4]: Requested tokens (usually 1)
 
 local key = KEYS[1]
 local capacity = tonumber(ARGV[1])
 local refill_rate = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
+local server_time = redis.call("TIME")
+local now = tonumber(server_time[1]) + tonumber(server_time[2]) / 1000000
 local requested = tonumber(ARGV[4])
 
 -- Fetch current state: [tokens, last_refilled]
@@ -257,10 +262,11 @@ if current_tokens == nil then
     last_refilled = now
 else
     -- Lazy refill calculation
-    local elapsed = math.max(0, now - last_refilled)
+    local effective_now = math.max(now, last_refilled)
+    local elapsed = effective_now - last_refilled
     local tokens_to_add = elapsed * refill_rate
     current_tokens = math.min(capacity, current_tokens + tokens_to_add)
-    last_refilled = now
+    last_refilled = effective_now
 end
 
 if current_tokens >= requested then
@@ -272,6 +278,8 @@ else
     return {0, math.floor(current_tokens)} -- Rejected
 end
 ```
+
+Redis `TIME` follows the server wall clock. The clamp preserves the accounting high-water mark across backward adjustments: with `last_refilled=100`, a request at wall time 90 retains timestamp 100, preventing duplicate refill when time returns to 100. Validate positive capacity/refill/request inputs at configuration boundaries. Forward clock jumps and failover use the deployment's bounded-skew and quota-recovery policy. See the [Redis scripting reference](https://redis.io/docs/latest/develop/programmability/eval-intro/).
 
 ---
 
@@ -446,7 +454,7 @@ flowchart TD
 
 ### 7.2 Distributed Clock Skew Across Nodes
 * If rate limiting depends on system clocks, clock drift between different application servers (NTP drift) can cause erratic bucket refills.
-* **Mitigation:** Rely on **Redis Server Time (`redis.call('TIME')`)** rather than client/application server timestamps inside the Lua script!
+* **Mitigation:** Use **Redis Server Time (`redis.call('TIME')`)** rather than caller timestamps, **and clamp the persisted accounting timestamp monotonically** as in the Lua example. Server wall time can still jump; define failover/skew policy.
 
 ---
 
@@ -459,4 +467,4 @@ flowchart TD
 | **High QPS Overhead**| 1 Redis call per HTTP request | **In-Memory Token Leasing:** Gateway batches 50 tokens locally; eliminates 95% of Redis roundtrips. |
 | **Client Retry Logic**| Immediate retry on 429 | **Full Jitter Exponential Backoff:** Eliminates retry storms and server thundering herds. |
 | **Failure Policy** | Unspecified / system crash | **Configurable Fail-Open vs Fail-Closed Policy:** Fail-open for search; fail-closed for auth/payments. |
-| **Clock Consistency**| Server `System.currentTimeMillis()`| **Redis Server Time (`TIME` command):** Prevents distributed NTP clock drift bugs. |
+| **Clock Consistency**| Caller wall clock | **Redis `TIME` + monotonic accounting watermark:** Avoids duplicate backward-clock refill; failover/skew policy still required. |

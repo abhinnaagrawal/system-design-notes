@@ -1,5 +1,9 @@
 # Chapter 19: Design a Distributed Message Queue & Event Streaming Platform (Apache Kafka / Pulsar)
 
+## Guarantees and assumptions
+Broker replication and flush settings define producer ACK durability. Preserve producer identities/sequences across retries; Kafka transactions commit Kafka output and consumer progress together, while external effects use their own idempotency or transaction protocol.
+**Principal IC exercise:** Compare losing a broker with losing power to every ISR member; state what `acks=all` and your storage policy actually preserve.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Kafka: The Definitive Guide (Gwen Shapira, Neha Narkhede, Todd Palino)](https://www.oreilly.com/library/view/kafka-the-definitive/9781491936153/)
@@ -269,14 +273,14 @@ flowchart TD
 
 ### 8.1 Key Replication Definitions
 * **Log End Offset (LEO):** The offset of the next record to be written to a partition replica.
-* **High Watermark (HW):** The highest offset that has been replicated to **all active In-Sync Replicas (ISR)**. 
-  > **Crucial Rule:** Consumers can **ONLY** read messages up to the High Watermark ($< \text{HW}$). Uncommitted messages above HW are invisible to consumers to prevent dirty reads if the leader crashes.
+* **High Watermark (HW):** The exclusive boundary of the replicated/committed prefix across the active ISR; readable committed offsets are **below HW**.
+  > **Crucial Rule:** Consumers do not read beyond the replicated prefix ($< \text{HW}$). For transactional `read_committed`, the last stable offset can be **below** HW while transactions remain open; replication commitment and transaction commitment are different boundaries.
 * **In-Sync Replicas (ISR):** The set of replicas that are actively keeping up with the leader. If a follower falls behind by more than `replica.lag.time.max.ms` (e.g. 30 seconds), the leader ejects it from the ISR.
 
 ### 8.2 Producer ACK Guarantees & Durability Formulas
 * `acks=0`: Producer fires and forgets; zero waiting. Maximum throughput, high data loss risk.
 * `acks=1`: Leader writes to local log and immediately ACKs. If leader crashes before followers pull the log, message is lost.
-* `acks=all` (`-1`) + `min.insync.replicas=2`: **The Production Gold Standard**. The leader will **NOT** commit or ACK the write until at least 2 ISR replicas have persisted the record. If only 1 replica remains in ISR, writes are rejected with `NotEnoughReplicasException`, guaranteeing **Zero Data Loss**.
+* `acks=all` (`-1`) + `min.insync.replicas=2`: The leader waits for the **current ISR**; at least two in-sync replicas must be available to accept the write. Below that threshold, writes fail and partial appends can leave an ambiguous outcome. Replication normally acknowledges OS page-cache copies. Flush policy, storage, failure-domain placement and leader-election settings determine survival of correlated power/storage loss.
 
 ---
 
@@ -311,11 +315,11 @@ flowchart TD
 
 ## 10. Exactly-Once Semantics (EOS): Idempotent Producers & 2PC
 
-Achieving end-to-end Exactly-Once Semantics in streaming pipelines requires two independent mechanisms:
+Kafka transactional consume/process/produce uses producer idempotence, transactional output/offset commits and `read_committed` consumers. External databases, emails and PSP requests use their own idempotency/transaction protocols.
 
 ```mermaid
 flowchart LR
-    subgraph EOS_Anatomy["End-to-End Exactly-Once Processing (EOS)"]
+    subgraph EOS_Anatomy["Kafka-scoped transactional processing"]
         Producer["Idempotent Producer<br/>(Producer ID + Seq Num)"] -->|1. Deduplicated Writes| Broker["Broker Partition Log"]
         Broker -->|2. Atomic Read-Process-Write| TxCoordinator["Transaction Coordinator<br/>(2PC Commit Markers in __transaction_state)"]
     end

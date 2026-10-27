@@ -1,5 +1,9 @@
 # Chapter 21: Design a Real-Time Ad Click Event Aggregation Pipeline (Flink / Kafka / ClickHouse)
 
+## Guarantees and assumptions
+Event ACK follows durable broker acceptance. Stable click IDs and versioned complete window totals support replay-safe ClickHouse materialization; watermark progress, allowed lateness and correction handling are configured separately.
+**Principal IC exercise:** Crash after a sink INSERT succeeds but before checkpoint completion; prove how retries avoid double billing beyond the sink deduplication retention window.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Streaming Systems: The What, Where, When, and How of Large-Scale Data Processing (Tyler Akidau et al., Google)](https://www.oreilly.com/library/view/streaming-systems/9781491983874/)
@@ -27,9 +31,9 @@ Designing an ad click aggregation pipeline at Google or Meta scale ($1\text{B}+$
 │ • Classic dual-pipeline Lambda arch    │ • Kappa Architecture (Single streaming log)  │
 │   (Requires maintaining 2 codebases)   │   with unified backfill replay                │
 │ • "Just write aggregates to DynamoDB"  │ • Columnar OLAP engine (ClickHouse) with      │
-│   (Fails ad-hoc multi-dimensional OLAP)│   AggregatingMergeTree for sub-second slices  │
-│ • At-Least-Once processing             │ • End-to-End Exactly-Once Processing (EOS)    │
-│   (Double-bills advertisers on crash)  │   via 2PC Sink + Chandy-Lamport Checkpoints   │
+│   (Fails ad-hoc multi-dimensional OLAP)│   Versioned complete aggregate snapshots     │
+│ • Blind additive sink retries          │ • Checkpointed state + idempotent outputs    │
+│   (Double-bills advertisers on crash)  │   Explicit sink/replay/query contract         │
 └────────────────────────────────────────┴───────────────────────────────────────────────┘
 ```
 
@@ -48,9 +52,9 @@ Designing an ad click aggregation pipeline at Google or Meta scale ($1\text{B}+$
 │                         │   for multi-dimensional slicing (`country`, `device`, `campaign`).           │
 │                         │ • Pull-based batching vs Push-based streaming ingestion.                     │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
-│ 2. Technical            │ • Derives Watermark generation math to guarantee bounded lateness.           │
+│ 2. Technical            │ • Separates out-of-orderness policy from allowed-lateness retention.        │
 │    Proficiency          │ • Explains Chandy-Lamport distributed snapshot barrier alignment.            │
-│                         │ • Explains ClickHouse `AggregatingMergeTree` state combining mechanisms.     │
+│                         │ • Explains versioned complete totals and query-time replacement semantics. │
 │                         │ • Implements deduplication using Bloom filter + Redis sliding TTL cache.     │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 3. Problem Solving &    │ • Decomposes system into Click Ingress, Stream Processor, OLAP Store, UI API.│
@@ -60,7 +64,7 @@ Designing an ad click aggregation pipeline at Google or Meta scale ($1\text{B}+$
 │ 4. Operational          │ • Handles late-arriving events via Watermark Side-Outputs and Reprocessing.   │
 │    Mindset              │ • Monitors consumer lag, Flink checkpoint alignment duration, & backpressure.│
 │                         │ • Implements anti-fraud bot click filtering before the billing pipeline.     │
-│                         │ • Enforces idempotent 2PC writes to prevent advertiser double-billing.       │
+│                         │ • Enforces output/correction identity and durable replay-safe publication. │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 5. Adaptability &       │ • Responds to upstream mobile network outage causing a burst of 1-hour late  │
 │    Collaboration        │   clicks without corrupting financial daily ledger totals.                   │
@@ -124,24 +128,25 @@ flowchart TD
     IngressLB --> ClickCollector["Ad Click Ingestion Gateway Fleet"]
 
     subgraph FraudDeduplication["Fraud & Deduplication Tier"]
-        ClickCollector --> BloomFilter["Bloom Filter + Redis TTL Cache<br/>(Drop duplicate clicks within 1s)"]
+        ClickCollector --> BloomFilter["Bloom prefilter<br/>Confirm positives with exact click-ID lookup"]
         BloomFilter --> KafkaRaw["Kafka Topic: raw-ad-clicks<br/>(Partitioned by ad_id)"]
     end
 
     subgraph StreamingEngine["Stateful Stream Processing Tier (Apache Flink)"]
-        KafkaRaw --> FlinkWorker["Apache Flink Streaming Jobs<br/>• Watermark Generator: Bounded Lateness (5 min)<br/>• Tumbling Window (1 min) & Sliding Window (5 min)<br/>• RocksDB Embedded State Backend"]
-        FlinkWorker -->|Normal In-Window Output| KafkaAgg["Kafka Topic: aggregated-ad-clicks"]
-        FlinkWorker -.->|Late Events > 5m| SideOutput["Side Output Topic: late-arriving-clicks"]
+        KafkaRaw --> FlinkWorker["Apache Flink Streaming Jobs<br/>• Out-of-orderness bound B = 5 min<br/>• Separate allowed lateness L = 10 min<br/>• RocksDB Embedded State Backend"]
+        FlinkWorker -->|Stable output ID + complete total| KafkaAgg["Durable versioned materialization outbox<br/>(checkpoint-aware connector required)"]
+        FlinkWorker -.->|Beyond window end plus L| SideOutput["Side Output Topic: late-arriving-clicks"]
+        SideOutput --> Correction["Deduplicated correction ledger<br/>Shared per-key aggregate owner"]
+        Correction -->|Recompute complete total with new version| KafkaAgg
     end
 
     subgraph AnalyticsStore["OLAP Storage Tier (ClickHouse Cluster)"]
-        KafkaAgg -->|ClickHouse Kafka Engine Sink| CH_Agg[("ClickHouse Cluster<br/>• AggregatingMergeTree<br/>• Sub-second multi-dimensional slicing")]
-        SideOutput -->|Async Batch Correction| CH_Agg
+        KafkaAgg -->|Retry same key/version/payload| CH_Agg[("ClickHouse Cluster<br/>• ReplacingMergeTree versioned totals<br/>• Query-time latest-version collapse")]
     end
 
     subgraph QueryAPI["Reporting & Billing Tier"]
         Advertiser["Advertiser Dashboard / RTB Engine"] --> API["Analytics Query API"]
-        API -->|PromQL/SQL Query| CH_Agg
+        API -->|SQL over latest-version view| CH_Agg
     end
 ```
 
@@ -150,7 +155,7 @@ flowchart TD
 ## 6. Time Semantics & Flink Watermarking Mechanics
 
 In distributed networks and mobile environments, messages do not arrive in chronological order:
-1. **Event Time:** The exact timestamp when the user physically clicked the ad on their phone (`click_timestamp`). **This is the ONLY timestamp that can be used for financial billing.**
+1. **Event Time:** The attributed click timestamp (`click_timestamp`), validated against the source trust/skew policy before event-time billing.
 2. **Ingestion Time:** The timestamp when Kafka persisted the message.
 3. **Processing Time:** The local clock of the Flink streaming worker executing the window aggregation.
 
@@ -166,26 +171,22 @@ timeline
 ### 6.1 The Watermark Formula
 How long should Flink keep a 1-minute window open in memory waiting for late mobile clicks?
 * We define a **Bounded-Out-of-Orderness Watermark**:
-  $$\mathbf{W(t) = \max(\text{EventTime seen so far}) - \text{Allowed Lateness } (\Delta)}$$
-* If $\Delta = 5 \text{ minutes}$:
+  $$\mathbf{W_p(t) \approx \max(\text{EventTime seen on partition }p) - \text{Out-of-Orderness Bound } (B)}$$
+* If $B = 5 \text{ minutes}$ (conceptual formula; implementation may subtract an additional timestamp tick):
   - When Flink observes an event with timestamp `12:07:00`, it generates a Watermark for `12:02:00`.
-  - The Watermark acts as an assertion: *"We guarantee that no more events with timestamp $< 12:02:00$ will arrive."*
-  - The window `[12:00:00 - 12:01:00]` is now **finalized, emitted to ClickHouse, and purged from memory**.
+  - The watermark estimates event-time progress under the source policy; **older events can still arrive**. Downstream progress is the minimum over active input watermarks; configure idleness carefully so stalled/idle partitions do not block forever or cause unexpected late data.
+  - The window `[12:00:00 - 12:01:00]` has triggered, but cleanup is separate: retain state until its end plus **allowed lateness $L$** (for example $L=10$ minutes). Late-but-retained events may produce updated results. Cleanup/trigger boundary details follow the chosen Flink version/API.
 
 ### 6.2 Handling Straggler Events: Dead-Letter Side Outputs
-What if an event arrives **15 minutes late** (after the watermark passed)?
+Events arriving after the operator watermark passes their window's **end plus allowed lateness** follow the correction path:
 * **Wrong Action:** Silently discard it (advertiser under-billed; publisher under-paid).
-* **Staff Solution:** Route late stragglers to a **Flink Side-Output Topic**. A secondary correction job consumes the side output and issues an idempotent delta adjustment to ClickHouse:
-  ```sql
-  INSERT INTO ad_clicks_aggregated (ad_id, window_start, click_count, is_correction) 
-  VALUES ('ad_123', '2026-10-24 12:00:00', 1, true);
-  ```
+* **Staff Solution:** Route beyond-retention stragglers to a **Flink Side-Output Topic**. Deduplicate using the original `click_id`, derive a stable `correction_id=(click_id, billing_policy_version)`, and record acceptance in a durable correction ledger. A bare additive `INSERT +1` is **not idempotent**. The correction owner recomputes a complete window total including accepted corrections and publishes a new monotonic aggregate version using the materialization below. Raw retained events/accepted-click identities must bridge the live and correction paths so an event is counted only once.
 
 ---
 
-## 7. Exactly-Once Processing (EOS): Chandy-Lamport Checkpointing
+## 7. Checkpoint Recovery and Explicitly Idempotent Sink Materialization
 
-If a Flink streaming worker crashes midway through computing a 1-minute aggregation, how do we guarantee zero double-counting?
+Flink checkpointing can consistently recover source positions and operator state with supported sources/state backends. It does **not** make an arbitrary ClickHouse connector a recoverable two-phase-commit sink. This design instead publishes complete versioned aggregates through a durable materialization outbox.
 
 ```mermaid
 sequenceDiagram
@@ -194,7 +195,8 @@ sequenceDiagram
     participant Flink as Flink TaskManager
     participant RocksDB as Embedded RocksDB State
     participant S3 as Distributed Checkpoint (S3)
-    participant ClickHouse as ClickHouse 2PC Sink
+    participant Outbox as Durable Materialization Outbox
+    participant ClickHouse as ClickHouse Versioned Sink
 
     Note over Flink: Normal streaming window aggregation
     Kafka->>Flink: Click events (t=1, 2, 3...)
@@ -204,17 +206,31 @@ sequenceDiagram
     Kafka->>Flink: Checkpoint Barrier #42
     Flink->>RocksDB: Freeze local state snapshot
     RocksDB->>S3: Asynchronously copy snapshot to S3
-    Flink->>ClickHouse: Pre-Commit transaction #42
+    Flink->>Outbox: Persist complete aggregate + stable output_id/version
     
     S3-->>Flink: Snapshot acknowledged
-    Flink->>ClickHouse: Commit transaction #42 (Data visible to queries!)
-    Flink->>Kafka: Commit source offset for Barrier #42
+    Note over Flink,Outbox: Checkpoint completion waits for durable output records
+    Outbox->>ClickHouse: INSERT complete total (same key/version on retry)
+    ClickHouse-->>Outbox: Insert ACK (can be lost)
+    Flink->>Kafka: Checkpointed source progress (not sink transaction commit)
 ```
 
-### The Two-Phase Commit (2PC) Sink Protocol
-1. **Pre-Commit:** When the checkpoint barrier arrives at the sink, Flink opens a database transaction and writes pending window aggregates without committing.
-2. **Commit:** When the Flink JobManager confirms that **all** operators in the DAG successfully backed up their state to S3, it issues a `COMMIT` to ClickHouse.
-3. **Crash Recovery:** If a node dies, all operators roll back to Checkpoint #42, the uncommitted transaction in ClickHouse is aborted, and processing resumes with **zero duplicate clicks and zero missing clicks**!
+### Replay-safe sink materialization
+1. **Output identity:** Persist immutable complete totals with an `output_id` derived from stable source progress/window identity. A per-key durable sequencer maps that identity to a monotonic `aggregate_version`; repeats return the same version/payload. Newer totals cannot reuse or regress a version after restart. Live and correction writers share this owner.
+   The owner also persists the accepted source frontier/correction set: stale replay must not receive a higher version and replace a newer total with an older one. Use deterministic aggregation/input-cut identities and reject conflicting/incomparable updates until recomputed from authoritative retained events.
+2. **Checkpoint boundary:** Checkpoint completion requires outputs through that barrier to be durably in the outbox. Replay before a completed checkpoint may repeat an output; the outbox's identity constraint suppresses it. Persisted outputs can become visible before checkpoint completion, so this is not multi-window atomic visibility.
+3. **Sink replay:** The relay retries the same complete total and version, never an unkeyed increment. Readers choose the highest version per full aggregate key. Equal key/version must always have identical payload; quarantine mismatches.
+4. **Deployment settings:** Use a checkpoint-coordinated Flink source/outbox connector and configure ClickHouse engine replication, insert durability and async-insert acknowledgment. Stable output IDs and latest-version queries handle replay across the block-deduplication retention window.
+
+### Crash/recovery timeline: ad-click streaming sink
+| Crash point | Durable evidence | Recovery / retry outcome |
+| :--- | :--- | :--- |
+| State updated before checkpoint/outbox persistence | Previous checkpoint and retained Kafka input | Replay source; deduplicate click IDs within a retention horizon covering replay. |
+| Outbox append succeeds, its ACK lost | Immutable output ID mapped to version/payload | Reappend same ID; return the existing record. Do not allocate a new version for the retry. |
+| ClickHouse INSERT succeeds, response/ACK lost | Outbox record; sink may already contain that version | Replay same full aggregate/version; query collapses duplicates even after block-dedup expiry. |
+| Sink ACK received, relay crashes before marking delivered | Outbox still pending | Repeat identical insert; no additive double count. |
+| Checkpoint completes, sink unavailable | Checkpoint plus durable pending outbox | Drain outbox when recovered; expose reporting lag rather than silently dropping totals. |
+| Late correction replayed | Stable correction ID and shared aggregate version owner | Accept correction once, recompute total, publish a newer version; never repeat an anonymous delta. |
 
 ---
 
@@ -240,7 +256,7 @@ Why not write aggregations into Apache Cassandra or MongoDB?
 └─────────────────────┴──────────────────┴──────────────────┴────────────────────────────┘
 ```
 
-### ClickHouse `AggregatingMergeTree` Schema
+### ClickHouse Versioned Complete-Aggregate Schema
 
 ```sql
 CREATE TABLE ad_clicks_aggregated (
@@ -248,16 +264,23 @@ CREATE TABLE ad_clicks_aggregated (
     ad_id UInt64 CODEC(T64, LZ4),
     country LowCardinality(String),
     device_type LowCardinality(String),
-    total_clicks SimpleAggregateFunction(sum, UInt64),
-    total_spend_cents SimpleAggregateFunction(sum, UInt64)
-) ENGINE = AggregatingMergeTree()
+    aggregate_version UInt64,
+    total_clicks UInt64,
+    total_spend_cents UInt64
+) ENGINE = ReplacingMergeTree(aggregate_version)
 PARTITION BY toYYYYMM(window_start)
 PRIMARY KEY (window_start, ad_id)
 ORDER BY (window_start, ad_id, country, device_type);
 ```
 
 * **Vectorized Execution:** Uses CPU SIMD instructions to aggregate millions of numbers in hardware registers in parallel.
-* **`SimpleAggregateFunction`:** When ClickHouse merges background parts, it automatically combines `total_clicks` across rows sharing the same primary key!
+* **Query contract:** Background replacement is eventual. Billing/dashboard readers must collapse versions at query time (for example `FINAL`, evaluated for the deployed version/cost profile) before summing across windows:
+  ```sql
+  SELECT ad_id, sum(total_clicks), sum(total_spend_cents)
+  FROM ad_clicks_aggregated FINAL
+  GROUP BY ad_id;
+  ```
+  The full `ORDER BY` key includes all dimensions; every version of a window lands in the same partition, and equal versions carry identical totals. Production replication uses the corresponding replicated engine and durable insert settings. See [ReplacingMergeTree semantics](https://clickhouse.com/docs/engines/table-engines/mergetree-family/replacingmergetree).
 
 ---
 
@@ -277,13 +300,13 @@ ORDER BY (window_start, ad_id, country, device_type);
 * **Staff Answer:**
   1. **Identify the Bottleneck:** Check Flink Web UI backpressure metric. If the sink operator is 100% busy, the bottleneck is ClickHouse write throughput. If window operators are busy, the issue is data skew (a viral ad is saturating a single worker).
   2. **Mitigate Data Skew via Two-Phase Aggregation (Re-keying):**
-     - Phase 1: Pre-aggregate using a salted composite key: `(ad_id + "_" + random(0, 10), window)`. This scatters the viral ad across 10 workers, eliminating the hot worker hotspot!
+     - Phase 1: Pre-aggregate using deterministic salt `(ad_id, hash(click_id) % 10, window)` so replay sends the same event to the same sub-aggregate. This spreads sufficiently diverse clicks across 10 workers; measure actual skew.
      - Phase 2: Run a lightweight final aggregation across the 10 pre-aggregated results.
   3. **Switch State Backend to RocksDB:** Ensure Flink uses the out-of-core **Embedded RocksDB State Backend** rather than the in-memory JVM heap backend, allowing windows to spill safely to local NVMe SSD without crashing from Java OOM.
 
 ### Curveball 3: "A major ISP experiences an outage. When restored, 50 Million clicks from 4 hours ago hit the pipeline simultaneously. How do you prevent this from corrupting yesterday's billing numbers?"
 * **Staff Answer:**
-  1. Because our watermarks are bounded to 5 minutes, Flink immediately diverts all 50M late clicks to the **Side-Output Topic**.
+  1. Compare each window's end plus allowed lateness against the active-input watermark. Once the watermark passes that boundary, these 4-hour-old clicks go to the **Side-Output Topic**.
   2. They bypass the real-time live reporting pipeline, preventing latency spikes for active ads.
   3. A dedicated **Offline Reconciliation Batch Worker** consumes the side-output topic, verifies whether yesterday's billing invoice was already finalized, and either:
      - Applies a ledger credit adjustment to the advertiser's monthly bill.

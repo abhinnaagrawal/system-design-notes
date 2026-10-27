@@ -1,5 +1,9 @@
 # Chapter 11: Design a News Feed / Activity Stream System
 
+## Guarantees and assumptions
+Post creation ACK follows durable post/outbox commit; fan-out and cache updates are asynchronous. Deduplicate entries by post/recipient identity and choose fan-out strategy from celebrity skew and retention.
+**Principal IC exercise:** Recover partial celebrity fan-out while enforcing deletion visibility and preventing duplicate feed entries.
+
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar

@@ -1,5 +1,9 @@
 # Chapter 20: Design a Distributed Metrics Monitoring & Alerting System (Prometheus / Datadog / Gorilla)
 
+## Guarantees and assumptions
+Ingestion ACK follows the durable buffer/WAL write. Series/timestamp identities deduplicate samples, durable alert-transition IDs deduplicate notifications, and dashboards update asynchronously.
+**Principal IC exercise:** Inject a label-cardinality explosion during a zone outage; protect ingestion and distinguish missing data from healthy zero traffic.
+
 **Sources & Foundational References:**
 - [System Design Interview – An Insider's Guide: Vol 2 (Alex Xu & Sahn Lam)](https://bytebytego.com/)
 - [Gorilla: A Fast, Scalable, In-Memory Time Series Database (Pelkonen et al., Facebook / Meta)](https://www.vldb.org/pvldb/vol8/p1816-pelkonen.pdf)
@@ -105,12 +109,12 @@ Retention Window: 1 Year (Tiered)
   - Metric Series Pointer: 8 bytes
   - **Uncompressed Sample Size:** $\approx 24 \text{ bytes}$
   $$\text{Daily Raw Storage} = 86.4 \times 10^9 \times 24 \text{ bytes} \approx \mathbf{2.07 \text{ TB / day}} \quad (\mathbf{755 \text{ TB / year}})$$
-* **Gorilla TSDB Compression ($12\times$ reduction):**
-  - Gorilla compresses samples down to **1.37 bytes per sample**!
+* **Gorilla-style Sample Compression:**
+  - The [Gorilla paper (2015)](https://www.vldb.org/pvldb/vol8/p1816-teller.pdf) reports **1.37 bytes per sample** for its workload, about **17.5×** smaller than the 24-byte model above. Compression depends on sampling regularity and value entropy.
   $$\text{Daily Compressed Storage} = 86.4 \times 10^9 \times 1.37 \text{ bytes} \approx \mathbf{118.4 \text{ GB / day}}$$
   - **7-Day Raw Working Set in RAM / Fast NVMe:**
     $$118.4 \text{ GB/day} \times 7 \text{ days} \approx \mathbf{828 \text{ GB}}$$
-* *Staff Takeaway:* With Gorilla compression, the entire 7-day raw active metric set fits comfortably within **1 TB of RAM** across a small cluster!
+* *Staff Takeaway:* The estimated **828 GB** covers compressed sample payload. Total capacity also includes series/label indexes, active-series RAM, chunk headers, WAL, replication, query buffers, compaction overlap and failure headroom.
 
 ---
 

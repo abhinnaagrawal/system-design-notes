@@ -1,5 +1,7 @@
 # Layer 09: Security, Authentication (AuthN) & Authorization (AuthZ) Playbook
 
+> **Design inputs:** Trusted issuer/audience, key rotation, revocation freshness, tenant binding, permission consistency and key-refresh failure policy.
+
 > **The System Design Interview Lens:** In Staff/Principal interviews, security is not an afterthought; it is an architectural pillar. Junior engineers say *"I will validate JWTs in my service."* Staff/Principal engineers analyze **asymmetric cryptographic verification via JWKS**, **the token revocation dilemma**, **Envelope Encryption with KMS/HSM**, and **Relationship-Based Access Control (ReBAC / Google Zanzibar)** to solve fine-grained hierarchical permissions without hitting the "New Enemy" stale-read bug.
 
 ---
@@ -292,17 +294,17 @@ flowchart TD
 
 | Architecture / System | Security / Auth Challenge | Selected Architecture & Pattern |
 | :--- | :--- | :--- |
-| [**12. Chat System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/12.%20Chat%20System/README.md) | WebSocket Handshake Authentication | Validates short-lived JWT during HTTP `101 Switching Protocols` upgrade; binds user identity to persistent socket. |
-| [**15. Google Drive**](file:///Users/abhinnaagarwal/Documents/system-design-notes/15.%20Google%20Drive/README.md) | Hierarchical folder sharing & nested permissions | **ReBAC (Google Zanzibar / SpiceDB)** relationship tuples with Zookie consistency tokens. |
-| [**24. S3-like Object Storage**](file:///Users/abhinnaagarwal/Documents/system-design-notes/24.%20S3-like%20Object%20Storage/README.md) | Encrypted data chunks & bucket policies | **Envelope Encryption** (AWS KMS / HSM with local DEK per chunk) + IAM Policy engine. |
-| [**26. Payment System**](file:///Users/abhinnaagarwal/Documents/system-design-notes/26.%20Payment%20System/README.md) | PCI-DSS Compliance & Card Data Vault | Tokenization server isolates raw card numbers; payload encrypted via AES-GCM-256 with KMS Envelope Encryption. |
-| [**27. Digital Wallet**](file:///Users/abhinnaagarwal/Documents/system-design-notes/27.%20%20Digital%20Wallet/README.md) | Non-repudiation & Transaction Signing | Asymmetric ECDSA client digital signatures verifying transfer authorizations before ledger commit. |
+| [**12. Chat System**](../12.%20Chat%20System/Readme.md) | WebSocket Handshake Authentication | Validates short-lived JWT during HTTP `101 Switching Protocols` upgrade; binds user identity to persistent socket. |
+| [**15. Google Drive**](../15.%20Google%20Drive/Readme.md) | Hierarchical folder sharing & nested permissions | **ReBAC (Google Zanzibar / SpiceDB)** relationship tuples with Zookie consistency tokens. |
+| [**24. S3-like Object Storage**](../24.%20S3-like%20Object%20Storage/README.md) | Encrypted data chunks & bucket policies | **Envelope Encryption** (AWS KMS / HSM with local DEK per chunk) + IAM Policy engine. |
+| [**26. Payment System**](../26.%20Payment%20System/README.md) | PCI-DSS Compliance & Card Data Vault | Tokenization server isolates raw card numbers; payload encrypted via AES-GCM-256 with KMS Envelope Encryption. |
+| [**27. Digital Wallet**](../27.%20%20Digital%20Wallet/README.md) | Non-repudiation & Transaction Signing | Asymmetric ECDSA client digital signatures verifying transfer authorizations before ledger commit. |
 
 ---
 
 ### Cross-Repository Deep Dive Links
-*   Google Zanzibar Architecture: [`coding-practice: authz/zanzibar.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/authz/zanzibar.md)
-*   SpiceDB ReBAC Implementation: [`coding-practice: authz/spicedb.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/authz/spicedb.md)
-*   AWS IAM & Security Policies: [`coding-practice: cloud-aws/aws-iam.md`](file:///Users/abhinnaagarwal/Documents/coding-practice/systems-engineering/cloud-aws/aws-iam.md)
-*   Encryption & TLS Foundations: [`Core Concepts/Encryption and TLS/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Encryption%20and%20TLS/README.md)
-*   AuthN & AuthZ Core Concept: [`Core Concepts/Authentication and Authorization/README.md`](file:///Users/abhinnaagarwal/Documents/system-design-notes/Core%20Concepts/Authentication%20and%20Authorization/README.md)
+*   Google Zanzibar Architecture: [`coding-practice: authz/zanzibar.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/authz/zanzibar.md)
+*   SpiceDB ReBAC Implementation: [`coding-practice: authz/spicedb.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/authz/spicedb.md)
+*   AWS IAM & Security Policies: [`coding-practice: cloud-aws/aws-iam.md`](https://github.com/abhinnaagrawal/coding-practice/blob/HEAD/systems-engineering/cloud-aws/aws-iam.md)
+*   Encryption & TLS Foundations: [`Core Concepts/Encryption and TLS/README.md`](../Core%20Concepts/Encryption%20and%20TLS/README.md)
+*   AuthN & AuthZ Core Concept: [`Core Concepts/Authentication and Authorization/README.md`](../Core%20Concepts/Authentication%20and%20Authorization/README.md)
