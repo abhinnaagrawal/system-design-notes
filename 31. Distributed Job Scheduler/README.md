@@ -13,7 +13,7 @@ Based on the system design breakdown from **[System Design Fight Club - Atlassia
 | Dimension | Mid-Senior Level (L5) | Staff / Principal Level (L6+) |
 | :--- | :--- | :--- |
 | **Architectural Model** | Suggests a relational database where worker daemons run `SELECT ... FOR UPDATE` polling loops or relies on a basic Celery queue. | Categorizes workloads into Short-Lived Tasks ($<30\text{s}$) vs. Long-Running Distributed Workflows (DAGs / Temporal). Identifies that database polling collapses above 500 TPS and designs event-driven ingestion with Transactional Outbox + CDC. |
-| **Delayed Execution** | Polls future timestamps in SQL or maintains long-lived sleep threads inside application memory. | Evaluates memory-efficient time-indexed structures: Hashed Hierarchical Timing Wheels ($O(1)$ tick complexity) or Redis Sorted Sets (`ZSET` with score = epoch timestamp) with Lua atomic extraction. |
+| **Delayed Execution** | Polls future timestamps in SQL or maintains long-lived sleep threads inside application memory. | Compares hierarchical timing wheels (constant amortized placement at fixed depth, bucket-based expiry) with Redis ZSETs (timestamp-ordered lookup and atomic batch extraction). |
 | **Worker Failure & Split-Brain** | Relies on simple heartbeat timeouts. When a worker stops responding, immediately marks the job failed and restarts it on another worker. | Identifies the **Zombie Worker** anomaly (GC pause or network partition causes heartbeat loss; worker wakes up late and writes corrupted output). Solves it via **Monotonic Fencing Tokens** and conditional ACID writes. |
 | **Scale & Multi-Tenancy** | Puts all jobs into a single global FIFO queue; large tenants starve smaller tenants ("noisy neighbor" disaster). | Implements Multi-Tenant Fair-Share Scheduling (e.g. Deficit Round-Robin or partitioned Kafka topics per tenant tier) and mitigates the Midnight UTC Thundering Herd via schedule jitter. |
 
@@ -26,8 +26,8 @@ The following rubric outlines the exact behaviors and evidence an interviewer ev
 | Pillar | Staff/Principal Level Evidence in Distributed Job Schedulers |
 | :--- | :--- |
 | **Decision Making** | • Clarifies early: asks whether jobs are stateless micro-tasks ($<5\text{s}$) or multi-stage distributed DAG pipelines (ETL/Spark); clarifies execution SLA ($<1\text{s}$ dispatch vs. best-effort).<br>• Compares 6 credible architectures: DB Polling with `SKIP LOCKED`, Message Queues, Transactional Outbox, Redis ZSET Timers, Distributed Cron + Reaper, and Partitioned Shards.<br>• Justifies accepted tradeoffs: accepts at-least-once execution and requires idempotent task consumers rather than attempting impossible network-level exactly-once execution. |
-| **Technical Proficiency** | • Explains concurrency and locking mechanics: explains why `SELECT ... FOR UPDATE SKIP LOCKED` eliminates row lock contention but still saturates database connection pools and table indexes.<br>• Articulates timing data structures: contrasts Hierarchical Timing Wheels ($O(1)$ operations with cascading minute/hour wheels) against Redis Skip Lists ($O(\log N)$ ZSETs).<br>• Solves the dual-write problem: uses PostgreSQL Transactional Outbox + Debezium CDC to guarantee zero lost jobs between the status database and Kafka brokers. |
-| **Problem Solving & Analytical Thinking** | • Calculates worker capacity via Little's Law: $10,000\text{ TPS} \times 5\text{s average duration} = 50,000\text{ concurrent execution slots required}$.<br>• Derives metadata storage growth: $10,000\text{ TPS} \times 200\text{ bytes} \approx 2\text{ MB/sec} = 172.8\text{ GB/day}$; defines 14-day cold retention offload to S3/Parquet.<br>• Connects APIs, state machines (`PENDING` $\to$ `SCHEDULED` $\to$ `RUNNING` $\to$ `COMPLETED` / `FAILED`), heartbeat registries, and output storage tiers. |
+| **Technical Proficiency** | • Explains concurrency and locking mechanics: explains why `SELECT ... FOR UPDATE SKIP LOCKED` eliminates row lock contention but still saturates database connection pools and table indexes.<br>• Explains timer placement, minute/hour cascading, tick granularity and expiry-batch cost; compares them with Redis timestamp range queries.<br>• Solves the dual-write problem: uses PostgreSQL Transactional Outbox + Debezium CDC to guarantee zero lost jobs between the status database and Kafka brokers. |
+| **Problem Solving & Analytical Thinking** | • Calculates worker capacity via Little's Law: $10,000\text{ TPS} \times 5\text{s average duration} = 50,000\text{ concurrent execution slots required}$.<br>• Derives metadata storage growth: $10,000\text{ TPS} \times 200\text{ bytes} \approx 2\text{ MB/sec} = 172.8\text{ GB/day}$; defines 14-day cold retention offload to S3/Parquet.<br>• Connects APIs, state machines (`SCHEDULED` for future runs $\to$ `PENDING` when ready $\to$ `RUNNING` $\to$ `COMPLETED` / `FAILED`), heartbeat registries, and output storage tiers. |
 | **Operational Mindset** | • Solves the Zombie Worker split-brain: issues monotonic fencing tokens upon lease renewal so stale workers cannot overwrite newer worker output.<br>• Protects against Poison Pill jobs: automatically moves jobs failing $>3$ times to a Dead Letter Queue (DLQ) with alert webhooks to avoid killing worker pods in infinite crash loops.<br>• Implements POSIX `SIGTERM` 30-second graceful drain handling, worker container cgroup isolation (CPU/memory limits), and Kafka consumer lag-based autoscaling. |
 | **Adaptability & Collaboration** | • Responds constructively to curveballs: resolves the Midnight UTC Cron Thundering Herd (10,000 cron jobs firing at `00:00:00`) by introducing deterministic $\pm 60\text{s}$ schedule jitter.<br>• Balances short-term tactical delivery (e.g., PostgreSQL queue for MVP) with seamless migration path to partitioned Kafka when throughput crosses 5,000 TPS. |
 
@@ -247,7 +247,7 @@ end
 return jobs
 ```
 - **Why Redis ZSET?**
-  $O(\log N)$ insertion and range queries on timestamp indices entirely eliminate expensive relational table scans for future jobs.
+  Insert a deadline in $O(\log N)$ and retrieve $M$ due jobs in $O(\log N + M)$. The Lua script also removes those entries in $O(M \log N)$ and pushes them to the ready queue as one atomic batch.
 
 ---
 
@@ -362,12 +362,80 @@ Worker B: ───────────────────────�
 ---
 
 ### 2. Delayed Task Mechanics: Hierarchical Timing Wheels vs. Redis ZSET
-When managing millions of delayed timers (e.g., "remind user in 3 days"):
+Think of a timing wheel as a **clock whose slots hold lists of timers**. The clock hand visits a slot when its time arrives. Jobs sharing a deadline bucket share scheduling bookkeeping, while each job keeps its own timer entry.
 
 | Mechanism | Structure & Complexity | Memory / Scalability | Best Fit |
 | :--- | :--- | :--- | :--- |
-| **Redis ZSET** | Skip List + Hash Table. Insertion and Range extraction are $O(\log N)$. | Stored in Redis RAM. High CPU usage under millions of concurrent timer scans. | Up to 50k active timers with sub-second precision. |
-| **Hierarchical Timing Wheel (Kafka/Netty)** | Multi-level circular array buffers (Seconds Wheel $\to$ Minutes Wheel $\to$ Hours Wheel $\to$ Days Wheel). | $O(1)$ amortized insertion and $O(1)$ per-tick bucket processing. Minimal memory footprint. | Millions of concurrent timers with fixed tick granularities (e.g., 100ms or 1s). |
+| **Redis ZSET** | Insert $O(\log N)$; fetch $M$ due entries $O(\log N + M)$; the Lua example removes them in $O(M \log N)$. | $O(N)$ entries in Redis; dispatchers extract bounded batches over the network. | Shared timestamp-ordered scheduling with Redis-managed state. |
+| **Single hashed wheel (Netty)** | Circular bucket array plus a remaining-rounds counter per timer. Constant-time bucket placement; visiting a bucket examines its entries. | $O(N + B)$ for timers and buckets; long timers are revisited on wheel rotations. | Local I/O timeouts with a configured tick size. |
+| **Hierarchical wheel (Kafka)** | Several wheels at increasing resolutions. Timers cascade toward finer wheels as their deadlines approach. | $O(N + B)$; each timer passes through a bounded number of levels. | Large local timer populations spanning seconds through days. |
+
+#### A. Start with One Wheel
+
+Take **60 slots with a 1-second tick**:
+* Slot 0, slot 1, ... slot 59 each holds a list of timers.
+* The cursor advances one slot per second and wraps after a minute.
+* A deadline at `00:00:05` goes into slot 5.
+* Slot 5 is reused at `00:01:05`, `00:02:05`, and so on. The timer's full deadline and wheel level/round count distinguish these rotations.
+
+For a base tick $\Delta$ and $W$ slots, round a job deadline up to a tick and choose its slot:
+
+$$\text{deadlineTick} = \left\lceil \frac{\text{deadline since timer origin}}{\Delta} \right\rceil,\qquad
+\text{slot} = \text{deadlineTick} \bmod W.$$
+
+The wheel stores a job reference, deadline and linkage in that slot. On expiry, it hands the reference to the dispatcher.
+
+#### B. Add Coarser Wheels for Distant Deadlines
+
+A hierarchy parks distant timers in coarse buckets until they approach execution time. One possible layout is:
+
+| Level | Slots | Time per slot | Span per rotation |
+| :--- | :--- | :--- | :--- |
+| Seconds | 60 | 1 second | 1 minute |
+| Minutes | 60 | 1 minute | 1 hour |
+| Hours | 24 | 1 hour | 1 day |
+| Days | 32 | 24 hours | 32 days |
+
+Insert into the finest level whose span covers the remaining delay. When a coarse bucket opens, **cascade** its entries: recompute the remaining delay and move each timer into a finer wheel. Far-future jobs stay in durable storage until they enter the loaded horizon, or an implementation adds another overflow level.
+
+**Worked example: submit at `00:00:00`, execute at `02:03:05`.**
+
+| Time | Timer location / action | Remaining delay |
+| :--- | :--- | :--- |
+| `00:00:00` | Place in **hours slot 2** | 2 hours, 3 minutes, 5 seconds |
+| `02:00:00` | Hours slot 2 opens; move to **minutes slot 3** | 3 minutes, 5 seconds |
+| `02:03:00` | Minutes slot 3 opens; move to **seconds slot 5** | 5 seconds |
+| `02:03:05` | Seconds slot 5 opens; hand the job to the dispatcher | Due |
+
+The timer is examined at these cascade/expiry points instead of on every second tick. At a shared boundary, process coarser levels before finer ones so a timer can cascade and become due in the same tick.
+
+#### C. Cost, Granularity and Bursts
+
+* **Placement and cascading:** Linking a timer into its selected bucket takes $O(1)$; it moves through at most $L$ levels before expiry. With a fixed number of levels, placement/cascade bookkeeping is **amortized $O(1)$** per timer.
+* **Bucket processing:** Advancing a cursor is $O(1)$. Visiting a bucket with $b$ entries takes $O(b)$; a cascade moves each entry in the coarse bucket. If 10,000 jobs become due together, the dispatcher handles 10,000 jobs.
+* **Memory:** $O(N + B)$ for $N$ timer entries and $B$ total buckets. The example has **176 buckets** plus one small entry per loaded timer; job payloads remain in the job store.
+* **Precision:** A 1-second tick groups deadlines into 1-second intervals. For this chapter's sub-second dispatch target, choose a finer base tick, such as **100ms**, and size the wheel levels accordingly. A deadline at `12:00:00.250` rounds up to the `12:00:00.300` tick, adding 50ms before processing/queue delay.
+* **Dispatch latency:** Tick rounding, timer-loop/cascade backlog, ready-queue delay and worker availability contribute to start delay. Keep job execution on worker threads and hand due timers off in bounded batches.
+
+#### D. Kafka and Netty Implement Different Variants
+
+**Kafka's hierarchical timer** creates overflow wheels whose tick size equals the lower wheel's full span. It queues **bucket expirations** in a `DelayQueue`, then cascades their timers when those buckets expire. This skips empty tick intervals; registering/polling a bucket also has the delay queue's ordering cost.
+
+**Netty's `HashedWheelTimer`** uses one wheel and a remaining-rounds counter for timers beyond a rotation. Its 4.1 defaults are **100ms per tick and 512 slots**, giving **51.2 seconds per rotation**.
+
+Sources: [Kafka 3.9 timing wheel](https://github.com/apache/kafka/blob/3.9.0/server-common/src/main/java/org/apache/kafka/server/util/timer/TimingWheel.java), [Netty 4.1 timer API](https://netty.io/4.1/api/io/netty/util/HashedWheelTimer.html), and [Netty wheel/round-counter implementation](https://github.com/netty/netty/blob/netty-4.1.118.Final/common/src/main/java/io/netty/util/HashedWheelTimer.java).
+
+#### E. Fit the Wheel into the Durable Scheduler
+
+```text
+Durable scheduled runs -> Load owned near-future timers -> Timing wheel
+Timing wheel -> Conditional due transition + outbox -> Ready queue -> Worker claim
+```
+
+1. Persist the run ID, UTC `scheduled_at` and schedule version. Each scheduler loads timers for its assigned partitions and time horizon.
+2. Convert the remaining delay to a local monotonic deadline. When the timer fires, check the current schedule version and database-clock due time; re-arm a still-future run and discard a cancelled/superseded timer.
+3. In one transaction, transition the matching due run from `SCHEDULED` to `PENDING` and write its ready-queue outbox event. Workers then use the claim/attempt-token protocol above.
+4. On scheduler restart or partition reassignment, rebuild the wheel from durable scheduled runs, dispatch overdue runs and reload the future horizon. The conditional transition and stable run ID handle repeated timer delivery.
 
 ---
 
@@ -436,6 +504,6 @@ Workers listen for POSIX signals (`SIGTERM`). Upon receiving `SIGTERM`:
 | **2. Message Queue (RabbitMQ)** | $\sim 10,000\text{ TPS}$ | Low ($<10\text{ ms}$) | Immediate | ACK / NACK redelivery | Async microservice jobs |
 | **3. Transactional Outbox + CDC** | $\sim 25,000\text{ TPS}$ | Medium ($50\text{ ms}$) | Immediate | WAL guarantees zero loss | Mission-critical financial workflows |
 | **4. Redis Sorted Sets (ZSET)** | $\sim 50,000\text{ TPS}$ | Ultra-low ($<2\text{ ms}$) | Delayed (Future timestamps) | TTL + Persistence | High-volume delayed task timers |
-| **5. Hierarchical Timing Wheels** | $>100,000\text{ TPS}$ | Sub-millisecond ($O(1)$) | High-volume Timers | In-memory with snapshotting | Low-latency timer infrastructure |
+| **5. Hierarchical Timing Wheels** | Sized by expiry/cascade batches and dispatch capacity | Configured tick + processing/queue delay | High-volume Timers | Rebuild from durable scheduled runs | Large timer populations across multiple time ranges |
 | **6. Distributed Cron + Reaper** | $\sim 20,000\text{ TPS}$ | Low | Recurring Cron + Delayed | Heartbeat Registry + Reaper | Production CI/CD & batch systems |
 | **7. Sharded Partitioned Pools** | $>100,000\text{ TPS}$ | Low | Immediate & Batched | Partition reassignment | Cloud-scale FaaS (AWS Lambda scale) |

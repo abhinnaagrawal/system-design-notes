@@ -126,7 +126,11 @@ Before partitioning tables horizontally across shards, apply **Database Federati
   ```
 * **Solution B: Probabilistic Early Expiration (XFetch Algorithm)**
   Instead of waiting for the key to expire, clients calculate a dynamic probability of recomputing the cache item before its actual TTL:
-  $$-\Delta \cdot \beta \cdot \ln(U) \ge \text{expires\_at} - \text{now}, \quad 0<U<1$$
+
+  $$
+  -\Delta \cdot \beta \cdot \ln(U) \ge \text{expires\_at} - \text{now}, \quad 0<U<1
+  $$
+
   Here `expires_at` is an absolute expiry timestamp, $\Delta>0$ the measured recomputation duration in the same time units, and $\beta>0$ a tuning factor. The negative logarithm is positive. Early refresh reduces miss/stampede risk but cannot guarantee zero misses or a single refresher; retain coalescing, TTL and a refresh-failure policy.
 
 ---

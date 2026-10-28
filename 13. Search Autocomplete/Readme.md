@@ -1,14 +1,14 @@
 # Chapter 13: Design a Search Autocomplete System (Typeahead Suggestions)
 
 ## Guarantees and assumptions
-Each query reads one immutable trie generation. Build jobs persist validated artifacts and activation records, publish the version pointer atomically, and retain old generations until their readers finish.
-**Principal IC exercise:** Roll back a corrupt trie snapshot while readers span two generations; specify reference/epoch-based reclamation and freshness monitoring.
+Each query reads one immutable prefix-index generation, implemented as a top-K trie or weighted FST. Build jobs persist validated artifacts and activation records, publish the version pointer atomically, and retain old generations until their readers finish.
+**Principal IC exercise:** Roll back a corrupt index snapshot while readers span two generations; specify reference/epoch-based reclamation and freshness monitoring.
 
 ---
 
 ## 1. Executive Interview Framing & Staff-Level Bar
 
-Typeahead / Autocomplete is a core feature in Google, Amazon, YouTube, and Jira. While mid-level candidates describe a standard Trie data structure, **Staff and Principal Engineers (L6+, P60) are evaluated on how they handle read-heavy ultra-low latency SLAs (p99 $< 15\text{ms}$), atomic zero-lock Trie memory updates, hybrid trending stream integration, and client-side network traffic reduction**:
+Typeahead / Autocomplete is a core feature in Google, Amazon, YouTube, and Jira. While mid-level candidates describe a standard Trie data structure, **Staff and Principal Engineers (L6+, P60) are evaluated on how they handle read-heavy ultra-low latency SLAs (p99 $< 15\text{ms}$), trie/FST memory and ranking trade-offs, immutable index publication, hybrid trending stream integration, and client-side network traffic reduction**:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
@@ -38,18 +38,18 @@ Typeahead / Autocomplete is a core feature in Google, Amazon, YouTube, and Jira.
 ├─────────────────────────┬──────────────────────────────────────────────────────────────────────────────┤
 │ Pillar                  │ What the Interviewer Listens For (Evidence)                                  │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
-│ 1. Decision Making      │ • In-Memory Precomputed Top-K Trie vs DB `LIKE` queries vs Elasticsearch.     │
+│ 1. Decision Making      │ • Top-K trie vs weighted FST / completion suggester vs DB `LIKE` queries.     │
 │                         │ • Batch Offline Trie Build vs Real-Time Streaming Ingestion.                 │
 │                         │ • Evaluates trade-offs between global search popularity and personalized history│
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
-│ 2. Technical            │ • Trie node structure storing Top-K precomputed suggestions ($O(L)$ query).   │
+│ 2. Technical            │ • Precomputed trie lists vs weighted FST traversal and ranked enumeration.  │
 │    Proficiency          │ • Double Buffering & Atomic Pointer Swapping in RAM for zero-lock updates.   │
 │                         │ • Count-Min Sketch / Sliding Window Flink for tracking real-time trends.     │
 │                         │ • Client debouncing (300ms), abort controllers, and prefix LRU caching.      │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 3. Problem Solving &    │ • Decomposes into Data Collection, Trie Build, Trie Cache, & Query Service.  │
 │    Analytical Thinking  │ • Calculates 2 Billion queries/day (peak 70,000 QPS) and sizes Trie in RAM   │
-│                         │   ($\approx 30\text{ GB}$) using prefix hashing for uniform shard balance.   │
+│                         │   and compares trie allocations with a compiled FST's memory footprint.   │
 ├─────────────────────────┼──────────────────────────────────────────────────────────────────────────────┤
 │ 4. Operational          │ • Trie snapshotting to S3 and fast cold-start in-memory rehydration.         │
 │    Mindset              │ • Immediate suppression filter for offensive/blacklisted keywords.           │
@@ -117,7 +117,7 @@ Assume we index the top **100 Million unique search queries**:
 * Total nodes across 100M queries (with common prefix sharing): $\approx 300\text{ Million nodes}$.
 * **Total Trie Memory Footprint:**
   $$300,000,000 \text{ nodes} \times 65 \text{ bytes} \approx 19.5 \text{ GB RAM}$$
-  *Staff Takeaway:* **The entire global autocomplete Trie easily fits into the RAM of a single 32 GB or 64 GB cloud instance!** We replicate this in-memory Trie across a cluster of 10-20 read servers for high availability and load distribution.
+  *Staff Takeaway:* The node estimate is **19.5 GB**. Budget query strings, scores, allocator overhead, and simultaneous old/new generations during reloads as well. A weighted FST reduces duplicated suffix structure and per-prefix suggestion lists; size it from the compiled artifact plus serving buffers. Replicate the chosen index across read servers for availability and throughput.
 
 ---
 
@@ -147,34 +147,16 @@ Authorization: Bearer <user_jwt_token>
 
 ## 5. Architectural Deep Dives: Staff & SDFC Insights
 
-### 5.1 Data Structure Tradeoffs: In-Memory Trie vs ElasticSearch vs Redis
+### 5.1 Choosing the Prefix Index: Top-K Trie vs Weighted FST
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                              STORAGE ENGINE COMPARISON                                 │
-├─────────────────────┬──────────────────┬───────────────────────────────────────────────┤
-│ Technology          │ Query Latency    │ Staff Engineering Tradeoff                    │
-├─────────────────────┼──────────────────┼───────────────────────────────────────────────┤
-│ ElasticSearch       │ 25ms - 50ms      │ • Too slow for sub-15ms p99 SLA. Lucene       │
-│ (Edge-Ngrams)       │ (Disk / Inverted)│   inverted index lookups suffer disk & CPU    │
-│                     │                  │   overhead on high QPS keystroke bursts.      │
-├─────────────────────┼──────────────────┼───────────────────────────────────────────────┤
-│ Redis Sorted Sets   │ 5ms - 10ms       │ • Fast, but memory inefficient. Prefix seek   │
-│ (`ZRANGEBYLEX`)     │ (RAM Skiplist)   │   via lexical ranges doesn't easily store     │
-│                     │                  │   hierarchical Top-K at every prefix branch.  │
-├─────────────────────┼──────────────────┼───────────────────────────────────────────────┤
-│ In-Memory Trie with │ 1ms - 3ms        │ • RECOMMENDED (Gold Standard): Traverses only │
-│ Precomputed Top-K   │ (Direct RAM)     │   depth $L$ (length of prefix). Completely    │
-│                     │                  │   independent of total queries in system ($N$)│
-└─────────────────────┴──────────────────┴───────────────────────────────────────────────┘
-```
+The base index maps a prefix to popular query candidates. A **trie with precomputed top-K lists** favors direct retrieval for a fixed result budget. A **weighted Finite State Transducer (FST)** favors a compact vocabulary with ranked traversal. Both feed the same trending, personalization and moderation pipeline.
 
-#### Why Precomputing Top-K at Every Node is Mandatory
+#### Precomputed Top-K Trie
 * **Naive Trie Retrieval:**
   1. Traverse down to prefix node (e.g., node `'w'` in `"tw"`): $O(L)$ where $L$ is prefix length.
-  2. Perform a tree traversal (DFS/BFS) across the entire subtree to collect all possible terminal words: $O(C)$ where $C$ can be millions of children.
-  3. Sort all children using a Min-Heap to find top 5: $O(C \log K)$.
-  4. *Result:* Latency spikes to **200ms+**, completely failing the SLA!
+  2. Traverse the subtree to collect terminal queries: $O(C)$ for $C$ visited descendant nodes.
+  3. Select the top 5 using a size-K min-heap: up to $O(C \log K)$.
+  4. Retrieval work grows with the number of matching completions, especially for short prefixes.
 * **Optimized Precomputed Node:**
   - Store the top 5 suggestions directly inside each node during offline Trie construction:
     ```go
@@ -183,36 +165,66 @@ Authorization: Bearer <user_jwt_token>
         topK     []Suggestion // Fixed size: 5 elements
     }
     ```
-  - At query time: Walk down to the prefix node in $L$ steps. Return `node.topK` immediately in **$O(1)$**!
-  - **Total Search Time:** $O(L)$ where $L \le 20 \implies < 1\text{ millisecond}$.
+  - At query time: Walk to the prefix node in $O(L)$, then read the stored list and emit $K$ entries.
+  - **Total retrieval work:** $O(L + K)$, or $O(L)$ with fixed $K$, plus the bytes needed to return the suggestion strings.
 
 ```mermaid
 graph TD
     Root["Root ()"]
     T["'t'<br/>[twitter, twitch, twilight, twin, target]"]
     W["'w'<br/>[twitter, twitch, twilight, twin, twisters]"]
-    I["'i'<br/>[twitter, twitch, twilight, twin, twilio]"]
+    I["'i'<br/>[twitter, twitch, twilight, twin, twisters]"]
     
     Root --> T
     T --> W
     W --> I
 ```
 
+#### Weighted FST: Shared Suffixes and Ranked Paths
+
+A finite state transducer maps an input string to an output. For weighted autocomplete, the input is a normalized query and the output encodes its ranking cost. Convert popularity weights to costs with **smaller cost = stronger suggestion**, for example `cost = C - weight` with a fixed `C` at least as large as the maximum weight. Decode `weight = C - cost` before blending with trending and history scores.
+
+1. **Share prefixes and equivalent suffix states.** A trie shares beginnings. A minimized FST also merges states whose remaining suffixes and residual outputs match. Queries such as `monday`, `someday` and `sunday` can reuse the final `day` path.
+2. **Factor costs across the path.** Numeric outputs are distributed over arcs and final states; adding them reconstructs each query's cost. With costs `sunday=1`, `someday=3` and `monday=5`, the shared `s` path can carry cost `1`, the branch toward `omeday` adds `2`, and the branch toward `unday` adds `0`. The shared ending preserves each query's distinct total.
+3. **Traverse the prefix, then enumerate the best completions.** After matching `s`, a best-first traversal explores the lowest-cost paths and returns `sunday` before `someday`. Cost pushing factors the best reachable cost into earlier outputs, giving the search a lower bound for unfinished paths. The queue stops once it has the requested top-K complete paths under the base ranking.
+4. **Compile a compact, immutable artifact.** Aggregate and normalize queries, sort the inputs, then compile and minimize the FST. Lucene's compiler builds incrementally from sorted terms and writes a compact serialized representation.
+
+Lucene's [WFSTCompletionLookup](https://lucene.apache.org/core/9_12_3/suggest/org/apache/lucene/search/suggest/fst/WFSTCompletionLookup.html) implements prefix traversal followed by shortest-path completion lookup. Its [FSTCompiler](https://lucene.apache.org/core/9_12_3/core/org/apache/lucene/util/fst/FSTCompiler.html) documents sorted-input construction and serialization.
+
+#### Trie vs FST: The Design Decision
+
+| Dimension | Trie with top-K per node | Weighted FST |
+| :--- | :--- | :--- |
+| **Sharing** | Common prefixes | Common prefixes and equivalent suffix/output states |
+| **Ranking storage** | A precomputed list at each prefix node | Factored path outputs, with ranked enumeration at lookup |
+| **Memory** | Nodes, child links and repeated top-K references | Compact states/arcs and outputs; traversal uses a candidate queue |
+| **Lookup** | $O(L + K)$ to reach the node and emit its cached results | Prefix traversal plus best-first search; work depends on branching and requested K |
+| **Result budget** | K is bounded by the list size chosen at build time | K can vary at lookup time |
+| **Build** | Insert queries, aggregate scores and compute each node's top-K | Sort query/cost pairs, factor outputs and minimize states |
+| **Updates in this design** | Build and publish a new immutable generation | Build and publish a new immutable generation |
+| **Best fit** | Fixed small K, direct lookup and enough RAM for cached lists | Large vocabulary, tighter memory budget or variable K |
+
+**Serving options:**
+* **Custom query fleet:** Start with the precomputed trie for the fixed top-5 API; use a weighted FST when compactness or variable candidate counts become important. Both use the publication protocol in Section 5.2.
+* **Elasticsearch completion suggester:** Its dedicated in-memory completion index uses Lucene's FST-based suggestion machinery. Index inputs and weights; newly indexed suggestions become visible on **refresh**. Segment merges consolidate indexes, while refresh controls near-real-time visibility. See [Elasticsearch completion](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/search-suggesters#completion-suggester) and [Lucene NRTSuggester](https://lucene.apache.org/core/9_12_3/suggest/org/apache/lucene/search/suggest/document/NRTSuggester.html).
+* **Edge n-grams:** Use an inverted-index search path when autocomplete needs broader text-query behavior and relevance scoring.
+* **Redis sorted sets:** `ZRANGEBYLEX` retrieves lexicographic prefixes from an equal-score set; popularity ranking needs a separate candidate-ranking step or precomputed per-prefix lists.
+
 ---
 
-### 5.2 The Write Path: Atomic Zero-Lock Pointer Swapping (Double Buffering)
+### 5.2 The Write Path: Immutable Generations and Atomic Pointer Swapping
 
 A classic junior pitfall: *"When new queries arrive, update the Trie node counters in real time."*
 * **The Lock Contention Disaster:** If a Trie server is handling 30,000 reads/sec, acquiring a write lock on the root node to update query frequencies causes severe **read thread starvation and latency spikes**.
 * **The Staff Solution: Atomic Pointer Swap (Double Buffering in RAM)**
-  1. The offline data pipeline builds a brand new immutable Trie in the background.
-  2. Save an immutable versioned artifact plus checksum, schema/tokenizer version, source cutoff, and ranking-policy version; validate before publishing the activation manifest.
+  1. The offline pipeline aggregates query frequencies and builds a new immutable index. For a trie, compute top-K lists; for an FST, sort normalized query/cost pairs and compile the artifact.
+  2. Save an immutable versioned artifact plus checksum, schema/tokenizer version, source cutoff, ranking-policy version and score/cost encoding; validate before publishing the activation manifest.
   3. The query server downloads and validates the named generation into a secondary memory buffer. Reserve peak memory for both generations plus readers still holding older ones.
   4. The server executes an **Atomic Pointer Swap** using language memory barriers (e.g. Go `atomic.StorePointer` or C++ `atomic_store`):
      ```go
-     atomic.StorePointer(&activeTriePointer, unsafe.Pointer(newTrie))
+     atomic.StorePointer(&activeIndexPointer, unsafe.Pointer(newIndex))
      ```
-  5. Each request captures one generation pointer for its entire lookup. Reclaim old tries after their readers finish, using garbage-collected strong references or explicit reference counts/epochs/RCU.
+  5. Each request captures one generation pointer for its entire lookup. Reclaim the old trie/FST after its readers finish, using garbage-collected strong references or explicit reference counts/epochs/RCU.
   6. Record the active generation per replica; activation is atomic **per process**, not globally simultaneous. Idempotently retry the same manifest version and retain a known-good prior artifact for rollback.
 
 ```mermaid
@@ -222,11 +234,11 @@ sequenceDiagram
     participant S3 as Amazon S3 (Artifact Store)
     participant Server as Autocomplete Read Server (RAM)
 
-    Pipeline->>S3: Upload new daily Trie snapshot (trie_v2.bin)
-    Server->>S3: Download trie_v2.bin into secondary RAM
-    Note over Server: Active Read Threads are reading from trie_v1<br/>Zero locks held!
-    Server->>Server: Atomic Pointer Swap: currentTrie = trie_v2
-    Note over Server: All new queries instantly read trie_v2.<br/>trie_v1 garbage collected after in-flight reads complete.
+    Pipeline->>S3: Upload immutable trie/FST artifact (index_v2.bin)
+    Server->>S3: Download and validate index_v2.bin
+    Note over Server: Active requests retain index_v1
+    Server->>Server: Atomic Pointer Swap: currentIndex = index_v2
+    Note over Server: New requests use index_v2.<br/>Reclaim index_v1 after its readers finish.
 ```
 
 ---
@@ -246,11 +258,11 @@ flowchart TD
 
     subgraph QueryExecution["Blended Query Execution Tier"]
         ClientReq["User types prefix 'ea'"] --> QuerySvc["Query Service"]
-        QuerySvc --> StaticTrie["1. In-Memory Static Trie<br/>(Global Historical)"]
+        QuerySvc --> BaseIndex["1. In-Memory Trie / FST<br/>(Global Historical)"]
         QuerySvc --> RedisTrending["2. Fetch Trending Boost<br/>(Spiking Keywords)"]
         QuerySvc --> UserHistory["3. User Recent Searches<br/>(Redis Hash)"]
         
-        StaticTrie --> Blending["Result Blending & Deduplication Engine"]
+        BaseIndex --> Blending["Result Blending & Deduplication Engine"]
         RedisTrending --> Blending
         UserHistory --> Blending
         
@@ -264,13 +276,13 @@ flowchart TD
 2. **Apache Flink** calculates the *velocity of change* over a 10-minute sliding window using a **Count-Min Sketch**:
    $$\text{Velocity} = \frac{\text{Current 10-min Frequency}}{\text{Historical Baseline Frequency}}$$
 3. If an unrecognized query experiences an explosive velocity spike ($> 20\text{x}$ baseline), it is added to the **Redis Trending Sorted Set** with a 1-hour TTL.
-4. The Query Service fetches static Trie candidates and injects the trending keywords into the top slot.
+4. The Query Service fetches base candidates from the trie/FST, blends them with trending keywords and user history, then deduplicates, filters and ranks the final suggestions. The base index supplies historical popularity; the live overlay supplies freshness between rebuilds.
 
 ---
 
-### 5.4 Sharding the Trie: Avoiding the Skew Trap
+### 5.4 Sharding the Prefix Index: Avoiding the Skew Trap
 
-If the Trie grows too large to fit on a single machine or needs multi-region partitioning:
+If the trie/FST grows too large for a single machine or needs multi-region partitioning:
 * **The Flaw of Alphabetical Sharding (`A-M` vs `N-Z`):**
   - Search distributions are wildly skewed. In English, words starting with `S`, `T`, `C`, and `A` account for over **50% of all searches**, while `Q`, `X`, `Z` account for $< 1\%$.
   - Servers holding `S` and `T` will experience CPU meltdown while `X` and `Z` sit completely idle!
@@ -311,9 +323,9 @@ flowchart TD
     end
 
     subgraph QueryFleet["Autocomplete Query Fleet"]
-        Node1["Query Node 1<br/>(In-Memory Trie v2)"]
-        Node2["Query Node 2<br/>(In-Memory Trie v2)"]
-        NodeN["Query Node N<br/>(In-Memory Trie v2)"]
+        Node1["Query Node 1<br/>(Trie / FST Generation v2)"]
+        Node2["Query Node 2<br/>(Trie / FST Generation v2)"]
+        NodeN["Query Node N<br/>(Trie / FST Generation v2)"]
     end
 
     subgraph CacheAndTrending["Real-Time Cache & Personalization"]
@@ -325,8 +337,8 @@ flowchart TD
     subgraph DataCollection["Data Gathering & Batch Pipeline"]
         KafkaLogs["Kafka: search-telemetry"]
         FlinkAgg["Apache Flink (Streaming Aggregator)"]
-        SparkBatch["Apache Spark (Daily Trie Builder)"]
-        S3Artifacts["Amazon S3 (Trie Snapshots)"]
+        SparkBatch["Apache Spark (Daily Prefix-Index Builder)"]
+        S3Artifacts["Amazon S3 (Trie / FST Artifacts)"]
     end
 
     Browser --> ALB
@@ -352,7 +364,7 @@ flowchart TD
 
 ### 7.1 Instant Blacklist Suppression (Takedown Requests)
 * **Scenario:** A legal takedown or hate-speech violation requires removing a term immediately.
-* **The Problem:** The batch Trie will contain this term until tomorrow's Spark rebuild.
+* **The Problem:** The base trie/FST will contain this term until the next Spark rebuild.
 * **The Solution (The Bloom Filter & Redis Blacklist):**
   - Maintain a Redis Set and local in-memory Bloom filter of banned terms.
   - Before returning suggestions to the user, filter the Top-5 results:
@@ -364,12 +376,12 @@ flowchart TD
         }
     }
     ```
-  - Terms are suppressed in $< 1\text{ millisecond}$ globally without rebuilding the Trie.
+  - Query-time suppression applies as blacklist updates reach each serving replica, independently of the trie/FST rebuild schedule.
 
 ### 7.2 Personalization Cold Start
 * When an unauthenticated or brand new user queries autocomplete:
   - System bypasses user history lookups.
-  - Blends **Geo-Localized Top Queries** (e.g., users in the UK see UK-specific retail suggestions) with the global historical Trie.
+  - Blends **Geo-Localized Top Queries** (e.g., users in the UK see UK-specific retail suggestions) with the global historical trie/FST.
 
 ---
 
@@ -377,9 +389,9 @@ flowchart TD
 
 | Problem Space | Junior / Senior Approach | Staff / Principal Approach |
 | :--- | :--- | :--- |
-| **Data Structure** | ElasticSearch or raw Trie traversal | **In-memory Trie with precomputed Top-K at every node:** Constant $O(L)$ latency. |
-| **Trie Updates** | Mutex write locks on live nodes | **Atomic Pointer Swap (Double Buffering):** Background rebuild with zero read locks. |
-| **Breaking Topics** | Weekly MapReduce batch | **Hybrid Pipeline:** Batch Spark Trie + Flink real-time velocity stream with Count-Min Sketch. |
+| **Data Structure** | Raw prefix scan or full subtree traversal | **Precomputed top-K trie** for fixed-size direct lookup; **weighted FST** for compact storage and ranked enumeration. |
+| **Index Updates** | Mutex write locks on live nodes | **Immutable generations + atomic publication:** Build off-path, validate and reclaim after readers finish. |
+| **Breaking Topics** | Weekly MapReduce batch | **Hybrid Pipeline:** Batch trie/FST + Flink real-time velocity stream with Count-Min Sketch. |
 | **Client Ingress** | Network call on every keystroke | **Client Debouncing (50ms) + Request AbortController + Local LRU Cache:** 60% traffic reduction. |
 | **Sharding** | Alphabetical (A-Z) | **Consistent Prefix Hashing with Historical Weighting:** Prevents hot-spot skew. |
-| **Moderation** | Rebuild Trie on delete | **In-Memory Bloom Filter / Redis Blacklist:** Immediate sub-millisecond term suppression. |
+| **Moderation** | Rebuild the base index on delete | **Query-time blacklist overlay:** Suppress terms as updates reach serving replicas. |

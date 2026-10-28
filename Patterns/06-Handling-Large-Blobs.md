@@ -149,7 +149,11 @@ Never serve raw media files directly from object storage to viewers! Place a CDN
 In cloud file drives (Dropbox, Google Drive), storing duplicate copies of popular files (e.g., standard OS ISOs, viral videos, textbook PDFs) wastes petabytes of storage.
 * **The Mechanism:** Split incoming files into fixed (4MB) or variable-sized (Rabin fingerprinting) blocks.
 * Compute the **cryptographic hash (SHA-256)** of each block:
-  $$\text{Block ID} = \text{SHA-256}(\text{Block Bytes})$$
+
+  $$
+  \text{Block ID} = \text{SHA-256}(\text{Block Bytes})
+  $$
+
 * **Storage Check:** Query the metadata database:
   ```sql
   SELECT block_id FROM blocks WHERE block_id = 'e3b0c44298fc1c149afb...';

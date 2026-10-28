@@ -169,8 +169,12 @@ When User A publishes a message intended for User B, how does the system locate 
 ### Deep Dive 1: The Reconnection Storm (Thundering Herd)
 * **The Failure Mode:** When an edge gateway node restarts or a network partition heals, tens of thousands of client connections reconnect simultaneously, overwhelming TLS termination proxies and backend databases.
 * **The Solution:**
-  1. **Exponential Backoff with Full Jitter:** 
-     $$\text{Sleep} = \text{random}(0, \, \min(M, \, B \times 2^{\text{attempt}}))$$
+  1. **Exponential Backoff with Full Jitter:**
+
+     $$
+     \text{Sleep} = \text{random}(0, \, \min(M, \, B \times 2^{\text{attempt}}))
+     $$
+
      Adding random jitter desynchronizes clients and spreads the reconnect wave across seconds.
   2. **Rate Limiting at Ingress / API Gateway:** Enforce token-bucket limits on connection establishment rates per second.
 

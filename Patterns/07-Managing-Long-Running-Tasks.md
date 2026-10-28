@@ -42,7 +42,7 @@ sequenceDiagram
     Relay->>Queue: Publish job_456 (may repeat)
 
     Worker->>Queue: Pull job message
-    Worker->>DB: Conditional claim; increment attempt token
+    Worker->>DB: Conditional claim and increment attempt token
     Note over Worker: Long calculation executes...
     Worker->>DB: UPDATE jobs SET progress=50%
     Note over Worker: Task finishes successfully
@@ -110,19 +110,40 @@ In interviews, calculate exact worker pool sizing using Donne Martin's capacity 
   * Average transcoding execution time $= 60$ seconds per video.
   * Traffic spike factor $= 3\times$ average load.
 * **Calculations:**
-  $$\text{Average Ingestion Rate} = \frac{100{,}000 \text{ jobs}}{86{,}400 \text{ sec}} \approx 1.16 \text{ jobs/sec}$$
-  $$\text{Peak Ingestion Rate} = 1.16 \times 3 \approx 3.5 \text{ jobs/sec}$$
-  $$\text{Concurrent Workload at Peak} = \text{Peak Ingestion} \times \text{Execution Duration} = 3.5 \text{ jobs/sec} \times 60 \text{ sec} = 210 \text{ active jobs}$$
+
+  $$
+  \text{Average Ingestion Rate} = \frac{100{,}000 \text{ jobs}}{86{,}400 \text{ sec}} \approx 1.16 \text{ jobs/sec}
+  $$
+
+  $$
+  \text{Peak Ingestion Rate} = 1.16 \times 3 \approx 3.5 \text{ jobs/sec}
+  $$
+
+  $$
+  \begin{aligned}
+  \text{Concurrent Workload at Peak}
+    &= \text{Peak Ingestion} \times \text{Execution Duration} \\
+    &= 3.5 \text{ jobs/sec} \times 60 \text{ sec} \\
+    &= 210 \text{ active jobs}
+  \end{aligned}
+  $$
+
 * **Worker Sizing:**
   * If 1 worker container (with 4 vCPU, 8GB RAM) processes 2 transcoding jobs concurrently:
-    $$\text{Required Worker Pods} = \frac{210 \text{ active jobs}}{2 \text{ jobs/worker}} = 105 \text{ worker pods at peak}$$
+
+    $$
+    \text{Required Worker Pods} = \frac{210 \text{ active jobs}}{2 \text{ jobs/worker}} = 105 \text{ worker pods at peak}
+    $$
 
 ---
 
 ### C. Worker Autoscaling Strategy
 * **Anti-Pattern:** Autoscaling worker pods based on CPU or memory utilization. If workers are waiting on I/O or network calls, CPU may be low even though the queue is backing up!
 * **Staff Pattern:** Autoscale based on **Queue Backlog Lag**:
-  $$\text{Target Workers} = \frac{\text{Approximate Number of Visible Messages}}{\text{Acceptable Wait Time per Job} \times \text{Worker Processing Rate}}$$
+
+  $$
+  \text{Target Workers} = \frac{\text{Approximate Number of Visible Messages}}{\text{Acceptable Wait Time per Job} \times \text{Worker Processing Rate}}
+  $$
 
 ---
 

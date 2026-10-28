@@ -151,7 +151,13 @@ When write spikes threaten database availability, use rate limiters to enforce b
 * **The Problem:** A celebrity account or viral tweet (`post_id = 'VIRAL_999'`) receives 50,000 comment writes per second. Even in a sharded cluster, all 50,000 writes hash to the exact same shard node, taking down that instance.
 * **The Fix (Key Salting):**
   * When writing, append a random integer suffix between $0$ and $N-1$:
-    $$\text{Partition Key} = \text{post\_id} + \text{"\#"} + \text{random}(0, 9)$$
+
+    ```python
+    import random
+
+    partition_key = f"{post_id}#{random.randint(0, 9)}"
+    ```
+
   * The writes are now evenly scattered across 10 distinct physical shards!
   * **Read Path:** When fetching comments or total comment count, the application queries all 10 salted keys in parallel (`VIRAL_999#0` through `VIRAL_999#9`) and sums the result in memory.
 

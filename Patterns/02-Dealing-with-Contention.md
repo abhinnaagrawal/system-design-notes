@@ -200,7 +200,10 @@ Even within a single relational database, picking the wrong transaction isolatio
 ## 5. CAP/PACELC & Multi-Master Write Conflict Resolution
 
 When contention spans multi-region active-active databases, network partitions force a choice between **Consistency** and **Availability** (CAP):
-$$\text{PACELC: If Partition (P) } \to \text{ Availability (A) vs Consistency (C)}; \quad \text{Else (E) } \to \text{ Latency (L) vs Consistency (C)}$$
+
+$$
+\text{PACELC: If Partition (P) } \to \text{ Availability (A) vs Consistency (C)}; \quad \text{Else (E) } \to \text{ Latency (L) vs Consistency (C)}
+$$
 
 If you choose Availability (AP / Eventual Consistency), concurrent writes across data centers will conflict. How do you resolve them?
 
